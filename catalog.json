@@ -1,6 +1,6 @@
 {
   "name": "Mod Catalog",
-  "description": "Community mod catalog for ModManager (and anyone else who wants the mods) [ci-test].",
+  "description": "Community mod catalog for ModManager (and anyone else who wants the mods).",
   "mods": [
     {
       "id": "70397db8-f70a-4f85-a17a-d3e3ab1d5067",
