@@ -24,7 +24,7 @@ CATALOG = ROOT / "catalog.json"
 
 # Top-level catalog identity (edit here, not in catalog.json).
 CATALOG_NAME = "Mod Catalog"
-CATALOG_DESCRIPTION = "Community mod catalog for ModManager (and anyone else who wants the mods) [ci-test]."
+CATALOG_DESCRIPTION = "Community mod catalog for ModManager (and anyone else who wants the mods)."
 
 IMAGE_EXT = {"image/png": ".png", "image/jpeg": ".jpg"}
 
