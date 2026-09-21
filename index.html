@@ -59,8 +59,8 @@
     .cover {
         position: relative;
         width: 90px;
-        height: 90px;
-        margin: 10px 0;
+        align-self: stretch;   /* full card height: no top/bottom margin */
+        margin: 0;
         border-radius: 4px;
         overflow: hidden;
         flex: none;
@@ -106,9 +106,13 @@
         overflow: hidden;
         text-overflow: ellipsis;
     }
+    /* No fixed width: the column sizes to max(button, hint) and hugs the
+       right edge, so the button's right margin (12) equals the column's
+       top/bottom margin (12) — same rule as BrowseModCard. The hint centers
+       under the button and grows left (never past the button's right edge)
+       when wider. */
     .dl {
-        width: 116px;
-        margin: 12px;
+        margin: 0 12px 12px 12px;
         display: flex;
         flex-direction: column;
         align-items: center;
