@@ -1,0 +1,41 @@
+name: Build catalog
+
+# Regenerates catalog.json + cover images from the mod packages.
+# Triggered only by package changes; the bot commit touches catalog.json and
+# assets/covers/ (not *.zip), so it cannot re-trigger this workflow.
+
+on:
+  push:
+    paths:
+      - "assets/**/*.zip"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Fails (and rejects the push) if any package lacks a valid trailer.
+      - name: Regenerate catalog
+        run: python build.py
+
+      - name: Commit generated changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "ModCatalog Bot"
+            git config user.email "modcatalog-bot@users.noreply.github.com"
+            git add catalog.json assets/covers
+            git commit -m "Regenerate catalog from packages"
+            git push
+            echo "Catalog regenerated and committed."
+          else
+            echo "Catalog already up to date."
+          fi

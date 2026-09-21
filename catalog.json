@@ -3,15 +3,34 @@
   "description": "Community mod catalog for ModManager (and anyone else who wants the mods).",
   "mods": [
     {
-      "id": "example-ue-mod",
+      "id": "70397db8-f70a-4f85-a17a-d3e3ab1d5067",
       "name": "Example UE Mod",
       "author": "Epic Games",
       "version": "1.0.0",
       "description": "Sample UE 5.6 packaged container (.utoc/.ucas/.pak) zipped as a downloadable package.",
       "file": "assets/ExampleUEMod-1.0.0.zip",
-      "size": 10185827,
-      "cover": "assets/covers/spacey.jpg",
-      "accent": "#2B6CB0"
+      "size": 10336186,
+      "cover": "assets/covers/70397db8-f70a-4f85-a17a-d3e3ab1d5067.jpg"
+    },
+    {
+      "id": "05dfce29-38db-4c42-b65c-e7d1196af540",
+      "name": "Frostbound Interiors",
+      "author": "Aurora Studio",
+      "version": "1.2.0",
+      "description": "Snow-covered apartment interiors with warm lighting, frosted windows, and seasonal props.",
+      "file": "assets/FrostboundInteriors-1.2.0.zip",
+      "size": 10188443,
+      "cover": "assets/covers/05dfce29-38db-4c42-b65c-e7d1196af540.png"
+    },
+    {
+      "id": "742c2e78-a272-44dc-9ea4-969c36eca47f",
+      "name": "Neon Night Drive",
+      "author": "Pixel Forge",
+      "version": "0.3.1",
+      "description": "Neon-lit street interiors, holographic signage, and volumetric lighting for night scenes.",
+      "file": "assets/NeonNightDrive-0.3.1.zip",
+      "size": 10188503,
+      "cover": "assets/covers/742c2e78-a272-44dc-9ea4-969c36eca47f.png"
     }
   ]
 }
