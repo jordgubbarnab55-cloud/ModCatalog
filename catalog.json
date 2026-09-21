@@ -1,0 +1,17 @@
+{
+  "name": "Mod Catalog",
+  "description": "Community mod catalog for ModManager (and anyone else who wants the mods).",
+  "mods": [
+    {
+      "id": "example-ue-mod",
+      "name": "Example UE Mod",
+      "author": "Epic Games",
+      "version": "1.0.0",
+      "description": "Sample UE 5.6 packaged container (.utoc/.ucas/.pak) zipped as a downloadable package.",
+      "file": "assets/ExampleUEMod-1.0.0.zip",
+      "size": 10185827,
+      "cover": "assets/covers/spacey.jpg",
+      "accent": "#2B6CB0"
+    }
+  ]
+}

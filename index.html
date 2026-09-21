@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mod Catalog</title>
+<style>
+    /* Adonis dark palette (see ModManager Themes/Adonis.Dark.axaml) */
+    :root {
+        --layer0: #2A2B34;   /* window background */
+        --layer2: #32323F;   /* card surface */
+        --layer2-border: #272730;
+        --layer2-hl: #3D3D4C;      /* card hover surface */
+        --layer2-hl-border: #585871;
+        --fg: #F0F0F0;
+        --fg2: rgba(240, 240, 240, 0.75);
+        --accent: #206BD4;
+        --accent-hover: #3C81E2;
+        --success: #00B14A;
+        --danger: #C22B2B;
+    }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0;
+        background: var(--layer0);
+        color: var(--fg);
+        font-family: Inter, "Segoe UI", system-ui, sans-serif;
+    }
+    .page {
+        max-width: 940px;
+        margin: 0 auto;
+        padding: 24px 16px 48px;
+    }
+    header h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+    header .sub { font-size: 13px; color: var(--fg2); margin: 0 0 20px; }
+    header .count { font-size: 12px; color: var(--fg2); margin-bottom: 12px; }
+    .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+    }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+
+    /* Card: mirrors BrowseModCard (90x90 cover left, info center, download right) */
+    .card {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        align-items: center;
+        background: var(--layer2);
+        border: 1px solid var(--layer2-border);
+        border-radius: 8px;
+        overflow: hidden;
+        transition: background 80ms, border-color 80ms;
+    }
+    .card:hover {
+        background: var(--layer2-hl);
+        border-color: var(--layer2-hl-border);
+    }
+    .cover {
+        position: relative;
+        width: 90px;
+        height: 90px;
+        margin: 10px 0;
+        border-radius: 4px;
+        overflow: hidden;
+        flex: none;
+    }
+    .cover .letter {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 28px;
+        font-weight: bold;
+        color: #fff;
+    }
+    .cover img {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+    .info {
+        min-width: 0;
+        padding: 12px;
+        padding-right: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+    .title {
+        font-size: 14px;
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .meta { font-size: 12px; color: var(--fg2); }
+    .meta .dot { margin: 0 6px; }
+    .desc {
+        font-size: 12px;
+        color: var(--fg2);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .dl {
+        width: 116px;
+        margin: 12px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        flex: none;
+    }
+    .dlbtn {
+        width: 52px;
+        height: 52px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--accent);
+        border-radius: 4px;
+        color: #fff;
+        cursor: pointer;
+    }
+    .dlbtn:hover { background: var(--accent-hover); }
+    .dlbtn svg { width: 24px; height: 24px; }
+    .hint { font-size: 11px; color: var(--fg2); text-align: center; }
+    .error {
+        color: var(--danger);
+        font-size: 13px;
+        background: var(--layer2);
+        border: 1px solid var(--layer2-border);
+        border-radius: 8px;
+        padding: 16px;
+    }
+</style>
+</head>
+<body>
+<div class="page">
+    <header>
+        <h1 id="catName">Mod Catalog</h1>
+        <p class="sub" id="catDesc"></p>
+        <p class="count" id="catCount"></p>
+    </header>
+    <div class="grid" id="grid"></div>
+</div>
+<script>
+    const INBOX_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 12h-6l-2 3h-4l-2-3H2"/>
+        <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+    </svg>`;
+
+    function esc(s) {
+        const d = document.createElement('div');
+        d.textContent = s ?? '';
+        return d.innerHTML;
+    }
+
+    function fmtSize(n) {
+        if (n == null) return '';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let i = 0, v = n;
+        while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+        return (i ? (v >= 10 ? v.toFixed(0) : v.toFixed(1)) : v) + ' ' + units[i];
+    }
+
+    function fileName(url) {
+        try {
+            const seg = new URL(url, location.origin).pathname.split('/').pop();
+            return decodeURIComponent(seg);
+        } catch { return 'download'; }
+    }
+
+    function renderMod(mod, base) {
+        const fileUrl = new URL(mod.file, base).href;
+        const card = document.createElement('div');
+        card.className = 'card';
+
+        const initial = esc((mod.name || '?').trim().charAt(0).toUpperCase());
+        const accent = mod.accent || '#206BD4';
+        let cover = `<div class="letter" style="background:${esc(accent)}">${initial}</div>`;
+        if (mod.cover) cover += `<img src="${esc(new URL(mod.cover, base).href)}" alt="" loading="lazy">`;
+
+        card.innerHTML = `
+            <div class="cover">${cover}</div>
+            <div class="info">
+                <div class="title">${esc(mod.name)}</div>
+                <div class="meta"><span>${esc(mod.author)}</span><span class="dot">&bull;</span><span>v${esc(mod.version)}</span></div>
+                <div class="desc">${esc(mod.description)}</div>
+            </div>
+            <div class="dl">
+                <a class="dlbtn" href="${esc(fileUrl)}" download="${esc(fileName(fileUrl))}"
+                   title="Download ${esc(mod.name)}">
+                    ${INBOX_ICON}
+                </a>
+                <div class="hint">${esc(fmtSize(mod.size))}</div>
+            </div>`;
+        return card;
+    }
+
+    (async function main() {
+        const grid = document.getElementById('grid');
+        try {
+            const res = await fetch('catalog.json', { cache: 'no-store' });
+            if (!res.ok) throw new Error('catalog.json: HTTP ' + res.status);
+            const catalog = await res.json();
+
+            document.title = catalog.name || 'Mod Catalog';
+            document.getElementById('catName').textContent = catalog.name || 'Mod Catalog';
+            document.getElementById('catDesc').textContent = catalog.description || '';
+            document.getElementById('catCount').textContent =
+                (catalog.mods || []).length + ' mod' + ((catalog.mods || []).length === 1 ? '' : 's') + ' available';
+
+            const base = new URL('catalog.json', location.href);
+            for (const mod of catalog.mods || []) grid.appendChild(renderMod(mod, base));
+        } catch (err) {
+            grid.innerHTML = '';
+            const box = document.createElement('div');
+            box.className = 'error';
+            box.textContent = 'Failed to load catalog: ' + err.message;
+            grid.appendChild(box);
+        }
+    })();
+</script>
+</body>
+</html>
