@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upload a mod — Mod Catalog</title>
+<style>
+    /* Adonis dark palette (same as index.html / BrowseModCard) */
+    :root {
+        --layer0: #2A2B34;
+        --layer2: #32323F;
+        --layer2-border: #272730;
+        --layer2-hl: #3D3D4C;
+        --layer2-hl-border: #585871;
+        --fg: #F0F0F0;
+        --fg2: rgba(240, 240, 240, 0.75);
+        --accent: #206BD4;
+        --accent-hover: #3C81E2;
+        --success: #00B14A;
+        --danger: #C22B2B;
+    }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0;
+        background: var(--layer0);
+        color: var(--fg);
+        font-family: Inter, "Segoe UI", system-ui, sans-serif;
+    }
+    .page { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+    header h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+    header .sub { font-size: 13px; color: var(--fg2); margin: 0 0 20px; }
+    header a { color: var(--accent); text-decoration: none; font-size: 13px; }
+    header a:hover { color: var(--accent-hover); }
+    .card {
+        background: var(--layer2);
+        border: 1px solid var(--layer2-border);
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 12px;
+    }
+    .card h2 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--fg2); }
+    label { font-size: 12px; color: var(--fg2); display: block; margin-bottom: 4px; }
+    input[type="text"], input[type="file"] {
+        width: 100%;
+        background: var(--layer0);
+        color: var(--fg);
+        border: 1px solid var(--layer2-border);
+        border-radius: 4px;
+        padding: 8px 10px;
+        font-size: 13px;
+        font-family: inherit;
+    }
+    input[type="file"] { padding: 6px; }
+    button {
+        margin-top: 10px;
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        padding: 8px 16px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        font-family: inherit;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .hint { font-size: 11px; color: var(--fg2); margin-top: 6px; }
+    #progressWrap { display: none; margin-top: 10px; }
+    #progressBar {
+        height: 6px;
+        background: var(--layer0);
+        border-radius: 3px;
+        overflow: hidden;
+    }
+    #progressFill { height: 100%; width: 0; background: var(--accent); transition: width 120ms; }
+    #statusLine { font-size: 13px; margin-top: 10px; min-height: 18px; }
+    #statusLine.ok { color: var(--success); }
+    #statusLine.err { color: var(--danger); }
+    #statusLine.wait { color: var(--fg2); }
+    .notconfigured {
+        color: var(--fg2);
+        background: var(--layer2);
+        border: 1px solid var(--layer2-border);
+        border-radius: 8px;
+        padding: 16px;
+        font-size: 13px;
+    }
+</style>
+</head>
+<body>
+<div class="page">
+    <header>
+        <h1>Upload a mod</h1>
+        <p class="sub">Upload a packaged container (.zip with a valid trailer). No account needed — just a token.</p>
+        <p><a href="index.html">&larr; back to the catalog</a></p>
+    </header>
+
+    <div class="notconfigured" id="notConfigured" hidden>
+        Upload is not configured yet. The catalog maintainer needs to deploy the
+        upload service and fill in <code>site/config.json</code>. Please check back later.
+    </div>
+
+    <div class="card">
+        <h2>1. Your upload token</h2>
+        <label for="token">Token (from Discord: /token)</label>
+        <input type="text" id="token" autocomplete="off"
+               placeholder="mm_…" spellcheck="false">
+        <div class="hint">It is remembered on this device only. Keep it secret — it can upload mods as you (10/day, 100&nbsp;MB each).</div>
+    </div>
+
+    <div class="card">
+        <h2>2. Your package</h2>
+        <label for="file">.zip package (a .utoc/.ucas/.pak container with a valid trailer)</label>
+        <input type="file" id="file" accept=".zip">
+        <button id="go" disabled>Upload</button>
+        <div id="progressWrap"><div id="progressBar"><div id="progressFill"></div></div></div>
+        <div id="statusLine"></div>
+    </div>
+
+    <div class="card">
+        <h2>After the upload</h2>
+        <div class="hint">
+            The upload is queued to the catalog's inbox; a background job validates the
+            package and publishes it. Your mod normally appears in the
+            <a href="index.html" style="color:var(--accent)">catalog</a> within a couple of minutes.
+        </div>
+    </div>
+</div>
+
+<script type="module" src="upload-lib.js"></script>
+<script>
+    const TOKEN_KEY = "modcatalog.uploadToken";
+    const $ = (id) => document.getElementById(id);
+    const tokenEl = $("token"), fileEl = $("file"), goBtn = $("go");
+    const statusEl = $("statusLine"), fillEl = $("progressFill"), progWrap = $("progressWrap");
+
+    tokenEl.value = localStorage.getItem(TOKEN_KEY) || "";
+    tokenEl.addEventListener("change", () => localStorage.setItem(TOKEN_KEY, tokenEl.value.trim()));
+
+    function setStatus(text, kind) {
+        statusEl.textContent = text || "";
+        statusEl.className = kind || "";
+    }
+
+    function ready() {
+        goBtn.disabled = !(tokenEl.value.trim() && fileEl.files.length > 0);
+    }
+    fileEl.addEventListener("change", ready);
+    tokenEl.addEventListener("input", ready);
+
+    async function fetchCatalog() {
+        const res = await fetch("catalog.json", { cache: "no-store" });
+        if (!res.ok) throw new Error("catalog.json: HTTP " + res.status);
+        return (await res.json()).mods || [];
+    }
+
+    goBtn.addEventListener("click", async () => {
+        const uploadUrl = window.__uploadUrl;
+        const token = tokenEl.value.trim();
+        const file = fileEl.files[0];
+        if (!uploadUrl || !token || !file) return;
+
+        goBtn.disabled = true;
+        setStatus("", "");
+        progWrap.style.display = "block";
+        fillEl.style.width = "0%";
+
+        const before = (await fetchCatalog().catch(() => null)) || [];
+        const size = file.size;
+
+        // XMLHttpRequest (not fetch) so we get real progress events for large files.
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", uploadUrl);
+        xhr.setRequestHeader("Authorization", "Bearer " + token);
+        xhr.setRequestHeader("X-Filename", file.name);
+        xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) fillEl.style.width = ((e.loaded / e.total) * 100).toFixed(1) + "%";
+        };
+        xhr.onerror = () => {
+            progWrap.style.display = "none";
+            setStatus(statusMessage("network"), "err");
+            ready();
+        };
+        xhr.onload = () => {
+            progWrap.style.display = "none";
+            let msg = statusMessage(xhr.status);
+            setStatus(msg, xhr.status === 202 ? "ok" : "err");
+            if (xhr.status === 202) pollCatalog(before, size, 0);
+            else ready();
+        };
+        xhr.send(file);
+    });
+
+    async function pollCatalog(before, size, attempt) {
+        const deadline = Date.now() + POLL_MAX_MS;
+        const tick = async () => {
+            if (Date.now() > deadline) {
+                setStatus("Still not in the catalog after ~3 minutes. It may still be " +
+                          "processing — check back on the catalog page.", "wait");
+                ready();
+                return;
+            }
+            try {
+                const after = await fetchCatalog();
+                const mod = findNewMod(before, after, size);
+                if (mod) {
+                    setStatus(`Done — "${mod.name}" v${mod.version} is now in the catalog.`, "ok");
+                    ready();
+                    return;
+                }
+            } catch (e) {
+                // the catalog is briefly redeploying; keep polling
+            }
+            if (Date.now() < deadline) setTimeout(tick, 10000);
+        };
+        await tick();
+    }
+
+    function init() {
+        if (typeof window.configOk !== "function") {  // upload-lib.js (module) not loaded yet
+            document.addEventListener("DOMContentLoaded", init);
+            return;
+        }
+        (async () => {
+            let cfg = null;
+            try { cfg = await (await fetch("config.json", { cache: "no-store" })).json(); } catch (e) { /* no config yet */ }
+            const url = cfg && cfg.uploadUrl;
+            if (!configOk(url)) {
+                $("notConfigured").hidden = false;
+                goBtn.disabled = true;
+                return;
+            }
+            window.__uploadUrl = url;
+            ready();
+        })();
+    }
+    init();
+</script>
+</body>
+</html>
