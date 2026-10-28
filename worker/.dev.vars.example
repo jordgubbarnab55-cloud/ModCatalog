@@ -1,0 +1,9 @@
+# Local development values for `npx wrangler dev`.
+# Copy this file to `.dev.vars` and fill in real values. `.dev.vars` is
+# gitignored; NEVER commit real secrets.
+DISCORD_PUBLIC_KEY=REPLACE_ME_DISCORD_PUBLIC_KEY
+GITHUB_TOKEN=REPLACE_ME_GITHUB_TOKEN
+GITHUB_OWNER=REPLACE_ME_GITHUB_OWNER
+GITHUB_REPO=REPLACE_ME_GITHUB_REPO
+ALLOWED_ORIGIN=REPLACE_ME_ALLOWED_ORIGIN
+UPLOAD_DAILY_LIMIT=10

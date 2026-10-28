@@ -1,0 +1,12 @@
+{
+  "name": "modcatalog-worker",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker: Discord token commands + streaming upload API (deployed by the owner, nothing here requires installation)",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

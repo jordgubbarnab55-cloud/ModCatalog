@@ -1,0 +1,27 @@
+# ModCatalog Worker (Cloudflare, free plan)
+#
+# Deployed by the project owner (npx wrangler login / kv:namespace / secret /
+# deploy). NOTHING in this repo requires installing wrangler; the tests run
+# with bare `node --test` (Node 20+).
+
+name = "modcatalog"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+[vars]
+GITHUB_OWNER = "REPLACE_ME_GITHUB_OWNER"
+GITHUB_REPO = "REPLACE_ME_GITHUB_REPO"
+# Origin allowed for CORS on /upload (the Pages site). The native app sends
+# no Origin header and is unaffected.
+ALLOWED_ORIGIN = "REPLACE_ME_ALLOWED_ORIGIN"
+# Optional: uploads per Discord user per UTC day (default 10)
+UPLOAD_DAILY_LIMIT = "10"
+
+# Secrets -- set with `npx wrangler secret put NAME`, never committed:
+#   DISCORD_PUBLIC_KEY  base64 public key from the Discord application
+#   GITHUB_TOKEN        fine-grained token: this repo only,
+#                       Contents: Read and write + Actions: Read and write
+
+[[kv_namespaces]]
+binding = "TOKENS"
+id = "REPLACE_ME_KV_NAMESPACE_ID"
