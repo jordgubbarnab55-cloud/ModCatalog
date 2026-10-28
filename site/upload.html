@@ -39,8 +39,8 @@
         margin-bottom: 12px;
     }
     .card h2 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--fg2); }
-    label { font-size: 12px; color: var(--fg2); display: block; margin-bottom: 4px; }
-    input[type="text"], input[type="file"] {
+    label { font-size: 12px; color: var(--fg2); display: block; margin: 8px 0 4px; }
+    input[type="text"], input[type="file"], textarea {
         width: 100%;
         background: var(--layer0);
         color: var(--fg);
@@ -51,6 +51,7 @@
         font-family: inherit;
     }
     input[type="file"] { padding: 6px; }
+    textarea { resize: vertical; min-height: 48px; }
     button {
         margin-top: 10px;
         background: var(--accent);
@@ -66,18 +67,16 @@
     button:hover { background: var(--accent-hover); }
     button:disabled { opacity: 0.5; cursor: default; }
     .hint { font-size: 11px; color: var(--fg2); margin-top: 6px; }
+    #modeLine { font-size: 12px; color: var(--fg2); margin-top: 6px; }
     #progressWrap { display: none; margin-top: 10px; }
-    #progressBar {
-        height: 6px;
-        background: var(--layer0);
-        border-radius: 3px;
-        overflow: hidden;
-    }
+    #progressBar { height: 6px; background: var(--layer0); border-radius: 3px; overflow: hidden; }
     #progressFill { height: 100%; width: 0; background: var(--accent); transition: width 120ms; }
     #statusLine { font-size: 13px; margin-top: 10px; min-height: 18px; }
     #statusLine.ok { color: var(--success); }
     #statusLine.err { color: var(--danger); }
     #statusLine.wait { color: var(--fg2); }
+    #metaCard { display: none; }
+    #metaForm { display: none; }
     .notconfigured {
         color: var(--fg2);
         background: var(--layer2);
@@ -92,7 +91,8 @@
 <div class="page">
     <header>
         <h1>Upload a mod</h1>
-        <p class="sub">Upload a packaged container (.zip with a valid trailer). No account needed — just a token.</p>
+        <p class="sub">Upload a packaged container — either as a .zip, or as the raw
+           .utoc / .ucas / .pak files (zipped for you, no client-side packing needed).</p>
         <p><a href="index.html">&larr; back to the catalog</a></p>
     </header>
 
@@ -104,15 +104,34 @@
     <div class="card">
         <h2>1. Your upload token</h2>
         <label for="token">Token (from Discord: /token)</label>
-        <input type="text" id="token" autocomplete="off"
-               placeholder="mm_…" spellcheck="false">
-        <div class="hint">It is remembered on this device only. Keep it secret — it can upload mods as you (10/day, 100&nbsp;MB each).</div>
+        <input type="text" id="token" autocomplete="off" placeholder="mm_…" spellcheck="false">
+        <div class="hint">It is remembered on this device only. Keep it secret — it can upload mods as you (2&nbsp;GiB/day).</div>
     </div>
 
     <div class="card">
         <h2>2. Your package</h2>
-        <label for="file">.zip package (a .utoc/.ucas/.pak container with a valid trailer)</label>
-        <input type="file" id="file" accept=".zip">
+        <label for="file">A .zip package — or the raw container files (.utoc / .ucas / .pak)</label>
+        <input type="file" id="file" multiple accept=".zip,.pak,.ucas,.utoc">
+        <div id="modeLine"></div>
+    </div>
+
+    <div class="card" id="metaCard">
+        <h2>3. Metadata (the .utoc trailer)</h2>
+        <div id="metaStatus" style="font-size:13px;margin-bottom:4px;"></div>
+        <div id="metaForm">
+            <label for="mTitle">Title *</label>
+            <input type="text" id="mTitle" maxlength="256">
+            <label for="mAuthor">Author *</label>
+            <input type="text" id="mAuthor" maxlength="256">
+            <label for="mVersion">Version *</label>
+            <input type="text" id="mVersion" maxlength="64" placeholder="1.0.0">
+            <label for="mDesc">Description</label>
+            <textarea id="mDesc" maxlength="16384"></textarea>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Upload</h2>
         <button id="go" disabled>Upload</button>
         <div id="progressWrap"><div id="progressBar"><div id="progressFill"></div></div></div>
         <div id="statusLine"></div>
@@ -121,19 +140,23 @@
     <div class="card">
         <h2>After the upload</h2>
         <div class="hint">
-            The upload is queued to the catalog's inbox; a background job validates the
-            package and publishes it. Your mod normally appears in the
-            <a href="index.html" style="color:var(--accent)">catalog</a> within a couple of minutes.
+            The upload is queued to the catalog's inbox; a background job (the one that
+            also zips raw file sets) validates the package and publishes it. Your mod
+            normally appears in the <a href="index.html" style="color:var(--accent)">catalog</a>
+            within a couple of minutes.
         </div>
     </div>
 </div>
 
 <script type="module" src="upload-lib.js"></script>
+<script type="module" src="trailer.js"></script>
 <script>
     const TOKEN_KEY = "modcatalog.uploadToken";
+    const PART_SIZE = 90 * 1024 * 1024; // under the Worker's 100 MB cap, with headroom
     const $ = (id) => document.getElementById(id);
     const tokenEl = $("token"), fileEl = $("file"), goBtn = $("go");
     const statusEl = $("statusLine"), fillEl = $("progressFill"), progWrap = $("progressWrap");
+    const modeEl = $("modeLine");
 
     tokenEl.value = localStorage.getItem(TOKEN_KEY) || "";
     tokenEl.addEventListener("change", () => localStorage.setItem(TOKEN_KEY, tokenEl.value.trim()));
@@ -143,11 +166,93 @@
         statusEl.className = kind || "";
     }
 
-    function ready() {
-        goBtn.disabled = !(tokenEl.value.trim() && fileEl.files.length > 0);
+    // ------------------------------------------------------- selection state
+    let mode = null;        // 'zip' | 'raw' | null
+    let rawFiles = [];
+    let utocName = null;
+
+    function analyzeSelection() {
+        const files = [...fileEl.files];
+        mode = null; rawFiles = []; utocName = null;
+        if (files.length === 0) { updateUi(); return; }
+        const zips = files.filter((f) => f.name.toLowerCase().endsWith(".zip"));
+        const raw = files.filter((f) => /\.(pak|ucas|utoc)$/i.test(f.name));
+        if (zips.length + raw.length !== files.length) {
+            setStatus("Only .zip packages or .utoc/.ucas/.pak files are accepted.", "err");
+            updateUi(); return;
+        }
+        if (zips.length > 0) {
+            if (raw.length > 0) { setStatus("Don't mix a .zip and raw files in one upload.", "err"); updateUi(); return; }
+            if (zips.length > 1) { setStatus("One .zip per upload.", "err"); updateUi(); return; }
+            mode = "zip";
+            modeEl.textContent = "One .zip package: " + zips[0].name + " (" + fmtSize(zips[0].size) + ")";
+        } else {
+            const utocs = raw.filter((f) => f.name.toLowerCase().endsWith(".utoc"));
+            if (utocs.length !== 1) { setStatus("Exactly one .utoc is required for raw files.", "err"); updateUi(); return; }
+            if (new Set(raw.map((f) => f.name)).size !== raw.length) { setStatus("Duplicate file names in the selection.", "err"); updateUi(); return; }
+            mode = "raw"; rawFiles = raw; utocName = utocs[0].name;
+            modeEl.textContent = raw.length + " raw files (" + fmtSize(raw.reduce((s, f) => s + f.size, 0)) + ") — will be zipped by the catalog job";
+            inspectTrailer();
+        }
+        updateUi();
     }
-    fileEl.addEventListener("change", ready);
-    tokenEl.addEventListener("input", ready);
+
+    function fmtSize(n) {
+        const u = ["B", "KB", "MB", "GB"]; let i = 0, v = n;
+        while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+        return (i ? (v >= 10 ? v.toFixed(0) : v.toFixed(1)) : v) + " " + u[i];
+    }
+
+    function updateUi() {
+        goBtn.disabled = !(tokenEl.value.trim() && fileEl.files.length > 0
+            && (mode === "zip" || (mode === "raw" && metaReady())));
+    }
+
+    // ------------------------------------------------- metadata (raw mode)
+    let existingMeta = null;
+
+    function metaReady() {
+        return existingMeta !== null || (
+            $("mTitle").value.trim() && $("mAuthor").value.trim() && $("mVersion").value.trim());
+    }
+
+    async function inspectTrailer() {
+        const card = $("metaCard");
+        card.style.display = "block";
+        const st = $("metaStatus");
+        st.textContent = "Checking " + utocName + " for a metadata trailer…";
+        st.style.color = "var(--fg2)";
+        const file = rawFiles.find((f) => f.name === utocName);
+        const buf = new Uint8Array(await file.arrayBuffer());
+        existingMeta = readTrailerMeta(buf);
+        if (existingMeta) {
+            st.textContent = "Metadata found: “" + existingMeta.title + "” by "
+                + existingMeta.author + " (v" + existingMeta.version + ") — no form needed.";
+            st.style.color = "var(--success)";
+            $("metaForm").style.display = "none";
+        } else {
+            st.textContent = "No metadata in " + utocName + ". Fill in the details — the trailer is written before upload.";
+            st.style.color = "var(--fg)";
+            $("metaForm").style.display = "block";
+        }
+        updateUi();
+    }
+    for (const id of ["mTitle", "mAuthor", "mVersion"]) $(id).addEventListener("input", updateUi);
+
+    // ------------------------------------------------------------- upload
+    function xhrUpload(url, headers, data, onProgress) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", url);
+            for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+            if (onProgress) xhr.upload.onprogress = onProgress;
+            xhr.onerror = () => reject(new Error("network"));
+            xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText });
+            xhr.send(data);
+        });
+    }
+
+    function authHeaders() { return { "Authorization": "Bearer " + tokenEl.value.trim() }; }
 
     async function fetchCatalog() {
         const res = await fetch("catalog.json", { cache: "no-store" });
@@ -157,42 +262,86 @@
 
     goBtn.addEventListener("click", async () => {
         const uploadUrl = window.__uploadUrl;
-        const token = tokenEl.value.trim();
-        const file = fileEl.files[0];
-        if (!uploadUrl || !token || !file) return;
-
+        if (!uploadUrl || !tokenEl.value.trim() || !fileEl.files.length || !mode) return;
         goBtn.disabled = true;
         setStatus("", "");
         progWrap.style.display = "block";
         fillEl.style.width = "0%";
-
-        const before = (await fetchCatalog().catch(() => null)) || [];
-        const size = file.size;
-
-        // XMLHttpRequest (not fetch) so we get real progress events for large files.
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", uploadUrl);
-        xhr.setRequestHeader("Authorization", "Bearer " + token);
-        xhr.setRequestHeader("X-Filename", file.name);
-        xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) fillEl.style.width = ((e.loaded / e.total) * 100).toFixed(1) + "%";
-        };
-        xhr.onerror = () => {
+        try {
+            const before = (await fetchCatalog().catch(() => null)) || [];
+            let expectedTitle = null, sizeKey = null;
+            if (mode === "zip") {
+                const f = fileEl.files[0];
+                sizeKey = f.size;
+                const r = await xhrUpload(uploadUrl, { ...authHeaders(), "X-Filename": f.name }, f,
+                    (e) => { if (e.lengthComputable) fillEl.style.width = ((e.loaded / e.total) * 100).toFixed(1) + "%"; });
+                if (r.status !== 202) { setStatus(statusMessage(r.status), "err"); ready(); return; }
+            } else {
+                await uploadRawSet(uploadUrl, (t) => { expectedTitle = t; },
+                    (loaded, total) => { fillEl.style.width = ((loaded / total) * 100).toFixed(1) + "%"; });
+            }
+            setStatus(statusMessage(202), "ok");
+            pollCatalog(before, sizeKey, expectedTitle);
+        } catch (e) {
             progWrap.style.display = "none";
-            setStatus(statusMessage("network"), "err");
+            setStatus(e && /HTTP \d+/.test(String(e.message)) ? e.message : statusMessage("network"), "err");
             ready();
-        };
-        xhr.onload = () => {
-            progWrap.style.display = "none";
-            let msg = statusMessage(xhr.status);
-            setStatus(msg, xhr.status === 202 ? "ok" : "err");
-            if (xhr.status === 202) pollCatalog(before, size, 0);
-            else ready();
-        };
-        xhr.send(file);
+        }
     });
 
-    async function pollCatalog(before, size, attempt) {
+    async function uploadRawSet(uploadUrl, onTitle, onProgress) {
+        const uploadId = crypto.randomUUID();
+        const base = { ...authHeaders(), "X-Upload-Id": uploadId };
+        // 1. read every file once (hash + slice from the same buffer)
+        const buffers = {};
+        for (const f of rawFiles) buffers[f.name] = new Uint8Array(await f.arrayBuffer());
+        // 2. metadata: write the trailer when missing (the page is the only place this happens)
+        if (!existingMeta) {
+            const m = { title: $("mTitle").value.trim(), author: $("mAuthor").value.trim(),
+                      description: $("mDesc").value, version: $("mVersion").value.trim(),
+                      guid: crypto.randomUUID() };
+            buffers[utocName] = appendTrailer(buffers[utocName], m);
+            onTitle(m.title);
+        } else {
+            onTitle(existingMeta.title);
+        }
+        // 3. manifest (per-file sha256 of the full reassembled file + part count)
+        const manifest = { files: [] };
+        for (const f of rawFiles) {
+            const bytes = buffers[f.name];
+            const sha = await crypto.subtle.digest("SHA-256", bytes);
+            manifest.files.push({ name: f.name,
+                sha256: [...new Uint8Array(sha)].map((b) => b.toString(16).padStart(2, "0")).join(""),
+                parts: Math.max(1, Math.ceil(bytes.length / PART_SIZE)) });
+        }
+        const totalBytes = rawFiles.reduce((s, f) => s + buffers[f.name].length, 0);
+        let sent = 0;
+        const post = async (headers, data) => {
+            const r = await xhrUpload(uploadUrl, headers, data);
+            if (r.status !== 202) throw new Error(statusMessage(r.status) + " (HTTP " + r.status + ")");
+            sent += data.length;
+            onProgress(sent, totalBytes);
+        };
+        // 4. manifest first, then every part (the Worker dispatches on each upload;
+        //    the workflow waits for the full set, so order only matters for the manifest)
+        await post({ ...base, "X-Filename": "manifest.json", "X-File-Idx": "-1",
+                    "X-Part-Idx": "0", "X-Part-Count": "1" }, JSON.stringify(manifest));
+        for (let idx = 0; idx < rawFiles.length; idx++) {
+            const f = rawFiles[idx];
+            const bytes = buffers[f.name];
+            const n = Math.max(1, Math.ceil(bytes.length / PART_SIZE));
+            for (let i = 0; i < n; i++) {
+                setStatus("Uploading " + f.name + " — part " + (i + 1) + "/" + n + "…", "wait");
+                await post({ ...base, "X-Filename": f.name, "X-File-Idx": String(idx),
+                            "X-Part-Idx": String(i), "X-Part-Count": String(n) },
+                          bytes.slice(i * PART_SIZE, (i + 1) * PART_SIZE).buffer);
+            }
+        }
+    }
+
+    function ready() { goBtn.disabled = false; }
+
+    async function pollCatalog(before, sizeKey, nameKey) {
         const deadline = Date.now() + POLL_MAX_MS;
         const tick = async () => {
             if (Date.now() > deadline) {
@@ -203,22 +352,26 @@
             }
             try {
                 const after = await fetchCatalog();
-                const mod = findNewMod(before, after, size);
+                const mod = (sizeKey != null && findNewMod(before, after, sizeKey))
+                    || (nameKey && findNewModByName(before, after, nameKey))
+                    || findNewModByName(before, after, null);
                 if (mod) {
                     setStatus(`Done — "${mod.name}" v${mod.version} is now in the catalog.`, "ok");
                     ready();
                     return;
                 }
-            } catch (e) {
-                // the catalog is briefly redeploying; keep polling
-            }
+            } catch (e) { /* the catalog is briefly redeploying; keep polling */ }
             if (Date.now() < deadline) setTimeout(tick, 10000);
         };
         await tick();
     }
 
+    // ------------------------------------------------------------- init
+    fileEl.addEventListener("change", analyzeSelection);
+    tokenEl.addEventListener("input", updateUi);
+
     function init() {
-        if (typeof window.configOk !== "function") {  // upload-lib.js (module) not loaded yet
+        if (typeof window.configOk !== "function") {  // module scripts not loaded yet
             document.addEventListener("DOMContentLoaded", init);
             return;
         }
@@ -232,7 +385,7 @@
                 return;
             }
             window.__uploadUrl = url;
-            ready();
+            updateUi();
         })();
     }
     init();

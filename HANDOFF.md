@@ -10,6 +10,7 @@ Everything that needs a real account is in **`SETUP.md`** (ordered runbook).
 | `363548b` | 1 | Storage moved from git (`assets/*.zip`) to **GitHub Releases**; `build.py` refactored into importable functions + a stdlib-only CLI (`process --from-inbox`, `process --from-dir`, `rebuild`; `--client local --root DIR` runs the whole pipeline offline against a directory-backed fake); per-package validation (zip, member names, exactly one `.utoc` + valid trailer, `.ucas`, `.pak`, <100 MB) where a bad package is deleted from the inbox and the run continues; re-homing to `mod-<guid>` with immutable versions and sha256-named covers; first-uploader-owns (+ `ADMIN_DISCORD_IDS` bypass, seeding = admin); catalog entries with stable release-asset URLs + `sha256`/`uploader`/`updated`; `site/` is now the Pages root (published catalog URL unchanged); example zips in `legacy-assets/`; tracked `__pycache__` removed; workflows `process-inbox.yml`, `rebuild.yml`, `seed-legacy.yml`, `deploy-site.yml` + shared `commit-and-deploy` composite action; 15 offline unit tests. |
 | `0b8570f` | 2 | Cloudflare Worker (`worker/`, plain JS ES modules, zero runtime deps): `POST /discord` (Ed25519-checked Interactions endpoint; `/token` mints — only the SHA-256 is stored, one active token per user, ephemeral reply; `/token revoke`), `POST /upload` (401/411/413-before-GitHub/400/429/503; streams the body straight to the `inbox` release, then dispatches `process-inbox.yml` as a wake-up; 502 without dispatch on GitHub failure; CORS locked to `ALLOWED_ORIGIN`). `wrangler.toml` with placeholders only, `.dev.vars.example`, `register-commands.mjs`, `smoke-test.sh`, `worker/README.md` (the upload API contract for the ModManager app). 18 offline tests. |
 | `de9e1b0` | 3 | `site/upload.html` (static, no deps, same style: token in localStorage, XHR upload with progress, readable error messages, polls `catalog.json` ~3 min after a 202, "not configured" banner while `config.json` is a placeholder) + `site/config.json` + testable `site/upload-lib.js`; "Upload a mod" link in `index.html`. 4 more offline tests (22 node tests total). |
+| `<commit>` | 5 | **Raw file uploads + on-page metadata.** `build.py` accepts raw file sets in the inbox (manifest + part-split files: reassemble on the runner, verify per-file sha256, `make_package_zip` — the zip is built HERE, never by the Worker or the client), 7-day TTL sweep for stalled groups, 2 GiB per-asset cap. Worker: raw mode (`X-Upload-Id` + part headers, `.pak/.ucas/.utoc` + `manifest.json`), byte quota (2 GiB/day), CORS extended. `site/trailer.js`: browser/Node twin of `trailer.py` (validate in the C# order + `appendTrailer`); `upload.html` raw mode: auto-detects a missing `.utoc` trailer, shows the metadata form, writes the trailer client-side, part-splits >90 MB files, uploads manifest + parts. 21 more offline tests (57 total: 22 python, 35 node). |
 
 Docs (this commit): `README.md` and `AGENTS.md` rewritten for the new
 architecture (inbox/re-home flow, ownership, workflows, Worker, `site/`
@@ -36,11 +37,16 @@ site-design contract are unchanged.
   pipeline via `python build.py process --from-dir legacy-assets --client
   local --root <tmp> --catalog <tmp>/site/catalog.json` (3 ok, 0 rejected;
   `rebuild` afterwards: 3 mods, all fields intact).
-- **`node --test`** (in `worker/`) → `# tests 22, # pass 22, # fail 0`
-  (18 Worker + 4 upload-page-lib). The happy-path test asserts the body
+- **`node --test`** (in `worker/`) → `# tests 35, # pass 35, # fail 0`
+  (26 Worker + 4 upload-page-lib + 5 trailer.js). The happy-path test asserts the body
   passed to the GitHub `fetch` is the **same stream object**, the headers
   are right, the dispatch happens afterwards, and 413 fires **before any
-  GitHub call**.
+  GitHub call**. Raw-mode tests cover the manifest/part naming contract,
+  header validation, and the byte quota. **Cross-check (both directions, run
+  locally):** a trailer written by `site/trailer.js` (Node) is parsed by
+  `trailer.py`, and a trailer written by `trailer.py` is parsed by
+  `site/trailer.js` — fields round-trip exactly.
+- **`node --test`** (in `worker/`, initial phases) → 22/22 (Worker + page lib).
 - **`node --check`** on the inline scripts of `site/upload.html` and
   `site/index.html` and on `site/upload-lib.js` → all OK.
   `bash -n worker/scripts/smoke-test.sh` and
@@ -74,6 +80,14 @@ No tests were skipped or left red. The only tests that could not be
   end to end.
 - **ModManager:** following the release-URL redirect (open question §5 of
   the plan; the C# workspace is separate and was not touched).
+- **Raw file sets end to end:** the `build.py` raw path is fully unit-tested
+  (reassembly, sha256 verification, zip building, re-home, TTL sweep) but
+  has not been run through a real Worker + GitHub upload; the web page's
+  raw-mode flow (trailer detection/writing in a real browser, XHR of the
+  manifest + parts) is unverified in browsers; the Worker's raw-mode header
+  handling is test-verified but not yet deployed.
+- `site/trailer.js` in a real browser (tested under Node; the browser path
+  adds `File.arrayBuffer()` + `crypto.subtle`, both standard).
 
 ## 4. Defaults chosen (plan §8) and code-vs-plan decisions
 
@@ -124,6 +138,29 @@ No tests were skipped or left red. The only tests that could not be
   the existing cover and compares full bytes (a mismatch rejects the
   upload instead of overwriting).
 
+**Raw file upload + on-page metadata (phase 5):**
+- Client part size **90 MB** (headroom under the 100 MB cap); 7z-style
+  contiguous slices (plain byte chunks; no 7z container dependency).
+- Manifest = one small JSON upload per set: per-file `sha256` of the FULL
+  reassembled file + `parts`; the workflow verifies both reassembly and
+  completeness against it. No per-part hashes (the zip sha256 covers the
+  result; a corrupted part fails the file check).
+- **TTL 7 days** for stalled raw groups and stray zips (swept by each
+  process run, keyed off the newest asset's age).
+- Quota switched from 10 uploads/day to **2 GiB of bytes/day** per user
+  (charged after a successful GitHub upload; `UPLOAD_DAILY_BYTES` var).
+- The built zip is capped at GitHub's **2 GiB per-asset limit**;
+  `make_package_zip` orders members `.pak/.ucas/.utoc` first, then
+  alphabetical, `ZIP_DEFLATE` level 6 (deterministic; same input bytes →
+  same zip → stable `sha256`).
+- The web page is the **only** place a trailer is written in this flow
+  (ModManager's Development tab is the other, existing, writer); it writes
+  only when the `.utoc` has **no valid trailer** (full C#-order
+  validation via `site/trailer.js`), with a fresh `crypto.randomUUID()`
+  guid and no cover image (trailer v1 allows omitting it). `site/trailer.js`
+  is a deliberate twin of `trailer.py`/the C# reference — both directions
+  cross-checked (see §2).
+
 ## 5. Values the owner must fill in
 
 | File | Placeholder / value |
@@ -144,7 +181,12 @@ interactions URL + command registration → end-to-end test).
 
 ## 7. Known risks
 
-- **100 MB upload cap** (Cloudflare free-plan request-body limit).
+- **100 MB per upload (one part)** — raw file sets may still reach
+  GitHub's 2 GiB per-asset limit; larger packages would need multiple
+  releases (out of scope).
+- **Runner zip time:** deflating a multi-GiB raw set takes minutes of
+  runner CPU — fine on free tiers, but very large sets should be expected
+  to take a while before they appear in the catalog.
 - **`GITHUB_TOKEN` expiry** (fine-grained tokens max out at 1 year) →
   uploads start failing with `502` until a fresh token is put.
 - **Free-plan CPU limit (10 ms)** on the streaming pass-through — unverified

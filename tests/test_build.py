@@ -332,6 +332,128 @@ class TestSanitize(unittest.TestCase):
                          "Example-UE-Mod-1.0.0.zip")
 
 
+class TestRawUploads(Base):
+    """Raw file sets (no client-side zipping): manifest + part-split files.
+
+    Inbox names: <discordId>__<uploadId>__manifest.json and
+    <discordId>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>.
+    """
+
+    def upload_raw_bytes(self, name: str, data: bytes) -> None:
+        d = self.client._release_dir(build.INBOX_TAG)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_bytes(data)
+
+    def add_file(self, uploader: str, uid: str, idx: int, filename: str, data: bytes,
+                part_size: int = 65536) -> None:
+        n = (len(data) + part_size - 1) // part_size if data else 1
+        for i in range(n):
+            self.upload_raw_bytes(
+                f"{uploader}__{uid}__f{idx}__p{i}of{n}__{filename}",
+                data[i * part_size:(i + 1) * part_size])
+
+    def add_manifest(self, uploader: str, uid: str, files: list[dict]) -> None:
+        self.upload_raw_bytes(f"{uploader}__{uid}__manifest.json",
+                             json.dumps({"files": files}).encode("utf-8"))
+
+    def raw_set(self, uploader: str, uid: str, utoc: bytes, ucas: bytes, pak: bytes,
+               part_size: int = 65536, manifest_files: list[dict] | None = None) -> list[dict]:
+        """Uploads a complete raw set: manifest + 3 files (pak, ucas, utoc).
+        Returns the manifest's files list (so tests can corrupt it)."""
+        self.client.create_release(build.INBOX_TAG, "inbox")
+        ordered = (("mod.pak", pak), ("mod.ucas", ucas), ("mod.utoc", utoc))
+        files = manifest_files or [
+            {"name": n, "sha256": hashlib.sha256(b).hexdigest(),
+             "parts": max(1, (len(b) + part_size - 1) // part_size)}
+            for n, b in ordered
+        ]
+        self.add_manifest(uploader, uid, files)
+        for idx, (n, b) in enumerate(ordered):
+            self.add_file(uploader, uid, idx, n, b, part_size)
+        return files
+
+    def trailer_utoc(self, guid: str, title: str = "Raw Mod") -> bytes:
+        payload = build.trailer.build_payload(
+            {"title": title, "author": "Raw Author", "description": "raw",
+             "version": "1.0.0", "guid": guid})
+        return b"FAKE-UTOC-" + (b"\x00" * 1024) + build.trailer.build_trailer(payload)
+
+    def test_raw_set_is_zipped_and_rehomed(self):
+        guid = str(uuid.uuid4())
+        self.raw_set("555", "u-1", self.trailer_utoc(guid), b"UCAS", b"PAK")
+        summary = self.run_process()
+        self.assertEqual(summary, {"ok": 1, "rejected": 0})
+        e = self.catalog_mods()[guid]
+        self.assertEqual(e["uploader"], "555")
+        self.assertEqual(e["name"], "Raw Mod")
+        tag = f"mod-{guid}"
+        zips = [a.name for a in self.client.list_assets(tag) if a.name.endswith(".zip")]
+        self.assertEqual(zips, ["Raw-Mod-1.0.0.zip"])
+        self.assertEqual(self.inbox_names(), [])  # manifest + parts all deleted
+        with tempfile.TemporaryDirectory() as td:
+            z = pathlib.Path(td) / "p.zip"
+            self.client.download_asset(tag, "Raw-Mod-1.0.0.zip", z)
+            meta = build.validate_package(z)
+            self.assertEqual(meta["guid"], guid)
+            with zipfile.ZipFile(z) as zf:
+                self.assertEqual(sorted(zf.namelist()), ["mod.pak", "mod.ucas", "mod.utoc"])
+
+    def test_multi_part_file_reassembles(self):
+        guid = str(uuid.uuid4())
+        big_ucas = b"U" * 25000  # several parts with part_size=8000 (utoc gets 9)
+        self.raw_set("555", "u-6", self.trailer_utoc(guid), big_ucas, b"PAK", part_size=8000)
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        with tempfile.TemporaryDirectory() as td:
+            z = pathlib.Path(td) / "p.zip"
+            self.client.download_asset(f"mod-{guid}", "Raw-Mod-1.0.0.zip", z)
+            with zipfile.ZipFile(z) as zf:
+                self.assertEqual(zf.read("mod.ucas"), big_ucas)
+
+    def test_sha256_mismatch_rejected_and_group_deleted(self):
+        guid = str(uuid.uuid4())
+        files = self.raw_set("555", "u-2", self.trailer_utoc(guid), b"UCAS", b"PAK")
+        files[1]["sha256"] = "0" * 64  # corrupt the mod.ucas claim (keeps part counts)
+        self.client.delete_asset(build.INBOX_TAG, "555__u-2__manifest.json")
+        self.add_manifest("555", "u-2", files)
+        self.assertEqual(self.run_process(), {"ok": 0, "rejected": 1})
+        self.assertEqual(self.inbox_names(), [])  # whole group deleted
+        self.assertIsNone(self.client.get_release(f"mod-{guid}"))
+
+    def test_incomplete_group_waits(self):
+        guid = str(uuid.uuid4())
+        self.raw_set("555", "u-3", self.trailer_utoc(guid), b"UCAS", b"PAK")
+        self.client.delete_asset(build.INBOX_TAG, "555__u-3__f0__p0of1__mod.pak")  # drop a part
+        self.assertEqual(self.run_process(), {"ok": 0, "rejected": 0})
+        self.assertEqual(len(self.inbox_names()), 4)  # waiting, nothing deleted
+
+    def test_stale_group_deleted(self):
+        guid = str(uuid.uuid4())
+        self.raw_set("555", "u-4", self.trailer_utoc(guid), b"UCAS", b"PAK")
+        import os as _os, time as _time
+        for a in self.client.list_assets(build.INBOX_TAG):
+            p = self.client._release_dir(build.INBOX_TAG) / a.name
+            old = _time.time() - 8 * 86400
+            _os.utime(p, (old, old))
+        self.assertEqual(self.run_process(), {"ok": 0, "rejected": 0})
+        self.assertEqual(self.inbox_names(), [])  # swept
+        self.assertIsNone(self.client.get_release(f"mod-{guid}"))
+
+    def test_zip_and_raw_coexist_in_one_run(self):
+        zguid, rguid = str(uuid.uuid4()), str(uuid.uuid4())
+        make_package(self.root / "z.zip", title="Zip Mod", guid=zguid)
+        self.to_inbox(self.root / "z.zip", "12345", "12345__1__z.zip")
+        self.raw_set("555", "u-5", self.trailer_utoc(rguid, "Raw Mod"), b"UCAS", b"PAK")
+        self.assertEqual(self.run_process(), {"ok": 2, "rejected": 0})
+        self.assertEqual(len(self.catalog_mods()), 2)
+        self.assertEqual(self.inbox_names(), [])
+
+    def test_unrecognized_name_left_alone(self):
+        self.client.create_release(build.INBOX_TAG, "inbox")
+        self.upload_raw_bytes("weird-name.txt", b"x")
+        self.assertEqual(self.run_process(), {"ok": 0, "rejected": 0})
+        self.assertEqual(self.inbox_names(), ["weird-name.txt"])
+
+
 @unittest.skipUnless(LEGACY.is_dir(), "legacy-assets/ not present")
 class TestLegacyEndToEnd(Base):
     """The real example zips through the whole pipeline (local client)."""

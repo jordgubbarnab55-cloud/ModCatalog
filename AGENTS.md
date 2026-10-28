@@ -34,25 +34,39 @@ The Worker cannot know a package's GUID without parsing the zip (10 ms CPU
 on the free plan, and it must not trust client-supplied IDs), so:
 
 1. The Worker streams each upload into one fixed release tagged
-   `inbox`, asset name `<discordId>__<unixts>__<safe-filename>.zip`
-   (the id encodes the uploader). It then dispatches `process-inbox.yml`
-   — a **wake-up only, no payload**.
+   `inbox` (it is a stateless pass-through: no parsing, no zipping).
+   Asset names encode the uploader:
+   - zip packages: `<discordId>__<unixts>__<safe-filename>.zip`
+   - **raw file sets** (no client-side zipping; part-split into <= 90 MB
+     slices when a file is over 100 MB):
+     `<discordId>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>` plus
+     `<discordId>__<uploadId>__manifest.json` (per-file sha256 of the full
+     file + part counts).
+   It then dispatches `process-inbox.yml` — a **wake-up only, no payload**.
 2. **Each run drains the WHOLE inbox.** GitHub `concurrency` groups keep
    only one pending run (a newer queued run cancels the older pending
    one), so processing "the asset named in the dispatch payload" would
    silently strand uploads. Hence `concurrency: {group: catalog,
    cancel-in-progress: false}` — index merges never race.
-3. The workflow validates, then **re-homes** the package: ensures release
+3. For raw file sets the workflow first **reassembles the parts, verifies
+   the per-file sha256 against the manifest, and zips the set on the
+   runner** (`make_package_zip`, deterministic member order — this is where
+   "no client-side zipping" is paid for; the Worker cannot, 10 ms CPU).
+   Incomplete groups are left for the next run; groups stalled for over
+   7 days are swept.
+4. The workflow then **re-homes** the package: ensures release
    `mod-<guid>` exists (title = mod name), uploads the zip as
    `<SafeName>-<version>.zip`, uploads the cover (if any) as
-   `<guid>-cover-<sha256[:8]>.png|jpg`, and deletes the inbox asset
+   `<guid>-cover-<sha256[:8]>.png|jpg`, and deletes the inbox assets
    (whether or not processing succeeded). GitHub cannot move assets between
    releases, hence the re-upload (runners have bandwidth to spare).
-4. **Versions are immutable**: an existing `<SafeName>-<version>.zip` name
+5. **Versions are immutable**: an existing `<SafeName>-<version>.zip` name
    rejects the upload (never overwrite). Old versions' assets stay; the
    catalog entry points at the most recently uploaded version.
-5. The workflow creates the `inbox` release if it does not exist, so
-   nobody has to create it by hand.
+6. The workflow creates the `inbox` release if it does not exist, so
+   nobody has to create it by hand. The built zip is capped at GitHub's
+   2 GiB per-asset limit (the 100 MB number is only the Worker's request
+   body).
 
 ## Ownership (the GUID is self-declared inside the file)
 
@@ -107,10 +121,15 @@ Binary v1, appended at exactly `TocEnd` of the `.utoc`, zero-padded to
   pipeline runs offline; the default `gh` client shells out to the
   preinstalled `gh` CLI (auth via `GH_TOKEN`). `--owner/--repo` default to
   `GITHUB_OWNER`/`GITHUB_REPO`/`GITHUB_REPOSITORY`.
-- **Per-package validation** (failure → delete inbox asset, log, continue):
-  valid zip; safe member names (no absolute paths, no `..`); exactly one
-  `.utoc` with a valid trailer; at least one `.ucas` and one `.pak`;
-  size under 100 MB.
+- **Per-package validation** (failure → delete the inbox asset(s), log,
+  continue): valid zip; safe member names (no absolute paths, no `..`);
+  exactly one `.utoc` with a valid trailer; at least one `.ucas` and one
+  `.pak`; the 100 MB check applies to *uploads* (Worker side); the built
+  zip is capped at GitHub's 2 GiB per-asset limit.
+- **Raw file sets** are accepted in the inbox alongside zips
+  (`parse_inbox_name` / `raw_group_source` in `build.py`): manifest +
+  part-split files, reassembled and zipped on the runner (see the inbox
+  flow above).
 - Output is **deterministic** (sorted entries, stable JSON, `updated` from
   asset creation time on rebuild) so no-op runs produce byte-identical
   output and no churn commits.
@@ -154,16 +173,17 @@ injected: `handle(request, env, fetch)`.
   ephemeral (flags 64). `/token revoke` deletes both keys. **No GitHub
   calls in this path** (Discord expects a reply within 3 s).
 - **`POST /upload`** — `Bearer` token → 401; `Content-Length` required →
-  411; over 100 MB → 413 **before any GitHub call** (the free-plan
-  request-body limit); `X-Filename` must end in `.zip`; per-user daily
-  quota (default 10) → 429; missing `inbox` release → 503. Then it
-  **streams `request.body` straight through** to
-  `uploads.github.com` (no buffering, no storage on the Worker) with the
-  asset name `<discordId>__<unixts>__<safe>.zip`, dispatches
-  `process-inbox.yml` (`ref: main`), and answers `202 {"status":"queued"}`.
+  411; over 100 MB per part → 413 **before any GitHub call** (the
+  free-plan request-body limit); per-user daily **byte** quota (default
+  2 GiB) → 429; missing `inbox` release → 503. Two shapes: zip mode
+  (`X-Filename` must end in `.zip`) and raw mode (same `X-Upload-Id` on
+  every upload plus `manifest.json`; filenames `.pak/.ucas/.utoc`), both
+  **streaming `request.body` straight through** to `uploads.github.com`
+  (no buffering, no storage on the Worker), dispatching
+  `process-inbox.yml` (`ref: main`) and answering `202 {"status":"queued"}`.
   GitHub failure → 502 without dispatch. CORS: `Access-Control-Allow-Origin`
   = `ALLOWED_ORIGIN` only; allowed headers `Authorization, Content-Type,
-  X-Filename`.
+  X-Filename, X-Upload-Id, X-File-Idx, X-Part-Idx, X-Part-Count`.
 - KV is eventually consistent — a slightly late quota count is acceptable.
 - Fine-grained `GITHUB_TOKEN` **expires** (max 1 year); expired token →
   502s. Calendar-reminder at creation.
@@ -195,9 +215,16 @@ release assets as attachments so downloads still start.
 `site/upload.html` (same style, no deps) reads `site/config.json`
 (`{"uploadUrl": ...}`) — one value the owner edits after deploying the
 Worker — and shows "upload is not configured yet" while it is a
-placeholder. It uploads via `XMLHttpRequest` (progress events) and polls
-`catalog.json` after a 202. Its pure helpers live in `site/upload-lib.js`
-(loaded as an ES module; exercised by `worker/test/upload-lib.test.js`).
+placeholder. It accepts a `.zip` **or raw container files**: in raw mode it
+checks the `.utoc` for a metadata trailer with `site/trailer.js` (the
+browser/Node twin of `trailer.py` — validates in the C# order, plus
+`appendTrailer` for the "add metadata" form the page shows when the
+trailer is missing; the page is the only place a trailer gets written in
+this flow), part-splits files over 90 MB, uploads the manifest + parts
+through the raw Worker contract, and polls `catalog.json` after a 202.
+Uploads go via `XMLHttpRequest` (progress events). Its pure helpers live in
+`site/upload-lib.js` and `site/trailer.js` (loaded as ES modules;
+exercised by `worker/test/*.test.js`).
 **Do not weaken the "no package bytes at render time" rule** for either
 page.
 

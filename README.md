@@ -11,7 +11,10 @@ A public mod catalog and upload system, running entirely on free tiers:
 3. **Uploads** — Discord `/token` mints a personal token; the ModManager app
    or the static page (`upload.html`) then POSTs the package to the Worker,
    which streams it into a GitHub **release** (the storage), and a workflow
-   validates, publishes, and redeploys the catalog.
+   validates, publishes, and redeploys the catalog. You can upload a ready-made
+   `.zip` **or the raw container files** (`.utoc`/`.ucas`/`.pak`, part-split
+   when a file is over 100 MB) — the workflow zips the set on the runner. The
+   web page even writes the `.utoc` metadata trailer for you if it's missing.
 
 ## The release assets are the source of truth
 
@@ -45,16 +48,21 @@ Pages.
 
 1. In Discord, run **`/token`** and copy the token it shows (treat it like
    a password; `/token` again replaces it, `/token revoke` kills it).
-2. Upload your `.zip` — either from ModManager's upload flow (against the
+2. Upload it — either as a `.zip` or as the raw container files
+   (`.utoc`/`.ucas`/`.pak`), from ModManager's upload flow (against the
    Worker API documented in `worker/README.md`) or from the web page at
-   `<catalog URL>/upload.html` (paste the token, pick the file).
+   `<catalog URL>/upload.html` (paste the token, pick the file(s)). Raw
+   files over 100 MB are automatically part-split by the client. If your
+   `.utoc` has no metadata trailer, the web page offers a form and writes
+   the trailer for you before upload.
 3. That's it — the `Process inbox` workflow runs within a minute and the
    mod appears in the catalog.
 
-Limits: **100 MB** per upload (Cloudflare free-plan request-body limit),
-10 uploads per user per day, and **versions are immutable** (re-uploading a
-`name-version` you already published is rejected; publish a new version
-instead). The first uploader of a mod's GUID becomes its owner; uploads by
+Limits: **100 MB per upload** (one file or one part; Cloudflare free-plan
+request-body limit) — raw file sets may be up to GitHub's **2 GiB**
+per-asset limit, and the daily quota is **2 GiB per user**;
+**versions are immutable** (re-uploading a `name-version` you already
+published is rejected; publish a new version instead). The first uploader of a mod's GUID becomes its owner; uploads by
 anyone else are rejected (admins from `ADMIN_DISCORD_IDS` bypass this).
 
 ## Files

@@ -85,7 +85,7 @@ function makeEnv(kv, pub, overrides = {}) {
     GITHUB_OWNER: "octo",
     GITHUB_REPO: "repo",
     ALLOWED_ORIGIN: "https://pages.example.com",
-    UPLOAD_DAILY_LIMIT: "2",
+    UPLOAD_DAILY_BYTES: "2000",
     ...overrides,
   };
 }
@@ -233,16 +233,111 @@ test("bad extension is 400", async () => {
   assert.equal(f.calls.length, 0);
 });
 
-test("daily quota is 429", async () => {
+test("daily byte quota is 429 before any fetch", async () => {
   const kv = new FakeKV();
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
-  await kv.put("quota:42", JSON.stringify({ date: new Date().toISOString().slice(0, 10), count: 2 }));
+  await kv.put("quota:42", JSON.stringify({ date: new Date().toISOString().slice(0, 10), bytes: 1950 }));
   const f = makeFetch();
-  const res = await handle(uploadRequest({ token, contentLength: 10, filename: "a.zip" }),
+  const res = await handle(uploadRequest({ token, contentLength: 100, filename: "a.zip" }),
     makeEnv(kv, pub), f);
   assert.equal(res.status, 429);
+  assert.match(await res.text(), /GiB\/day/i);
   assert.equal(f.calls.length, 0);
+});
+
+// --------------------------------------------------- raw file set mode
+
+test("raw file part: name encodes upload id, file idx and part count", async () => {
+  const kv = new FakeKV();
+  const pub = await publicKeyB64();
+  const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
+  const f = makeFetch((url) =>
+    url.includes("releases/tags/inbox") ? new Response(JSON.stringify({ id: 7 }), { status: 200 })
+    : new Response(null, { status: 201 }));
+  const req = uploadRequest({
+    token, contentLength: 10, filename: "My Mod.utoc",
+    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(10)); c.close(); } }),
+  });
+  req.headers.set("X-Upload-Id", "abc-123");
+  req.headers.set("X-File-Idx", "2");
+  req.headers.set("X-Part-Idx", "1");
+  req.headers.set("X-Part-Count", "3");
+  const res = await handle(req, makeEnv(kv, pub), f);
+  assert.equal(res.status, 202);
+  const up = f.calls.find((c) => c.url.includes("uploads.github.com"));
+  assert.match(up.url, /42__abc-123__f2__p1of3__My-Mod\.utoc$/);
+});
+
+test("raw manifest upload: fixed name, strict headers", async () => {
+  const kv = new FakeKV();
+  const pub = await publicKeyB64();
+  const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
+  const f = makeFetch((url) =>
+    url.includes("releases/tags/inbox") ? new Response(JSON.stringify({ id: 7 }), { status: 200 })
+    : new Response(null, { status: 201 }));
+  const req = uploadRequest({
+    token, contentLength: 10, filename: "manifest.json",
+    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(10)); c.close(); } }),
+  });
+  req.headers.set("X-Upload-Id", "abc-123");
+  req.headers.set("X-File-Idx", "-1");
+  req.headers.set("X-Part-Idx", "0");
+  req.headers.set("X-Part-Count", "1");
+  const res = await handle(req, makeEnv(kv, pub), f);
+  assert.equal(res.status, 202);
+  const up = f.calls.find((c) => c.url.includes("uploads.github.com"));
+  assert.match(up.url, /42__abc-123__manifest\.json$/);
+
+  // a manifest with the wrong part headers is rejected
+  const bad = uploadRequest({
+    token, contentLength: 10, filename: "manifest.json",
+    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(10)); c.close(); } }),
+  });
+  bad.headers.set("X-Upload-Id", "abc-123");
+  bad.headers.set("X-File-Idx", "-1");
+  bad.headers.set("X-Part-Idx", "1");
+  bad.headers.set("X-Part-Count", "1");
+  assert.equal((await handle(bad, makeEnv(kv, pub), makeFetch())).status, 400);
+});
+
+test("raw mode: wrong extension, missing headers, bad part index -> 400 before GitHub", async () => {
+  const kv = new FakeKV();
+  const pub = await publicKeyB64();
+  const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
+  const mk = (h) => {
+    const r = uploadRequest({
+      token, contentLength: 10, filename: h.filename,
+      body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(10)); c.close(); } }),
+    });
+    for (const [k, v] of Object.entries(h.headers || {})) r.headers.set(k, v);
+    return r;
+  };
+  const base = { headers: { "X-Upload-Id": "u", "X-File-Idx": "0", "X-Part-Idx": "0", "X-Part-Count": "2" } };
+  assert.equal((await handle(mk({ ...base, filename: "archive.txt" }), makeEnv(kv, pub), makeFetch())).status, 400);
+  assert.equal((await handle(mk({ filename: "a.pak", headers: { "X-Upload-Id": "u" } }), makeEnv(kv, pub), makeFetch())).status, 400);
+  assert.equal((await handle(mk({ ...base, filename: "a.pak", headers: { ...base.headers, "X-Part-Idx": "5" } }), makeEnv(kv, pub), makeFetch())).status, 400);
+});
+
+test("raw mode: zip mode still requires .zip and raw mode ignores it", async () => {
+  const kv = new FakeKV();
+  const pub = await publicKeyB64();
+  const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
+  const r1 = uploadRequest({ token, contentLength: 10, filename: "archive.txt" });
+  assert.equal((await handle(r1, makeEnv(kv, pub), makeFetch())).status, 400);
+  // the same name is fine in raw mode (it's a .pak)
+  const r2 = uploadRequest({
+    token, contentLength: 10, filename: "a.pak",
+    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(10)); c.close(); } }),
+  });
+  r2.headers.set("X-Upload-Id", "u");
+  r2.headers.set("X-File-Idx", "0");
+  r2.headers.set("X-Part-Idx", "0");
+  r2.headers.set("X-Part-Count", "1");
+  const f = makeFetch((url) =>
+    url.includes("releases/tags/inbox") ? new Response(JSON.stringify({ id: 7 }), { status: 200 })
+    : new Response(null, { status: 201 }));
+  assert.equal((await handle(r2, makeEnv(kv, pub), f)).status, 202);
 });
 
 test("missing inbox release is 503 with a helpful message", async () => {
@@ -291,7 +386,7 @@ test("happy path: streams the same body, right headers, dispatch after, 202", as
   assert.match(disp.url, /api\.github\.com\/repos\/octo\/repo\/actions\/workflows\/process-inbox\.yml\/dispatches$/);
   assert.deepEqual(JSON.parse(disp.init.body), { ref: "main" });
 
-  assert.equal(JSON.parse(await kv.get("quota:42")).count, 1, "quota incremented");
+  assert.equal(JSON.parse(await kv.get("quota:42")).bytes, 3, "quota charged in bytes");
 });
 
 test("github upload failure is 502 with no dispatch", async () => {
@@ -319,5 +414,6 @@ test("CORS preflight answers with the allowed origin and headers", async () => {
   assert.equal(res.status, 204);
   assert.equal(res.headers.get("Access-Control-Allow-Origin"), "https://pages.example.com");
   assert.equal(res.headers.get("Access-Control-Allow-Methods"), "POST, OPTIONS");
-  assert.equal(res.headers.get("Access-Control-Allow-Headers"), "Authorization, Content-Type, X-Filename");
+  assert.equal(res.headers.get("Access-Control-Allow-Headers"),
+    "Authorization, Content-Type, X-Filename, X-Upload-Id, X-File-Idx, X-Part-Idx, X-Part-Count");
 });

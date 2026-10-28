@@ -3,7 +3,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { configOk, statusMessage, findNewMod, POLL_MAX_MS } from "../../site/upload-lib.js";
+import { configOk, statusMessage, findNewMod, findNewModByName, POLL_MAX_MS } from "../../site/upload-lib.js";
 
 test("configOk rejects placeholders, empty, non-http and missing values", () => {
   assert.equal(configOk("REPLACE_ME_WORKER_URL"), false);
@@ -43,6 +43,20 @@ test("findNewMod matches by size and excludes previously known ids", () => {
   assert.equal(hit["id"], "c");
   assert.equal(findNewMod(before, after, 12345), null, "unknown size: nothing new");
   assert.equal(findNewMod(null, after, 200)["id"], "b", "empty 'before': first matching mod is new");
+});
+
+test("findNewModByName matches by name (null = any new mod)", () => {
+  const before = [{ id: "a", name: "Old Mod" }];
+  const after = [
+    { id: "a", name: "Old Mod" },
+    { id: "b", name: "New Mod" },
+    { id: "c", name: "Other Mod" },
+  ];
+  assert.equal(findNewModByName(before, after, "New Mod")["id"], "b");
+  assert.equal(findNewModByName(before, after, "new mod")["id"], "b", "case-insensitive");
+  assert.equal(findNewModByName(before, after, "Missing"), null);
+  assert.equal(findNewModByName(before, after, null)["id"], "b", "null name: first new mod");
+  assert.equal(findNewModByName(after, after, null), null, "nothing new: null");
 });
 
 test("POLL_MAX_MS is about 3 minutes", () => {

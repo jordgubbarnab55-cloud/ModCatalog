@@ -24,6 +24,14 @@ Usage:
 
   --client local --root DIR selects the directory-backed client.
   --owner / --repo default to GITHUB_OWNER/GITHUB_REPO (or GITHUB_REPOSITORY).
+
+Two upload shapes are accepted in the inbox (both end in a release-asset zip):
+  * a ready-made .zip package, or
+  * a RAW file set (.utoc/.ucas/.pak, no client-side zipping): each file is
+    streamed to the inbox (part-split when over 100 MB) together with a
+    small JSON manifest; this pipeline reassembles the parts, verifies the
+    per-file sha256 from the manifest, and zips the set HERE on the runner
+    (the Worker is a stateless pass-through and cannot do it).
 """
 
 import argparse
@@ -48,6 +56,9 @@ CATALOG_DEFAULT = SITE / "catalog.json"
 INBOX_TAG = "inbox"
 MOD_TAG_PREFIX = "mod-"
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # matches the Cloudflare free-plan body limit
+MAX_RELEASE_ASSET_BYTES = 2 * 1024 * 1024 * 1024  # GitHub release asset cap
+STALE_AFTER = 7 * 24 * 3600  # seconds; incomplete/stalled inbox items are swept
+MANIFEST_PART = "manifest.json"
 
 # Top-level catalog identity (edit here, not in the generated catalog).
 CATALOG_NAME = "Mod Catalog"
@@ -382,17 +393,157 @@ def inbox_items_from_dir(d: pathlib.Path) -> list[PackageSource]:
 
 
 def inbox_items_from_release(client: PackageClient) -> list[PackageSource]:
-    """Asset name <discordId>__<unixts>__<file>.zip encodes the uploader."""
-    out = []
+    """Classifies inbox assets into PackageSources (drains the whole inbox).
+
+    Two upload shapes coexist:
+      zip packages   <discordId>__<ts>__<safe-name>.zip
+      raw file sets  <discordId>__<uploadId>__manifest.json   (the manifest)
+                     <discordId>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>
+    A raw set is reassembled (parts concatenated, per-file sha256 checked
+    against the manifest) and zipped HERE on the runner — the Worker is a
+    stateless pass-through and cannot do it. Incomplete groups are left
+    alone (their parts are still arriving); groups stalled for over
+    STALE_AFTER are deleted and logged.
+    """
+    sources: list[PackageSource] = []
+    now = datetime.now(timezone.utc)
+    groups: dict[tuple, list] = {}
+    unknown = 0
     for a in client.list_assets(INBOX_TAG):
-        parts = a.name.split("__")
-        uploader = parts[0] if len(parts) >= 3 and parts[0] else None
-        out.append(PackageSource(
-            uploader,
-            (lambda d, n=a.name: (client.download_asset(INBOX_TAG, n, d), d)[1]),
-            (lambda n=a.name: client.delete_asset(INBOX_TAG, n)),
-            a.name))
-    return out
+        info = parse_inbox_name(a.name)
+        if info is None:
+            unknown += 1
+            continue  # unrecognized name: leave for a human
+        if info["kind"] == "zip":
+            if (now - a.created).total_seconds() > STALE_AFTER:
+                client.delete_asset(INBOX_TAG, a.name)
+                print(f"  stale inbox zip {a.name} (>{STALE_AFTER // 86400} days), removed")
+                continue
+            sources.append(PackageSource(
+                info["uploader"],
+                (lambda d, n=a.name: (client.download_asset(INBOX_TAG, n, d), d)[1]),
+                (lambda n=a.name: client.delete_asset(INBOX_TAG, n)),
+                a.name))
+        else:
+            key = (info["uploader"], info["upload_id"])
+            groups.setdefault(key, []).append((info, a))
+    for (uploader, uid), items in sorted(groups.items()):
+        src = raw_group_source(client, uploader, uid, items, now)
+        if src is not None:
+            sources.append(src)
+    if unknown:
+        print(f"  note: {unknown} unrecognized inbox asset name(s) left for a human")
+    return sources
+
+
+def parse_inbox_name(name: str) -> dict | None:
+    """Parses an inbox asset name; None when it matches neither shape."""
+    parts = name.split("__")
+    if len(parts) == 3 and parts[2].lower() == MANIFEST_PART:
+        return {"kind": "manifest", "uploader": parts[0] or None, "upload_id": parts[1]}
+    if len(parts) == 2 and parts[1].lower().endswith(".zip"):
+        return {"kind": "zip", "uploader": None, "name": name}
+    if len(parts) == 3 and parts[2].lower().endswith(".zip"):
+        return {"kind": "zip", "uploader": parts[0] or None, "name": name}
+    if len(parts) == 5 and parts[2].startswith("f") and parts[3].startswith("p") and "of" in parts[3]:
+        return {"kind": "part", "uploader": parts[0] or None, "upload_id": parts[1],
+                "file_idx": int(parts[2][1:]),
+                "part_idx": int(parts[3][1:].split("of")[0]),
+                "part_count": int(parts[3].split("of")[1]),
+                "filename": parts[4]}
+    return None
+
+
+def make_package_zip(files: dict, dest: pathlib.Path) -> None:
+    """Zips a raw file set into one package (deterministic member order,
+    .pak/.ucas/.utoc first, same compression as the example packages)."""
+    order = {".pak": 0, ".ucas": 1, ".utoc": 2}
+
+    def rank(n: str) -> tuple:
+        ext = n.rsplit(".", 1)[-1].lower() if "." in n else ""
+        return (order.get(ext, 3), n)
+
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        for n in sorted(files, key=rank):
+            z.writestr(n, files[n])
+
+
+def raw_group_source(client: PackageClient, uploader: str | None, uid: str,
+                     items: list, now: datetime) -> PackageSource | None:
+    """Builds one PackageSource for a complete raw file set, or None (wait)."""
+    label = f"raw {uid}"
+    newest = max(a.created for _, a in items)
+    if (now - newest).total_seconds() > STALE_AFTER:
+        for _, a in items:
+            client.delete_asset(INBOX_TAG, a.name)
+        print(f"  REJECTED {label}: stalled for >{STALE_AFTER // 86400} days, removed", file=sys.stderr)
+        return None
+
+    manifest_asset = next((a for i, a in items if i["kind"] == "manifest"), None)
+    if manifest_asset is None:
+        print(f"  {label}: manifest missing, waiting")
+        return None
+
+    parts_by_file: dict[int, list] = {}
+    for i, a in items:
+        if i["kind"] == "part":
+            parts_by_file.setdefault(i["file_idx"], []).append((i, a))
+
+    try:
+        manifest = json.loads(client.asset_bytes(INBOX_TAG, manifest_asset.name))
+    except Exception as ex:
+        # an unparseable manifest is fatal (delete + log via the normal path)
+        def materialize_bad(dest: pathlib.Path) -> pathlib.Path:
+            raise PackageError(f"manifest is not valid JSON: {ex}")
+        return PackageSource(uploader, materialize_bad,
+                            (lambda: [client.delete_asset(INBOX_TAG, a.name) for _, a in items]),
+                            label)
+
+    files = manifest.get("files", [])
+    if not files:
+        print(f"  {label}: manifest has no files, waiting")
+        return None
+    if set(parts_by_file) - set(range(len(files))):
+        print(f"  {label}: parts for unknown file indices, waiting")
+        return None
+    for idx, f in enumerate(files):
+        need = f.get("parts", 1)
+        have = sorted((i for i, _ in parts_by_file.get(idx, [])), key=lambda i: i["part_idx"])
+        if len(have) != need or {i["part_idx"] for i in have} != set(range(need)):
+            print(f"  {label}: {f.get('name')}: parts incomplete ({len(have)}/{need}), waiting")
+            return None
+
+    def materialize(dest: pathlib.Path) -> pathlib.Path:
+        data: dict = {}
+        for idx, f in enumerate(files):
+            parts = sorted(parts_by_file[idx], key=lambda x: x[0]["part_idx"])
+            for i, _ in parts:
+                if i["part_count"] != f.get("parts", 1):
+                    raise PackageError(f"file {f.get('name')}: part header says "
+                                      f"{i['part_count']} parts, manifest says {f.get('parts')}")
+            blob = bytearray()
+            for _, a in parts:
+                blob += client.asset_bytes(INBOX_TAG, a.name)
+            want = f.get("sha256")
+            got = hashlib.sha256(bytes(blob)).hexdigest()
+            if want and got != want:
+                raise PackageError(f"file {f.get('name')}: sha256 mismatch "
+                                  f"(client said {want[:12]}…, got {got[:12]}…)")
+            data[f["name"]] = bytes(blob)
+        check_member_names(list(data))
+        if len(set(data)) != len(data):
+            raise PackageError("duplicate file names in the upload")
+        make_package_zip(data, dest)
+        if dest.stat().st_size > MAX_RELEASE_ASSET_BYTES:
+            raise PackageError(f"package zip is {dest.stat().st_size} bytes; "
+                              f"the release asset limit is {MAX_RELEASE_ASSET_BYTES}")
+        return dest
+
+    def delete() -> None:
+        for _, a in items:
+            client.delete_asset(INBOX_TAG, a.name)
+
+    return PackageSource(uploader, materialize, delete, label)
 
 
 class Processor:

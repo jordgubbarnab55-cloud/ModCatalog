@@ -5,8 +5,17 @@
 // (KV binding + secrets + vars) and a `fetch` function, so tests can supply
 // fakes. The Worker never stores file bytes: the upload body is streamed
 // straight through to GitHub releases (no buffering, no cold storage).
+//
+// Two upload shapes:
+//   * zip packages: X-Filename <name>.zip, one upload per package
+//   * raw file sets (no client-side zipping): each .utoc/.ucas/.pak file
+//     (part-split when over 100 MB) plus a manifest.json upload, all tagged
+//     with the same X-Upload-Id; the workflow reassembles + zips on the
+//     runner (this Worker cannot — 10 ms CPU, stateless).
 
 const MAX_BODY_BYTES = 100 * 1024 * 1024; // Cloudflare free-plan request-body limit
+const DEFAULT_DAILY_BYTES = 2147483648; // 2 GiB of uploads per user per UTC day
+const RAW_EXTENSIONS = [".pak", ".ucas", ".utoc"];
 const INBOX_CACHE_KEY = "cache:inbox_release_id";
 const INBOX_CACHE_MS = 3600 * 1000;
 const INBOX_TAG = "inbox";
@@ -156,7 +165,7 @@ async function handleUpload(request, env, fetchImpl) {
       headers: {
         ...cors,
         "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Filename",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Filename, X-Upload-Id, X-File-Idx, X-Part-Idx, X-Part-Count",
       },
     });
   }
@@ -181,25 +190,56 @@ async function handleUpload(request, env, fetchImpl) {
       "(Cloudflare free plan). Split the package or contact the maintainer." }, 413, cors);
   }
 
-  // 3. filename
+  // 3. filename (zip packages vs raw file sets)
+  const uploadId = (request.headers.get("X-Upload-Id") || "").trim();
+  const raw = uploadId.length > 0;
   const filename = request.headers.get("X-Filename") || "";
-  if (!filename.toLowerCase().endsWith(".zip")) {
-    return json({ error: "X-Filename must end in .zip" }, 400, cors);
+  let assetName;
+  if (raw) {
+    // raw file sets: the set's files plus a small manifest, all tagged with
+    // X-Upload-Id. The workflow reassembles parts and zips on the runner.
+    const fileIdx = request.headers.get("X-File-Idx");
+    const partIdx = request.headers.get("X-Part-Idx");
+    const partCount = request.headers.get("X-Part-Count");
+    if (fileIdx == null || partIdx == null || partCount == null) {
+      return json({ error: "raw uploads need X-File-Idx, X-Part-Idx, X-Part-Count" }, 400, cors);
+    }
+    const isManifest = fileIdx === "-1";
+    if (!isManifest && (!/^\d+$/.test(fileIdx) || !/^\d+$/.test(partIdx) || !/^\d+$/.test(partCount) || Number(partIdx) >= Number(partCount))) {
+      return json({ error: "bad part headers" }, 400, cors);
+    }
+    if (isManifest) {
+      if (filename !== "manifest.json" || partIdx !== "0" || partCount !== "1") {
+        return json({ error: "bad manifest headers" }, 400, cors);
+      }
+      assetName = `${discordId}__${uploadId}__manifest.json`;
+    } else {
+      const lower = filename.toLowerCase();
+      if (!RAW_EXTENSIONS.some((e) => lower.endsWith(e))) {
+        return json({ error: "raw files must be .pak/.ucas/.utoc (plus the manifest.json upload)" }, 400, cors);
+      }
+      assetName = `${discordId}__${uploadId}__f${fileIdx}__p${partIdx}of${partCount}__${sanitizeFilename(filename)}`;
+    }
+  } else {
+    if (!filename.toLowerCase().endsWith(".zip")) {
+      return json({ error: "X-Filename must end in .zip" }, 400, cors);
+    }
+    assetName = `${discordId}__${Math.floor(Date.now() / 1000)}__${sanitizeFilename(filename)}`;
   }
-  const safeName = sanitizeFilename(filename) || "upload.zip";
 
-  // 4. daily quota (KV is eventually consistent; a slightly late count is fine)
-  const limit = Number(env.UPLOAD_DAILY_LIMIT) > 0 ? Number(env.UPLOAD_DAILY_LIMIT) : 10;
+  // 4. daily quota, by BYTES (a raw set costs N part uploads; KV is
+  // eventually consistent, a slightly late count is fine)
+  const limit = Number(env.UPLOAD_DAILY_BYTES) > 0 ? Number(env.UPLOAD_DAILY_BYTES) : DEFAULT_DAILY_BYTES;
   const today = new Date().toISOString().slice(0, 10);
   const qKey = `quota:${discordId}`;
-  let count = 0;
+  let used = 0;
   const qRaw = await env.TOKENS.get(qKey);
   if (qRaw) {
     const q = JSON.parse(qRaw);
-    if (q.date === today) count = q.count;
+    if (q.date === today) used = q.bytes || 0;
   }
-  if (count >= limit) {
-    return json({ error: `daily upload limit reached (${limit}/day UTC); try again tomorrow` }, 429, cors);
+  if (used + contentLength > limit) {
+    return json({ error: `daily upload limit reached (${Math.round(limit / 1073741824)} GiB/day UTC); try again tomorrow` }, 429, cors);
   }
 
   // 5. the fixed "inbox" release (id cached in KV)
@@ -210,7 +250,6 @@ async function handleUpload(request, env, fetchImpl) {
   }
 
   // 6. stream straight through (do NOT read the body into memory)
-  const assetName = `${discordId}__${Math.floor(Date.now() / 1000)}__${safeName}`;
   let upload;
   try {
     upload = await fetchImpl(
@@ -232,8 +271,9 @@ async function handleUpload(request, env, fetchImpl) {
     return json({ error: `github upload failed: HTTP ${upload.status}` }, 502, cors);
   }
 
-  // 7. count it, then wake the workflow (wake-up only; it drains the inbox)
-  await env.TOKENS.put(qKey, JSON.stringify({ date: today, count: count + 1 }));
+  // 7. charge the bytes, then wake the workflow (wake-up only; it drains
+  // the inbox and skips incomplete raw groups)
+  await env.TOKENS.put(qKey, JSON.stringify({ date: today, bytes: used + contentLength }));
   let dispatch;
   try {
     dispatch = await fetchImpl(

@@ -34,6 +34,13 @@ export function findNewMod(before, after, size) {
   return (after || []).find((m) => m && m["size"] === size && !known.has(m["id"])) || null;
 }
 
+/** The first mod in `after` whose name matches (`null` = any) and whose id was not in `before`. */
+export function findNewModByName(before, after, name) {
+  const known = new Set((before || []).map((m) => m["id"]));
+  return (after || []).find((m) => m && !known.has(m["id"]) &&
+    (name === null || (m["name"] || "").toLowerCase() === String(name).toLowerCase())) || null;
+}
+
 /** Max poll window: about 3 minutes. */
 export const POLL_MAX_MS = 180000;
 
@@ -43,5 +50,6 @@ if (typeof window !== "undefined") {
   window.configOk = configOk;
   window.statusMessage = statusMessage;
   window.findNewMod = findNewMod;
+  window.findNewModByName = findNewModByName;
   window.POLL_MAX_MS = POLL_MAX_MS;
 }

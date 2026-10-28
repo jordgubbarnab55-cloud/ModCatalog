@@ -14,8 +14,8 @@ GITHUB_REPO = "REPLACE_ME_GITHUB_REPO"
 # Origin allowed for CORS on /upload (the Pages site). The native app sends
 # no Origin header and is unaffected.
 ALLOWED_ORIGIN = "REPLACE_ME_ALLOWED_ORIGIN"
-# Optional: uploads per Discord user per UTC day (default 10)
-UPLOAD_DAILY_LIMIT = "10"
+# Optional: upload bytes per Discord user per UTC day (default 2 GiB)
+UPLOAD_DAILY_BYTES = "2147483648"
 
 # Secrets -- set with `npx wrangler secret put NAME`, never committed:
 #   DISCORD_PUBLIC_KEY  base64 public key from the Discord application

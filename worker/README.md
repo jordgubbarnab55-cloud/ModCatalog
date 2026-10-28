@@ -33,21 +33,53 @@ node --test        # 18 offline tests: fake KV, injected fetch, Ed25519 keypair
 
 ## Upload API contract (for the ModManager app)
 
+### Shape 1 — a ready-made .zip package
+
 ```
 POST <worker-url>/upload
 Authorization: Bearer <token from /token>
 X-Filename: <name>.zip          # required, must end in .zip
-Content-Type: application/zip    # (any; the value is not validated)
 <body: the raw zip bytes>
 ```
 
+### Shape 2 — raw container files (no client-side zipping)
+
+Send the `.utoc` / `.ucas` / `.pak` files directly (the workflow zips them
+on the runner). Each file goes through the same endpoint, **part-split into
+≤ 90 MB slices when a file is over 100 MB** (7z-style contiguous slices —
+plain byte chunks, concatenated = the original file). Every upload of the
+set carries the same `X-Upload-Id`, plus the set's `manifest.json` upload:
+
+```
+POST <worker-url>/upload
+Authorization: Bearer <token from /token>
+X-Upload-Id: <uuid>            # one per set; switches the Worker into raw mode
+X-Filename: <file name>        # .pak/.ucas/.utoc, or "manifest.json"
+X-File-Idx:  <i>               # 0-based file index ("-1" = the manifest)
+X-Part-Idx:  <j>
+X-Part-Count: <n>
+Content-Length: (required)
+<body: this slice of the file>
+```
+
+`manifest.json` (uploaded with `X-File-Idx: -1`, `X-Part-Idx: 0`,
+`X-Part-Count: 1`):
+
+```json
+{ "files": [ { "name": "mod.utoc", "sha256": "<hex of the FULL file>", "parts": 2 } ] }
+```
+
+The `sha256` is of the full, reassembled file (the workflow verifies it).
+Order the `files` entries the way you want them inside the package zip.
+
 | Status | Meaning |
 |--------|---------|
-| `202`  | Queued. Body was streamed to the `inbox` release and the processing workflow was woken. The mod appears in `catalog.json` within a couple of minutes. |
+| `202`  | Queued. Body was streamed to the `inbox` release and the processing workflow was woken. The mod appears in `catalog.json` within a few minutes (raw sets: after all parts arrive). |
 | `401`  | Missing / unknown / revoked token. |
 | `411`  | `Content-Length` header missing (required). |
-| `413`  | Upload over 100 MB (Cloudflare free-plan request-body limit). |
-| `429`  | Daily per-user quota exceeded (default 10/day, UTC). |
+| `413`  | A single upload over 100 MB (Cloudflare free-plan request-body limit) — split the file into parts. |
+| `429`  | Daily per-user byte quota exceeded (default 2 GiB/day, UTC). |
+| `400`  | Bad name/headers (zip mode: not a .zip; raw mode: not .pak/.ucas/.utoc, or bad part/manifest headers). |
 | `502`  | GitHub failed (token wrong/expired, or upload/dispatch error). Nothing was stored; do not retry blindly — check the token. |
 | `503`  | The `inbox` release does not exist yet; run the Seed legacy mods (or Process inbox) workflow once. |
 
@@ -55,12 +87,22 @@ Notes:
 
 - The request body is **streamed, not buffered**: do not wait for a full
   response before uploading; a `202` means GitHub accepted the bytes.
+- **The 100 MB limit is per upload (one part); the final package may be up
+  to GitHub's per-asset limit (2 GiB)** — that is the whole point of raw
+  file sets. Zip mode keeps the 100 MB per-package cap.
+- Raw sets: the `process-inbox` workflow waits for the complete set
+  (manifest + every part), reassembles on the runner, verifies the
+  per-file sha256, zips the set, then validates and re-homes as usual.
+  Stalled sets are swept after 7 days.
 - The response and CORS headers are safe for both the native app (no
   `Origin` sent) and a web page: `Access-Control-Allow-Origin` is the
   `ALLOWED_ORIGIN` var only; allowed headers are
-  `Authorization, Content-Type, X-Filename`.
-- Asset names in the inbox are `<discordId>__<unixts>__<safe-filename>.zip`;
-  the workflow reads the real GUID out of the package and re-homes it.
+  `Authorization, Content-Type, X-Filename, X-Upload-Id, X-File-Idx,
+  X-Part-Idx, X-Part-Count` (extra headers are accepted by the Worker).
+- Asset names in the inbox are `<discordId>__<ts>__<safe-filename>.zip`
+  (zip mode) or `<discordId>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>`
+  + `<discordId>__<uploadId>__manifest.json` (raw mode); the workflow reads
+  the real GUID out of the package and re-homes it.
 
 ### Minimum GitHub token permissions (for `GITHUB_TOKEN`)
 
