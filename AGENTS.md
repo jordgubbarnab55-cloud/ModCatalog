@@ -1,27 +1,73 @@
 # AGENTS.md
 
-ModCatalog — a **trailer-driven public mod catalog**. Static site on GitHub
-Pages + a JSON manifest, both *generated* from the mod packages themselves.
-Serves two consumers: browsers (the web page, for people who don't want
-ModManager) and **ModManager's Browse tab** (via the manifest, which speaks
-the exact `catalog.json` schema its `Net/CatalogClient` parses).
+ModCatalog — a **trailer-driven public mod catalog + upload system** on free
+tiers (GitHub Actions/Releases/Pages + one Cloudflare Worker). Static site
+on GitHub Pages + a JSON manifest, all *generated* from the mod packages.
+Serves two consumers: browsers (the web page) and **ModManager's Browse tab**
+(via the manifest, the exact `catalog.json` schema its `Net/CatalogClient`
+parses). Uploads come from Discord-minted tokens (no OAuth, no accounts).
 
-## Core contract: the zips are the source of truth
+## Core contract: the release assets are the source of truth
 
-- A mod = one `.zip` in `assets/` containing a UE packaged container whose
-  `.utoc` carries a **metadata trailer** (`"UEMODMET"` magic + compact
-  UTF-8 JSON payload: `schema`/`title`/`author`/`description`/`version`/
-  `guid` + optional base64 `image` PNG/JPEG ≤ 4 MiB).
-- `catalog.json` and `assets/covers/` are **generated artifacts — never edit
-  them by hand**. All mod data (including the `id`, which is the trailer
-  GUID) is derived from the packages. The top-level catalog
-  `name`/`description` live as constants in `build.py`.
-- **Packages without a valid trailer are rejected**: `build.py` exits 1 and
-  leaves the catalog untouched; in CI the push goes red. No overrides, no
-  hand-filled entries — if a package is rejected, fix the package.
-- The schema is URL-shaped: `file`/`cover` resolve **relative to the catalog
-  URL**, absolute URLs work too. Moving packages to any host (CDN, releases,
-  S3) means only changing `file` — nothing in the site or app.
+- A mod = a `.zip` **release asset** in a per-mod release tagged
+  `mod-<guid>` (one release per mod), whose package is a UE container
+  whose `.utoc` carries a **metadata trailer** (`"UEMODMET"` magic +
+  compact UTF-8 JSON payload: `schema`/`title`/`author`/`description`/
+  `version`/`guid` + optional base64 `image` PNG/JPEG ≤ 4 MiB).
+- `site/catalog.json` is a **generated artifact — never edit it by hand**.
+  All mod data (including the `id`, the trailer GUID) is derived from the
+  packages. Top-level catalog `name`/`description` are constants in
+  `build.py`.
+- **Packages without a valid trailer are rejected** with a clear reason and
+  removed from the inbox; **one bad package never blocks the rest of the
+  run**. No hand-filled entries — if a package is rejected, fix the package.
+- Entry URLs are the **stable** `https://github.com/<owner>/<repo>/
+  releases/download/<tag>/<asset>` URLs (they 302 to short-lived signed
+  URLs — never store the signed ones). The schema is URL-shaped, so moving
+  packages to another host means changing `file` only.
+- **Never** commit package zips or cover images to git: releases are the
+  storage, and Pages must only serve the site + `catalog.json` (bandwidth).
+
+## The inbox → re-home flow (and why)
+
+The Worker cannot know a package's GUID without parsing the zip (10 ms CPU
+on the free plan, and it must not trust client-supplied IDs), so:
+
+1. The Worker streams each upload into one fixed release tagged
+   `inbox`, asset name `<discordId>__<unixts>__<safe-filename>.zip`
+   (the id encodes the uploader). It then dispatches `process-inbox.yml`
+   — a **wake-up only, no payload**.
+2. **Each run drains the WHOLE inbox.** GitHub `concurrency` groups keep
+   only one pending run (a newer queued run cancels the older pending
+   one), so processing "the asset named in the dispatch payload" would
+   silently strand uploads. Hence `concurrency: {group: catalog,
+   cancel-in-progress: false}` — index merges never race.
+3. The workflow validates, then **re-homes** the package: ensures release
+   `mod-<guid>` exists (title = mod name), uploads the zip as
+   `<SafeName>-<version>.zip`, uploads the cover (if any) as
+   `<guid>-cover-<sha256[:8]>.png|jpg`, and deletes the inbox asset
+   (whether or not processing succeeded). GitHub cannot move assets between
+   releases, hence the re-upload (runners have bandwidth to spare).
+4. **Versions are immutable**: an existing `<SafeName>-<version>.zip` name
+   rejects the upload (never overwrite). Old versions' assets stay; the
+   catalog entry points at the most recently uploaded version.
+5. The workflow creates the `inbox` release if it does not exist, so
+   nobody has to create it by hand.
+
+## Ownership (the GUID is self-declared inside the file)
+
+- The **first** uploader of a GUID becomes its owner (`uploader` catalog
+  field, the Discord user id). Later uploads of an existing GUID from a
+  different Discord id are rejected and their inbox asset deleted.
+- Discord ids in the `ADMIN_DISCORD_IDS` repo variable (comma-separated,
+  read from the environment) bypass the check. Uploads with no uploader
+  (seeding, `--from-dir`) count as admin but never *become* the owner.
+- The trailer's `author` is self-declared display text; the verified
+  identity is `uploader`. Do not present `author` as verified.
+- Note: `rebuild` inherits `uploader` from the existing catalog (the
+  re-homed asset names don't carry the id); a fully lost catalog yields
+  `uploader: null` entries, and the first subsequent uploader claims the
+  GUID.
 
 ## Trailer format (and who else speaks it)
 
@@ -35,80 +81,142 @@ Binary v1, appended at exactly `TocEnd` of the `.utoc`, zero-padded to
   schema. Keep the two in lockstep.
 - **The reference implementation is C#** in the sibling workspace
   `C:\Users\Admin\Documents\QwenWorkspace\io-trailer\` (`TrailerFormat.cs`,
-  `ModMetadata.cs`, `TrailerOps.cs`), used by ModManager. When in doubt about
-  the format, the C# + its tests win. **Cross-check Python-written trailers
-  with C# before trusting them** (scratch console app with a
-  `ProjectReference` to `io-trailer.csproj`, call `TrailerOps.ReadTrailer` —
-  done this way in 2026-09 for all three example packages).
+  `ModMetadata.cs`, `TrailerOps.cs`), used by ModManager. When in doubt
+  about the format, the C# + its tests win. **Cross-check Python-written
+  trailers with C# before trusting them** (scratch console app with a
+  `ProjectReference` to `io-trailer.csproj`, call
+  `TrailerOps.ReadTrailer` — done this way in 2026-09 for all three
+  example packages).
 - Trailers are normally written by **ModManager's Development tab**
   (drop the container folder in the Package drop zone).
+- Trailer v1 holds **one** cover image. More preview images would need a
+  schema change in lockstep with the C# reference — not done.
 
-## Files
+## Pipeline (`build.py`, stdlib only)
 
-```
-build.py                  generator: assets/*.zip -> catalog.json + assets/covers/
-trailer.py                stdlib trailer read/write/validate (format twin of io-trailer)
-make_examples.py          dev tool: python make_examples.py <pair-dir> [cover.jpg]
-                          builds sample packages from a REAL .utoc/.ucas/.pak triple
-catalog.json              GENERATED manifest — do not edit
-index.html                GitHub Pages site — static renderer of catalog.json
-assets/
-    *.zip                 mod packages (source of truth)
-    covers/{guid}.png|jpg GENERATED cover images, named by trailer GUID
-.github/workflows/build-catalog.yml
-```
+- `python build.py process --from-inbox` — drain the `inbox` release
+  (list/download/upload/delete through the client interface), validate,
+  re-home, merge into `site/catalog.json`.
+- `python build.py process --from-dir <dir>` — treat the dir's zips as
+  **admin** inbox items (no uploader); used for one-off seeding.
+- `python build.py rebuild` — enumerate all `mod-*` releases, read each
+  newest version zip's trailer, regenerate the whole catalog from scratch
+  (releases are the source of truth, so a lost/corrupt catalog recovers).
+- **`--client local --root <dir>`** selects the directory-backed fake
+  (releases = folders, assets = files, mtime = created-at) so the whole
+  pipeline runs offline; the default `gh` client shells out to the
+  preinstalled `gh` CLI (auth via `GH_TOKEN`). `--owner/--repo` default to
+  `GITHUB_OWNER`/`GITHUB_REPO`/`GITHUB_REPOSITORY`.
+- **Per-package validation** (failure → delete inbox asset, log, continue):
+  valid zip; safe member names (no absolute paths, no `..`); exactly one
+  `.utoc` with a valid trailer; at least one `.ucas` and one `.pak`;
+  size under 100 MB.
+- Output is **deterministic** (sorted entries, stable JSON, `updated` from
+  asset creation time on rebuild) so no-op runs produce byte-identical
+  output and no churn commits.
 
-## CI: how the catalog regenerates
+## Workflows (`.github/workflows/`, all with explicit `permissions`)
 
-`build-catalog.yml` runs `python build.py` (Python 3.12, **no pip installs —
-everything is stdlib**) and commits the generated changes back. Rules that
-matter:
+- `process-inbox.yml` — `workflow_dispatch` only (the Worker dispatches it;
+  the payload carries nothing). `permissions: contents:write, pages:write,
+  id-token:write`; `concurrency: {group: catalog, cancel-in-progress:
+  false}`. Steps: checkout, setup-python 3.12, `python build.py process
+  --from-inbox` (with `GH_TOKEN: ${{ github.token }}`), then the shared
+  `commit-and-deploy` composite action.
+- `rebuild.yml` — `workflow_dispatch`; `python build.py rebuild`, commit,
+  deploy. Same concurrency group.
+- `seed-legacy.yml` — one-off `workflow_dispatch`; `python build.py process
+  --from-dir legacy-assets` (admin seeding of the example mods), commit,
+  deploy. Run once after cutover, then delete `legacy-assets/` (SETUP.md
+  step 8).
+- `deploy-site.yml` — push to `site/**` (a human editing `index.html` /
+  `upload.html` / `config.json`): upload `site/` as the Pages artifact and
+  deploy. Bot pushes with `GITHUB_TOKEN` do not trigger it → no loops.
+- `.github/actions/commit-and-deploy/action.yml` — commit
+  `site/catalog.json` **only if changed** (scoped `git status --porcelain`
+  + `git add` — a whole-tree check broke once when Python left
+  `__pycache__/`), push, then `actions/upload-pages-artifact` (path `site`)
+  + `actions/deploy-pages`. **The Pages deploy happens in the same run as
+  the commit** because a commit pushed with `GITHUB_TOKEN` does not
+  trigger other workflows.
 
-- Triggered by `push` matching **`assets/**/*.zip` only**. The bot's commit
-  touches `catalog.json` + `assets/covers/`, which never match the filter →
-  **no re-trigger loops**. Don't widen the path filter.
-- `workflow_dispatch` is available for testing; use it after changing
-  `build.py`/`trailer.py` (those paths don't trigger the workflow).
-- The commit-back check is deliberately scoped:
-  `git status --porcelain catalog.json assets/covers` — a whole-tree check
-  broke once when Python left `__pycache__/` (now gitignored, but the scoping
-  is the real fix). `git add` is likewise path-scoped.
-- Generator output is **deterministic** (sorted entries, stable JSON) so an
-  unchanged package set produces a byte-identical catalog → no-op runs, no
-  churn commits.
-- `build.py` also **prunes stale covers**: `assets/covers/*.png|jpg` not
-  referenced by the current manifest are deleted.
-- One `.utoc` per zip, enforced (0 or 2+ → reject).
+## The Cloudflare Worker (`worker/`)
+
+Plain JS ES modules, **zero runtime dependencies** (wrangler is a
+devDependency run by the owner only). Everything service-facing is
+injected: `handle(request, env, fetch)`.
+
+- **`POST /discord`** — Interactions endpoint (slash commands over HTTPS;
+  **no gateway/WebSocket bot**). Ed25519 signature check required (401
+  without). PING→PONG. `/token` mints `mm_` + base64url(32 random bytes);
+  only `sha256(token)` is stored (KV `tok:<hash>`, `user:<discordId>`);
+  one active token per user (a new one invalidates the old); reply is
+  ephemeral (flags 64). `/token revoke` deletes both keys. **No GitHub
+  calls in this path** (Discord expects a reply within 3 s).
+- **`POST /upload`** — `Bearer` token → 401; `Content-Length` required →
+  411; over 100 MB → 413 **before any GitHub call** (the free-plan
+  request-body limit); `X-Filename` must end in `.zip`; per-user daily
+  quota (default 10) → 429; missing `inbox` release → 503. Then it
+  **streams `request.body` straight through** to
+  `uploads.github.com` (no buffering, no storage on the Worker) with the
+  asset name `<discordId>__<unixts>__<safe>.zip`, dispatches
+  `process-inbox.yml` (`ref: main`), and answers `202 {"status":"queued"}`.
+  GitHub failure → 502 without dispatch. CORS: `Access-Control-Allow-Origin`
+  = `ALLOWED_ORIGIN` only; allowed headers `Authorization, Content-Type,
+  X-Filename`.
+- KV is eventually consistent — a slightly late quota count is acceptable.
+- Fine-grained `GITHUB_TOKEN` **expires** (max 1 year); expired token →
+  502s. Calendar-reminder at creation.
+- `scripts/register-commands.mjs` (registers the slash commands; reads
+  `DISCORD_APP_ID`/`DISCORD_BOT_TOKEN` from the environment at run time,
+  stores nothing) and `scripts/smoke-test.sh` (upload + catalog poll) are
+  **owner** tools.
 
 ## The web page
 
-`index.html` is a single self-contained file: no build step, no framework,
-no CDN, no external JS. It `fetch('catalog.json', {cache:'no-store'})`
-same-origin at load and renders cards dynamically — **zero mod data in the
-HTML**. Design must mirror ModManager's `BrowseModCard` (the cards there are
-the reference): Adonis dark palette (window `#2A2B34`, card surface
-`#32323F` / hover `#3D3D4C`, fg `#F0F0F0` @ 75% secondary, accent `#206BD4`
-/ hover `#3C81E2`), 90×90 cover with accent letter fallback, title 14
-semibold, `author • v{version}` + description 12, and a 52×52 solid-accent
-square with the Lucide inbox icon + centered size hint (2 cards/row, 1 on
-narrow screens). The download button is a plain `download` link — the zip is
-fetched **only on click**, never at render time (hard requirement: the page
-must not make browsers download package bytes for browsing).
+`site/index.html` is a single self-contained file: no build step, no
+framework, no CDN, no external JS. It `fetch('catalog.json',
+{cache:'no-store'})` same-origin at load and renders cards dynamically —
+**zero mod data in the HTML**. Design mirrors ModManager's `BrowseModCard`
+(the cards there are the reference): Adonis dark palette (window
+`#2A2B34`, card surface `#32323F` / hover `#3D3D4C`, fg `#F0F0F0` @ 75%
+secondary, accent `#206BD4` / hover `#3C81E2`), 90×90 cover with accent
+letter fallback, title 14 semibold, `author • v{version}` + description 12,
+and a 52×52 solid-accent square with the Lucide inbox icon + centered size
+hint (2 cards/row, 1 on narrow screens). The download button is a plain
+`download` link — the zip is fetched **only on click**, never at render
+time (hard requirement). Covers are plain `<img loading="lazy">` with **no**
+`crossorigin` attribute and **no** `fetch()` of release URLs (browser
+`fetch()` of release assets fails CORS; `<img src>` and `<a href>` work).
+`file`/`cover` are absolute release URLs; `new URL(url, base)` handles
+them. The `download` attribute is ignored cross-origin, but GitHub serves
+release assets as attachments so downloads still start.
+
+`site/upload.html` (same style, no deps) reads `site/config.json`
+(`{"uploadUrl": ...}`) — one value the owner edits after deploying the
+Worker — and shows "upload is not configured yet" while it is a
+placeholder. It uploads via `XMLHttpRequest` (progress events) and polls
+`catalog.json` after a 202. Its pure helpers live in `site/upload-lib.js`
+(loaded as an ES module; exercised by `worker/test/upload-lib.test.js`).
+**Do not weaken the "no package bytes at render time" rule** for either
+page.
 
 ## Adding a mod (the whole flow)
 
-1. Zip the packaged container with a valid trailer (ModManager Development
-   tab, or `make_examples.py` for experiments — it strips any pre-existing
-   trailer before appending, so it works on already-trailed pairs).
-2. Drop the `.zip` into `assets/`, push. CI does the rest.
+1. Discord: `/token` → copy the token.
+2. Upload the `.zip` (ModManager app against `worker/README.md`'s contract,
+   or `upload.html`). Or, for maintainers: `python build.py process
+   --from-dir <dir>` (admin), or the `seed-legacy` workflow.
+3. The `Process inbox` workflow does the rest; the mod appears in the
+   catalog within a couple of minutes.
 
 ## Using it from ModManager
 
 Browse tab → server URL:
-`https://jordgubbarnab55-cloud.github.io/ModCatalog/catalog.json` → Refresh.
-ModManager's `CatalogClient` is lenient (missing `accent`/`size`/`cover`
-fine), so the generated manifest (which has no `accent`) needs no app
-changes.
+`https://jordgubbarnab55-cloud.github.io/ModCatalog/catalog.json` →
+Refresh. `Net/CatalogClient` is lenient (missing `accent`/`size`/`cover`
+fine). It must follow the release-URL 302 redirect (app-side setting;
+verify per SETUP.md).
 
 ## Environment & tooling notes (this machine)
 
@@ -118,9 +226,9 @@ changes.
   `git-credential-manager github login`). No tokens in any config.
 - `gh` CLI (no `gh auth` set up) works by borrowing a GCM token:
   `TOKEN=$(printf "protocol=https\nhost=github.com\n" | git-credential-manager get | grep '^password=' | cut -d= -f2); GH_TOKEN="$TOKEN" gh ...`
-- GitHub **Pages** (legacy, `main` branch, `/`) takes ~1 min per build; poll
-  `gh api repos/jordgubbarnab55-cloud/ModCatalog/pages` until
-  `"status":"built"`.
+- GitHub **Pages**: source = **GitHub Actions** (not a branch); deploys
+  come from the workflows above (custom-Actions deploys are not subject to
+  the 10-builds/hour legacy soft limit).
 - **Windows Python 3.14 is cp1252-hostile**: read JSON/text with
   `encoding="utf-8"` explicitly; console output of non-ASCII (em dashes)
   mangles but files on disk are fine.
@@ -128,7 +236,8 @@ changes.
   `/tmp` (`C:\Users\Admin\AppData\Local\Temp`); Windows-native Python
   resolves neither. Use workspace-relative or absolute paths.
 - CI runner quirk observed: `actions/checkout` + Python leaves
-  `__pycache__/` behind — hence the `.gitignore` and the scoped status check.
+  `__pycache__/` behind — hence the `.gitignore` and the scoped status
+  check in the commit step.
 - Sibling repos in `C:\Users\Admin\Documents\`: `QwenWorkspace`
   (ModManager + `io-trailer` + `example_server` + the
   `example_mod/` pair the sample packages are built from) — separate git

@@ -1,72 +1,102 @@
 # Mod Catalog
 
-A public mod catalog, served as static files via **GitHub Pages**, that does
-two things:
+A public mod catalog and upload system, running entirely on free tiers:
+**GitHub** (Actions + Releases + Pages) and one **Cloudflare Worker**.
 
-1. **Web page** — a browsable mod list (same card layout as ModManager's
-   Browse/Discover tab) for people who don't want to install ModManager.
-2. **Manifest** — `catalog.json`, the same catalog schema ModManager's Browse
-   tab speaks, so ModManager can use this repo as a source.
+1. **Web page** — `https://jordgubbarnab55-cloud.github.io/ModCatalog/`, a
+   browsable mod list (same card layout as ModManager's Browse/Discover tab)
+   for people who don't want to install ModManager.
+2. **Manifest** — `catalog.json` (served from Pages at the same base URL),
+   the same catalog schema ModManager's Browse tab speaks.
+3. **Uploads** — Discord `/token` mints a personal token; the ModManager app
+   or the static page (`upload.html`) then POSTs the package to the Worker,
+   which streams it into a GitHub **release** (the storage), and a workflow
+   validates, publishes, and redeploys the catalog.
 
-## The zips are the source of truth
+## The release assets are the source of truth
 
-Every mod is a `.zip` in `assets/` containing a UE packaged container whose
-`.utoc` carries a **metadata trailer** (the ModManager trailer format:
-`"UEMODMET"` magic + JSON payload with `title`/`author`/`description`/
-`version`/`guid` and an embedded cover image). Nothing about a mod is typed
-into `catalog.json` by hand.
+Every mod is a `.zip` **release asset** (a `mod-<guid>` release, one per mod)
+whose package contains a UE packaged container whose `.utoc` carries a
+**metadata trailer** (the ModManager trailer format: `"UEMODMET"` magic +
+JSON payload with `title`/`author`/`description`/`version`/`guid` and an
+embedded cover image). Nothing about a mod is typed into `catalog.json` by
+hand.
 
-`catalog.json` and `assets/covers/` are **generated artifacts**:
+`site/catalog.json` is a **generated artifact**:
 
-- **GitHub Actions** (`.github/workflows/build-catalog.yml`) runs
-  `build.py` on every push that touches `assets/**/*.zip`, regenerates the
-  manifest + covers, and commits the result back.
-- `build.py` **rejects** any package without exactly one `.utoc` and a valid
-  trailer — the push goes red and the catalog is left unchanged. Trailer
-  validation mirrors the C# reader in the ModManager workspace
+- **`Process inbox`** (`.github/workflows/process-inbox.yml`) drains the
+  `inbox` release (the Worker's staging area), validates each package,
+  re-homes it to `mod-<guid>`, merges the entry into `site/catalog.json`
+  and deploys Pages — all in one run.
+- **`Rebuild catalog`** (`.github/workflows/rebuild.yml`) regenerates the
+  whole file from scratch from the `mod-*` releases, so a lost or corrupt
+  catalog is recoverable.
+- `build.py` (Python, **stdlib only**) rejects invalid packages (bad zip,
+  missing/multiple `.utoc`, no valid trailer, no `.ucas`/`.pak`, over
+  100 MB) with a clear reason; one bad package never blocks the others.
+  Trailer validation mirrors the C# reader in the ModManager workspace
   (`io-trailer`), so packages accepted here are packages ModManager can read.
 
-The schema is URL-shaped (`file`/`cover` resolve relative to the catalog URL,
-and absolute URLs work), so a package can later live on any host — a CDN,
-release assets, an S3 bucket — with no other changes.
+Covers are release assets too — they never consume Pages bandwidth, and
+zips don't either. Only the site (a few KB) and `catalog.json` live on
+Pages.
 
 ## Adding a mod
 
-1. Zip your packaged container (`.utoc`/`.ucas`/`.pak`) with a valid trailer
-   (write one with ModManager's Development tab, or `make_examples.py` for
-   experimenting).
-2. Drop the `.zip` into `assets/` and push.
-3. That's it — Actions regenerates the catalog and covers automatically.
+1. In Discord, run **`/token`** and copy the token it shows (treat it like
+   a password; `/token` again replaces it, `/token revoke` kills it).
+2. Upload your `.zip` — either from ModManager's upload flow (against the
+   Worker API documented in `worker/README.md`) or from the web page at
+   `<catalog URL>/upload.html` (paste the token, pick the file).
+3. That's it — the `Process inbox` workflow runs within a minute and the
+   mod appears in the catalog.
+
+Limits: **100 MB** per upload (Cloudflare free-plan request-body limit),
+10 uploads per user per day, and **versions are immutable** (re-uploading a
+`name-version` you already published is rejected; publish a new version
+instead). The first uploader of a mod's GUID becomes its owner; uploads by
+anyone else are rejected (admins from `ADMIN_DISCORD_IDS` bypass this).
 
 ## Files
 
 ```
-build.py                  generator: assets/*.zip -> catalog.json + covers (CI runs this)
+build.py                  generator + pipeline (stdlib only): process / rebuild
 trailer.py                stdlib read/write/validate for the .utoc trailer format
 make_examples.py          dev tool: builds sample packages from a real UE pair
-                          (python make_examples.py <pair-dir> [cover.jpg])
-catalog.json              generated manifest — do not edit
-index.html                the GitHub Pages site (renders catalog.json)
-assets/
-    *.zip                 mod packages (the source of truth)
-    covers/               generated cover images (from the trailers)
-.github/workflows/        build-catalog.yml
+site/
+    index.html            the GitHub Pages site (renders catalog.json)
+    upload.html           the static upload page (no deps)
+    upload-lib.js         pure helpers behind upload.html (node --test-able)
+    config.json           {"uploadUrl": "<worker url>"} — set once after deploy
+    catalog.json          generated manifest — do not edit
+worker/                   Cloudflare Worker: Discord /token + streaming /upload
+legacy-assets/            the original example zips (deleted after one-off seeding)
+.github/workflows/        process-inbox.yml, rebuild.yml, seed-legacy.yml,
+                         deploy-site.yml  (+ .github/actions/commit-and-deploy)
+tests/                    offline unit tests for the pipeline (unittest)
 ```
 
 ## Catalog schema (what ModManager consumes)
 
-Top level: `{ "name", "description", "mods": [ ... ] }`. Each mod entry:
+Top level: `{ "name", "description", "mods": [ ... ] }`. Each mod entry
+(one per GUID, pointing at the most recently uploaded version):
 
 | Field         | Meaning                                                       |
 |---------------|---------------------------------------------------------------|
 | `id`          | The trailer GUID (stable identity across versions)            |
 | `name`        | Trailer title                                                 |
-| `author`      | Trailer author                                                |
+| `author`      | Trailer author (self-declared display text, **not** verified) |
 | `version`     | Trailer version (shown as `v{version}`)                       |
 | `description` | Trailer description                                           |
-| `file`        | Package URL — relative to the catalog, or absolute (a `.zip`) |
+| `file`        | Stable release-asset URL of the package (a `.zip`)           |
 | `size`        | Package size in bytes                                         |
-| `cover`       | Cover image URL, extracted from the trailer                   |
+| `cover`       | Stable release-asset URL of the cover image (if the trailer has one) |
+| `sha256`      | SHA-256 of the package zip                                    |
+| `uploader`    | The Discord user id of the owner (or null for admin-seeded)   |
+| `updated`     | ISO-8601 UTC timestamp of the newest upload                   |
+
+`file`/`cover` are absolute GitHub release URLs; they 302-redirect to
+short-lived signed storage URLs. **Always store the stable URL.**
 
 ## Using it from ModManager
 
@@ -76,4 +106,10 @@ Open **Browse** in ModManager and set the server URL to:
 https://jordgubbarnab55-cloud.github.io/ModCatalog/catalog.json
 ```
 
-then click **Refresh**. Downloads stream straight from GitHub.
+then click **Refresh**. Downloads follow GitHub's redirect and stream
+straight from the release assets.
+
+## Setup
+
+New maintainers: see **`SETUP.md`** (ordered runbook) and **`HANDOFF.md`**
+(what is verified, what is not, and what to fill in).
