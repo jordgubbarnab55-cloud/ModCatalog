@@ -1,0 +1,48 @@
+name: Process inbox
+
+# Wake-up only: the Cloudflare Worker queues uploads into the "inbox" release
+# and dispatches this workflow. EACH RUN MUST DRAIN THE WHOLE INBOX — GitHub
+# concurrency groups keep only one pending run (an older pending run is
+# cancelled when a newer one queues), so a design that processes "the asset
+# named in the dispatch payload" would silently strand uploads. The dispatch
+# input carries no data on purpose.
+#
+# A commit pushed with GITHUB_TOKEN does not trigger other workflows, so the
+# Pages deploy happens in this same run (see the commit-and-deploy action).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: catalog
+  cancel-in-progress: false
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    env:
+      # `gh` CLI reads GH_TOKEN; the build never hand-rolls asset HTTP
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Drain the inbox: validate each package, re-home it to mod-<guid>,
+      # merge into site/catalog.json. Invalid packages are rejected and
+      # removed without blocking the rest of the run.
+      - name: Drain the inbox release
+        run: python build.py process --from-inbox
+
+      - name: Commit catalog + deploy Pages
+        uses: ./.github/actions/commit-and-deploy
+        with:
+          commit_path: site/catalog.json
+          commit_message: "Regenerate catalog from inbox"

@@ -1,0 +1,41 @@
+name: Seed legacy mods
+
+# One-off: treats the packages in legacy-assets/ as ADMIN uploads (no
+# uploader id), which creates the `inbox` release convention, the three
+# `mod-<guid>` releases and the first site/catalog.json, then deploys Pages.
+# Run it once by hand after the cutover; the legacy-assets/ directory is
+# deleted in a follow-up commit (see SETUP.md). Shares the `catalog`
+# concurrency group.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: catalog
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Seed the example mods
+        run: python build.py process --from-dir legacy-assets
+
+      - name: Commit catalog + deploy Pages
+        uses: ./.github/actions/commit-and-deploy
+        with:
+          commit_path: site/catalog.json
+          commit_message: "Seed catalog from legacy assets"

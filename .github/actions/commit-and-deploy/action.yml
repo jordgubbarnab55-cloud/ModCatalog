@@ -1,0 +1,40 @@
+name: Commit catalog and deploy Pages
+
+# Shared tail for the catalog workflows: commit the generated catalog (scoped
+# to one path, so __pycache__/ or anything else Python leaves behind can
+# never be committed) and deploy the site to Pages in the SAME run — a
+# commit pushed with GITHUB_TOKEN does not trigger other workflows, so the
+# deploy must not depend on a follow-up trigger.
+
+inputs:
+  commit_path:
+    description: The generated path to commit (and the only path we check)
+    required: true
+  commit_message:
+    description: Commit message for the generated change
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Commit generated changes
+      shell: bash
+      run: |
+        if [ -n "$(git status --porcelain "${{ inputs.commit_path }}")" ]; then
+          git config user.name "ModCatalog Bot"
+          git config user.email "modcatalog-bot@users.noreply.github.com"
+          git add "${{ inputs.commit_path }}"
+          git commit -m "${{ inputs.commit_message }}"
+          git push
+          echo "Catalog committed and pushed."
+        else
+          echo "Catalog already up to date; nothing to commit."
+        fi
+
+    - name: Upload site artifact
+      uses: actions/upload-pages-artifact@v4
+      with:
+        path: site
+
+    - name: Deploy to GitHub Pages
+      uses: actions/deploy-pages@v4

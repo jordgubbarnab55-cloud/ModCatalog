@@ -1,0 +1,31 @@
+name: Deploy site
+
+# Deploys the site whenever site/** changes (a human editing index.html,
+# upload.html or config.json). Pushes made by the bot with GITHUB_TOKEN do
+# not trigger it, so there is no loop with the catalog workflows. Pages
+# deploys via a custom Actions workflow are not subject to the 10-builds/hour
+# legacy soft limit.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+
+permissions:
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,41 @@
+name: Rebuild catalog
+
+# Regenerates the WHOLE site/catalog.json from scratch from the mod-* release
+# assets. The releases are the source of truth, so a lost or corrupt catalog
+# is recoverable. Manual only (workflow_dispatch); shares the `catalog`
+# concurrency group with the other catalog workflows so index merges never
+# race. The Pages deploy happens in the same run (GITHUB_TOKEN pushes do not
+# trigger other workflows).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: catalog
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rebuild catalog from mod-* releases
+        run: python build.py rebuild
+
+      - name: Commit catalog + deploy Pages
+        uses: ./.github/actions/commit-and-deploy
+        with:
+          commit_path: site/catalog.json
+          commit_message: "Rebuild catalog from releases"
