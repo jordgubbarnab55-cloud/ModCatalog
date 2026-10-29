@@ -28,8 +28,6 @@ jobs:
     env:
       # `gh` CLI reads GH_TOKEN; the build never hand-rolls asset HTTP
       GH_TOKEN: ${{ github.token }}
-      GITHUB_OWNER: ${{ github.repository_owner }}
-      GITHUB_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
 

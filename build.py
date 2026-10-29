@@ -738,16 +738,16 @@ def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.
 # ------------------------------------------------------------------ cli
 
 
-def make_client(args) -> PackageClient:
+def make_client(args, owner: str | None, repo: str | None) -> PackageClient:
     if args.client == "local":
         if not args.root:
             raise SystemExit("error: --client local requires --root DIR")
         return LocalClient(pathlib.Path(args.root).resolve())
     if args.client != "gh":
         raise SystemExit(f"error: unknown client {args.client!r}")
-    if not args.owner or not args.repo:
+    if not owner or not repo:
         raise SystemExit("error: the real client needs --owner/--repo (or GITHUB_OWNER/GITHUB_REPO/GITHUB_REPOSITORY)")
-    return GhClient(args.owner, args.repo)
+    return GhClient(owner, repo)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -780,7 +780,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("error: owner/repo unknown (set GITHUB_REPOSITORY or pass --owner/--repo)")
     admins = {s.strip() for s in os.environ.get("ADMIN_DISCORD_IDS", "").split(",") if s.strip()}
 
-    client = make_client(args)
+    client = make_client(args, owner, repo)
     catalog = pathlib.Path(args.catalog)
     if args.cmd == "rebuild":
         rebuild(client, owner, repo, catalog)
