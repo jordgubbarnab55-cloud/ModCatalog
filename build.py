@@ -203,9 +203,9 @@ class GhClient(PackageClient):
         env["GH_REPO"] = f"{self.owner}/{self.repo}"
         return env
 
-    def _run(self, args: list[str]) -> str:
+    def _run(self, args: list[str], cwd: str | None = None) -> str:
         p = subprocess.run(["gh", *args], capture_output=True, text=True, env=self._env(),
-                          cwd=str(ROOT))
+                          cwd=cwd or str(ROOT))
         if p.returncode != 0:
             raise RuntimeError(f"gh {' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}")
         return p.stdout
@@ -245,8 +245,10 @@ class GhClient(PackageClient):
     def download_asset(self, tag: str, name: str, dest: pathlib.Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         d = dest.parent
-        # name is already sanitized to [A-Za-z0-9._-]; "." is literal in the glob
-        self._run(["release", "download", tag, "--pattern", name, "--directory", str(d)])
+        # name is already sanitized to [A-Za-z0-9._-]; "." is literal in the glob.
+        # No --directory/--dest flag (renamed in gh 2.103.2): download into the
+        # subprocess cwd instead, which works across gh versions.
+        self._run(["release", "download", tag, "--pattern", name], cwd=str(d))
 
     def asset_bytes(self, tag: str, name: str) -> bytes:
         with tempfile.TemporaryDirectory() as td:
