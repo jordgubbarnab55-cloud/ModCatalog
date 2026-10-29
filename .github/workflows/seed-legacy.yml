@@ -25,7 +25,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GITHUB_OWNER: ${{ github.repository_owner }}
-      GITHUB_REPO: ${{ github.repository_name }}
+      GITHUB_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
 
