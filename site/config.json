@@ -1,3 +1,3 @@
 {
-  "uploadUrl": "REPLACE_ME_WORKER_URL"
+  "uploadUrl": "https://modcatalog.modcatalog-worker.workers.dev/upload"
 }

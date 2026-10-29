@@ -9,11 +9,11 @@ main = "src/index.js"
 compatibility_date = "2025-09-01"
 
 [vars]
-GITHUB_OWNER = "REPLACE_ME_GITHUB_OWNER"
-GITHUB_REPO = "REPLACE_ME_GITHUB_REPO"
+GITHUB_OWNER = "jordgubbarnab55-cloud"
+GITHUB_REPO = "ModCatalog"
 # Origin allowed for CORS on /upload (the Pages site). The native app sends
 # no Origin header and is unaffected.
-ALLOWED_ORIGIN = "REPLACE_ME_ALLOWED_ORIGIN"
+ALLOWED_ORIGIN = "https://jordgubbarnab55-cloud.github.io"
 # Optional: upload bytes per Discord user per UTC day (default 2 GiB)
 UPLOAD_DAILY_BYTES = "2147483648"
 
@@ -24,4 +24,4 @@ UPLOAD_DAILY_BYTES = "2147483648"
 
 [[kv_namespaces]]
 binding = "TOKENS"
-id = "REPLACE_ME_KV_NAMESPACE_ID"
+id = "a0739f0e764f41d69db0345c8c3d7a6f"
