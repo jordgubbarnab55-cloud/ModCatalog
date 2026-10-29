@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 .dev.vars
+
+# local credential scratch files + wrangler cache
+discord_pubkey.txt
+github_pat.txt
+.wrangler/
+discord_appid.txt
+discord_token.txt
