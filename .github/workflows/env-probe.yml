@@ -1,0 +1,22 @@
+name: env probe (temporary)
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_OWNER: ${{ github.repository_owner }}
+      GITHUB_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          echo "=== gh version ==="; gh --version
+          echo "=== GH-prefixed env (values redacted) ==="
+          env | grep -E "^(GH[A-Z_]*|GITHUB_[A-Z_]+)=" | sed -E 's/=.*$/=<set>/' | sort
+          echo "=== locale ==="; locale 2>&1 | head -3
+          echo "=== test: gh release list ==="
+          gh release list 2>&1; echo "rc=$?"
+          echo "=== test: gh release create (dry: will 409 if exists / creates real) ==="
+          gh release create env-probe-test --notes "probe" 2>&1; echo "rc=$?"
