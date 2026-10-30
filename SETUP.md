@@ -84,9 +84,13 @@ because moving `index.html` into `site/` breaks the old Pages build.
     ```
     DISCORD_APP_ID=<from step 1> DISCORD_BOT_TOKEN=<from step 1> node scripts/register-commands.mjs
     ```
-    (run from `worker/`; global commands can take a few minutes to appear).
-    Finally, install the app to your server (the *Installation* tab link,
-    or the OAuth2 URL generator with the `applications.commands` scope).
+    (run from `worker/`; add `--retire-global` on the first cutover run to
+    also delete a leftover global `token` command). The commands are
+    **guild-scoped and appear instantly** — no minutes-to-hours wait.
+    Later, for a new server: invite the bot there and re-run the same
+    command. Finally, install the app to your server (the *Installation*
+    tab link, or the OAuth2 URL generator with the `applications.commands`
+    scope).
 
 **Part 5 — End-to-end test**
 

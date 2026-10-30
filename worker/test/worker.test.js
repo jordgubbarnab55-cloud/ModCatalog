@@ -22,7 +22,7 @@ function makeFetch(handler) {
   const calls = [];
   const fn = async (url, init = {}) => {
     calls.push({ url, init });
-    return handler ? handler(url, init) : new Response(null, { status: 201 });
+    return handler ? handler(url, init) : new Response(null, { status: 204 });
   };
   fn.calls = calls;
   return fn;
@@ -71,7 +71,10 @@ async function mintToken(env, kv, fetchImpl, id = "42") {
     data: { name: "token" },
     member: { id },
   }), env, fetchImpl);
-  const content = (await res.json()).content;
+  assert.equal(res.status, 202, "ACK with no body");
+  const cb = fetchImpl.calls.filter((c) => c.url.includes("/interactions/") && c.url.includes("/callback")).at(-1);
+  assert.ok(cb, "reply sent via the callback endpoint");
+  const content = JSON.parse(cb.init.body).data.content;
   const m = content.match(/`(mm_[A-Za-z0-9_-]+)`/);
   assert.ok(m, "token in reply");
   return m[1];
@@ -92,11 +95,15 @@ function makeEnv(kv, pub, overrides = {}) {
 
 // ----------------------------------------------------- discord endpoint
 
-test("PING with a valid signature gets PONG", async () => {
+test("PING with a valid signature gets PONG via the callback endpoint", async () => {
   const kv = new FakeKV();
-  const res = await handle(await discordRequest({ type: 1 }), makeEnv(kv, await publicKeyB64()), makeFetch());
-  assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { type: 1 });
+  const f = makeFetch();
+  const res = await handle(await discordRequest({ type: 1 }), makeEnv(kv, await publicKeyB64()), f);
+  assert.equal(res.status, 202);
+  assert.equal(await res.text(), "", "ACK has no body");
+  const cb = f.calls.find((c) => c.url.includes("/interactions/") && c.url.includes("/callback"));
+  assert.ok(cb, "PONG sent via the callback endpoint");
+  assert.deepEqual(JSON.parse(cb.init.body), { type: 1 });
 });
 
 test("invalid signature is rejected 401", async () => {
@@ -124,10 +131,13 @@ test("/token mints a token; only the hash is stored; reply is ephemeral", async 
   const fetchImpl = makeFetch();
   const res = await handle(await discordRequest({ type: 2, data: { name: "token" }, member: { id: "42" } }),
     makeEnv(kv, await publicKeyB64()), fetchImpl);
-  assert.equal(res.status, 200);
-  const body = await res.json();
-  assert.equal(body.flags, 64);
-  const token = body.content.match(/`(mm_[A-Za-z0-9_-]+)`/)[1];
+  assert.equal(res.status, 202);
+  assert.equal(await res.text(), "", "ACK has no body");
+  const cb = fetchImpl.calls.find((c) => c.url.includes("/interactions/") && c.url.includes("/callback"));
+  const resp = JSON.parse(cb.init.body);
+  assert.equal(resp.type, 4, "CHANNEL_MESSAGE_WITH_SOURCE");
+  assert.equal(resp.data.flags, 64);
+  const token = resp.data.content.match(/`(mm_[A-Za-z0-9_-]+)`/)[1];
   assert.ok(token.startsWith("mm_"));
 
   const vals = kv.all();
@@ -137,7 +147,7 @@ test("/token mints a token; only the hash is stored; reply is ephemeral", async 
   assert.ok(tokKey, "tok key stored");
   assert.equal(JSON.parse(tokKey[1]).discordId, "42");
   for (const [, v] of vals) assert.ok(!v.includes(token), "plaintext token never in KV");
-  assert.equal(fetchImpl.calls.length, 0, "no GitHub calls in the interaction handler");
+  assert.equal(fetchImpl.calls.length, 1, "only the Discord callback call (no GitHub)");
 });
 
 test("a second /token invalidates the first", async () => {
@@ -165,8 +175,19 @@ test("/token revoke deletes both keys", async () => {
     data: { name: "token", options: [{ type: 2, name: "revoke" }] },
     member: { id: "42" },
   }), env, makeFetch());
-  assert.equal(res.status, 200);
+  assert.equal(res.status, 202);
   assert.equal(await kv.get("user:42"), null);
+});
+
+test("guild identity: a member object without a top-level id (nested user.id) is accepted", async () => {
+  const kv = new FakeKV();
+  const res = await handle(await discordRequest({
+    type: 2,
+    data: { name: "token" },
+    member: { user: { id: "77" }, nick: null, roles: [] }, // no top-level `id`
+  }), makeEnv(kv, await publicKeyB64()), makeFetch());
+  assert.equal(res.status, 202);
+  assert.ok(await kv.get("user:77"), "keyed by the nested user id");
 });
 
 // -------------------------------------------------------- upload endpoint
@@ -383,6 +404,8 @@ test("happy path: streams the same body, right headers, dispatch after, 202", as
   assert.equal(up.init.headers["Authorization"], "Bearer gh_test_token");
   assert.equal(up.init.headers["Content-Type"], "application/zip");
   assert.equal(up.init.headers["Content-Length"], "3");
+  assert.equal(up.init.headers["User-Agent"], "ModCatalog-Worker", "GitHub requires a User-Agent (403 without)");
+  assert.equal(disp.init.headers["User-Agent"], "ModCatalog-Worker");
   assert.match(disp.url, /api\.github\.com\/repos\/octo\/repo\/actions\/workflows\/process-inbox\.yml\/dispatches$/);
   assert.deepEqual(JSON.parse(disp.init.body), { ref: "main" });
 

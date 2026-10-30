@@ -170,8 +170,16 @@ injected: `handle(request, env, fetch)`.
   without). PING→PONG. `/token` mints `mm_` + base64url(32 random bytes);
   only `sha256(token)` is stored (KV `tok:<hash>`, `user:<discordId>`);
   one active token per user (a new one invalidates the old); reply is
-  ephemeral (flags 64). `/token revoke` deletes both keys. **No GitHub
-  calls in this path** (Discord expects a reply within 3 s).
+  ephemeral (flags 64). `/token revoke` deletes both keys (the Worker
+  still accepts that subcommand, but the registered command is a bare,
+  parameter-free `/token` — subcommand-bearing commands never rendered
+  for this app — so revoke = mint again and ignore the new token).
+  Response flow: 202 ACK (no body) + `POST
+  /interactions/{id}/{token}/callback` (`{type:4, data:{content,
+  flags:64}}`; PING ACKs with a PONG callback) — a flat inline 200
+  body is rejected by Discord. The invoking user id is `member.user.id`
+  (current API member objects have no top-level `id`). **No GitHub
+  calls in this path** (the 3 s budget covers the 202 ACK only).
 - **`POST /upload`** — `Bearer` token → 401; `Content-Length` required →
   411; over 100 MB per part → 413 **before any GitHub call** (the
   free-plan request-body limit); per-user daily **byte** quota (default

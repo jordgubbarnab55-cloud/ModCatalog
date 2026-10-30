@@ -20,6 +20,9 @@ const INBOX_CACHE_KEY = "cache:inbox_release_id";
 const INBOX_CACHE_MS = 3600 * 1000;
 const INBOX_TAG = "inbox";
 const INBOX_WAKE_WORKFLOW = "process-inbox.yml";
+// GitHub's API rejects requests without a User-Agent (403 "administrative
+// rules"); the Worker's fetch sends none by default.
+const GITHUB_UA = "ModCatalog-Worker";
 
 // ---------------------------------------------------------------- helpers
 
@@ -87,7 +90,7 @@ export default {
  */
 export async function handle(request, env, fetchImpl) {
   const url = new URL(request.url);
-  if (url.pathname === "/discord") return handleDiscord(request, env);
+  if (url.pathname === "/discord") return handleDiscord(request, env, fetchImpl);
   if (url.pathname === "/upload") return handleUpload(request, env, fetchImpl);
   return json({ error: "not found" }, 404);
 }
@@ -97,7 +100,7 @@ export async function handle(request, env, fetchImpl) {
 // Discord requires the Ed25519 signature check and a reply within 3 s, so
 // this handler makes NO GitHub calls.
 
-async function handleDiscord(request, env) {
+async function handleDiscord(request, env, fetchImpl) {
   if (request.method !== "POST") return json({ error: "POST only" }, 405);
   const rawBody = await request.text();
   const ok = await verifyDiscordSignature(
@@ -110,10 +113,20 @@ async function handleDiscord(request, env) {
   let body;
   try { body = JSON.parse(rawBody); } catch { return json({ error: "bad json" }, 400); }
 
-  if (body.type === 1) return json({ type: 1 }); // PING -> PONG
+  if (body.type !== 2) {
+    // PING is ACKed through the callback endpoint too (type 1 = PONG).
+    if (body.type !== 1) return json({ error: "unexpected interaction type" }, 400);
+    const pong = await sendCallback(body, { type: 1 }, fetchImpl);
+    if (!pong) return json({ error: "discord callback failed" }, 502);
+    return new Response(null, { status: 202 }); // ACK: no body
+  }
 
-  if (body.type !== 2) return json({ error: "unexpected interaction type" }, 400);
-  const discordId = (body.member && body.member.id) || (body.user && body.user.id);
+  // Identity: the current Discord interaction member object has NO top-level
+  // id — the user id is nested at member.user.id (keep member.id and the
+  // DM user.id as fallbacks for other payload variants).
+  const discordId =
+    (body.member && (body.member.id || (body.member.user && body.member.user.id))) ||
+    (body.user && body.user.id);
   if (!discordId) return json({ error: "missing user id" }, 400);
 
   const sub = (body.data && body.data.options || [])
@@ -126,7 +139,9 @@ async function handleDiscord(request, env) {
       await env.TOKENS.delete(`tok:${hash}`);
       await env.TOKENS.delete(`user:${discordId}`);
     }
-    return json({ content: "Your upload token has been revoked.", flags: 64 });
+    const ack = await sendCallback(body, { type: 4, data: { content: "Your upload token has been revoked.", flags: 64 } }, fetchImpl);
+    if (!ack) return json({ error: "discord callback failed" }, 502);
+    return new Response(null, { status: 202 }); // ACK: no body
   }
 
   if (command === "token") {
@@ -139,16 +154,34 @@ async function handleDiscord(request, env) {
     await env.TOKENS.put(`tok:${hash}`,
       JSON.stringify({ discordId, createdAt: new Date().toISOString() }));
     await env.TOKENS.put(`user:${discordId}`, hash);
-    return json({
-      content:
-        `Your upload token (shown once, treat it like a password):\n` +
-        `\`${token}\`\n\nKeep it secret: it can upload mods as you (10 per day, 100 MB each). ` +
-        `Re-issue with \`/token\`, kill it with \`/token revoke\`.`,
-      flags: 64, // ephemeral: only this user sees it
-    });
+    const ack = await sendCallback(body, {
+      type: 4,
+      data: {
+        content:
+          `Your upload token (shown once, treat it like a password):\n` +
+          `\`${token}\`\n\nKeep it secret: it can upload mods as you (10 per day, 100 MB each). ` +
+          `Re-issue with \`/token\` — a new mint invalidates this one (that is the revoke).`,
+        flags: 64, // ephemeral: only this user sees it
+      },
+    }, fetchImpl);
+    if (!ack) return json({ error: "discord callback failed" }, 502);
+    return new Response(null, { status: 202 }); // ACK: no body
   }
 
   return json({ error: `unknown command ${command}` }, 400);
+}
+
+// The canonical response flow: ACK the original request with a 202 (no
+// body), then POST the actual response to the interaction callback
+// endpoint (valid for 15 minutes; the 3 s budget covers the ACK only).
+// Returns true when Discord accepted the callback.
+async function sendCallback(body, responseObj, fetchImpl) {
+  const res = await fetchImpl(
+    `https://discord.com/api/v10/interactions/${body.id}/${body.token}/callback`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(responseObj) });
+  if (res.ok || res.status === 204) return true;
+  console.error(`discord callback failed: HTTP ${res.status} ${await res.text().catch(() => "")}`);
+  return false;
 }
 
 // -------------------------------------------------------- POST /upload
@@ -262,6 +295,7 @@ async function handleUpload(request, env, fetchImpl) {
           Authorization: `Bearer ${env.GITHUB_TOKEN}`,
           "Content-Type": "application/zip",
           "Content-Length": String(contentLength),
+          "User-Agent": GITHUB_UA,
         },
       });
   } catch (ex) {
@@ -284,6 +318,7 @@ async function handleUpload(request, env, fetchImpl) {
         headers: {
           Authorization: `Bearer ${env.GITHUB_TOKEN}`,
           "Content-Type": "application/json",
+          "User-Agent": GITHUB_UA,
         },
         body: JSON.stringify({ ref: "main" }),
       });
@@ -304,7 +339,7 @@ async function getInboxReleaseId(env, fetchImpl) {
   }
   const res = await fetchImpl(
     `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/releases/tags/${INBOX_TAG}`,
-    { headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` } });
+    { headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}`, "User-Agent": GITHUB_UA } });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`github release lookup failed: HTTP ${res.status}`);
   const data = await res.json();

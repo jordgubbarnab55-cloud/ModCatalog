@@ -3,9 +3,18 @@
 Cloudflare Worker (free plan) that does two things:
 
 1. **Discord token commands** — `POST /discord` (Interactions endpoint,
-   slash commands over HTTPS; no gateway/WebSocket bot). `/token` mints a
-   bearer token for the user (shown once, ephemerally); `/token revoke`
-   kills it. Only the SHA-256 of the token is stored (in Workers KV).
+   slash commands over HTTPS; no gateway/WebSocket bot). `/token` is
+   registered **per guild** (guild commands appear in Discord
+   immediately) and mints a bearer token for the user (shown once,
+   ephemerally). One active token per user: minting again invalidates
+   the previous one — that is also the revoke path. The command is
+   intentionally parameter-free (see step 8); the Worker still accepts a
+   legacy `token revoke` subcommand. The response uses Discord's
+   canonical flow: an immediate **202 ACK (no body)** to the
+   interaction, then a `POST /interactions/{id}/{token}/callback`
+   with `{type: 4, data: {content, flags}}` (the 3 s budget covers the
+   ACK only; the callback token is valid 15 min). Only the SHA-256 of
+   the token is stored (in Workers KV).
 2. **Upload API** — `POST /upload` takes a bearer token + raw zip body and
    **streams it straight through** to the `inbox` release on GitHub
    (no buffering, no storage — the Worker holds no file bytes), then
@@ -16,7 +25,7 @@ bare Node (no install needed):
 
 ```
 cd worker
-node --test        # 18 offline tests: fake KV, injected fetch, Ed25519 keypair
+node --test        # 47 offline tests: fake KV, injected fetch, Ed25519 keypair
 ```
 
 ## Deploy (owner, brief)
@@ -30,6 +39,27 @@ node --test        # 18 offline tests: fake KV, injected fetch, Ed25519 keypair
 7. Discord portal → *General Information* → Interactions Endpoint URL =
    `<worker-url>/discord` (the save runs a signed test request)
 8. `DISCORD_APP_ID=... DISCORD_BOT_TOKEN=... node scripts/register-commands.mjs`
+   The commands are **guild-scoped**: the script bulk-registers `token` in
+   every guild the bot is a member of (or `DISCORD_GUILD_IDS=
+   <id1>,<id2>` for an explicit list), and they appear **immediately** —
+   no waiting. A new server later? Invite the bot, re-run the script
+   (a server the bot was removed from keeps a harmless registration that
+   doesn't resolve there; re-invite + re-run). To retire a leftover global
+   `token` command during the first cutover, add `--retire-global`
+   (it deletes the global command only after every target guild
+   registered; 404 is fine). `--dry-run` prints the exact requests
+   without sending them. The command itself is parameter-free by
+   design: the original `token` + `revoke` subcommand never appeared in
+   this app's client menus (subcommands render as top-level entries,
+   and those did not render at all — desktop and mobile), so `/token`
+   is directly callable and re-minting is the revoke path.
+   (Debugging note: interaction `member` objects in the current Discord
+   API carry no top-level `id` — the invoking user's id is nested at
+   `member.user.id`; the handler checks `member.id`, `member.user.id`
+   and the DM `user.id` in that order. Also: a flat inline 200 response
+   body is rejected by Discord ("didn't respond in time" despite a fast
+   200) — the reply must go through the callback endpoint after a 202
+   ACK.)
 
 ## Upload API contract (for the ModManager app)
 
@@ -115,10 +145,12 @@ Notes:
 
 ## Test status
 
-`node --test` (18 tests) is fully green offline: Discord signature
+`node --test` (47 tests) is fully green offline: Discord signature
 verification (valid/invalid/missing/wrong key), PING/PONG, token minting /
-replacement / revocation (only hashes stored), and the upload path
+replacement / revocation (only hashes stored), the upload path
 (401/411/413/400/429/503, happy path with the **same stream object**
 forwarded to GitHub, 502-without-dispatch on GitHub failure, CORS
-preflight). Live behavior (deploy, real Discord, real GitHub, the free-plan
+preflight), and the command-registration script (bulk-PUT payload shape,
+per-guild 403 isolation, `--retire-global` ordering, delete-404
+tolerance, auto-discovery, dry-run). Live behavior (deploy, real Discord, real GitHub, the free-plan
 CPU limit on streaming) is the owner's to verify — see SETUP.md.
