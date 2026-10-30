@@ -2,11 +2,9 @@ __pycache__/
 *.pyc
 .dev.vars
 
-# local credential scratch files + wrangler cache
-discord_pubkey.txt
-github_pat.txt
+# local credentials (moved into secrets/; never commit)
+secrets/
+
+# local scratch / tool caches
+.local/
 .wrangler/
-discord_appid.txt
-discord_token.txt
-github_pat2.txt
-github_tokenclassic.txt
