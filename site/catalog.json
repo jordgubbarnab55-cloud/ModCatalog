@@ -3,6 +3,18 @@
   "description": "Community mod catalog for ModManager (and anyone else who wants the mods).",
   "mods": [
     {
+      "id": "94daad40-07ad-4237-9a80-5f5b6b82ceb0",
+      "name": "adadghhjg",
+      "author": "ghgfh435",
+      "version": "43.1",
+      "description": "234",
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-94daad40-07ad-4237-9a80-5f5b6b82ceb0/adadghhjg-43.1.zip",
+      "size": 3388480,
+      "sha256": "e2731ef3fc6613868478475ae9eef231301ea8f7e130364df99a0d9fd63b132c",
+      "uploader": "1509993694902878381",
+      "updated": "2026-10-30T08:54:29Z"
+    },
+    {
       "id": "70397db8-f70a-4f85-a17a-d3e3ab1d5067",
       "name": "Example UE Mod",
       "author": "Epic Games",
