@@ -247,8 +247,13 @@ class GhClient(PackageClient):
         d = dest.parent
         # name is already sanitized to [A-Za-z0-9._-]; "." is literal in the glob.
         # No --directory/--dest flag (renamed in gh 2.103.2): download into the
-        # subprocess cwd instead, which works across gh versions.
+        # subprocess cwd instead, which works across gh versions. gh keeps the
+        # asset's original name, so move it to `dest` to honour the contract
+        # (callers expect the file AT `dest`, e.g. a fixed `package.zip`).
         self._run(["release", "download", tag, "--pattern", name], cwd=str(d))
+        written = d / name
+        if written != dest and written.is_file():
+            written.rename(dest)
 
     def asset_bytes(self, tag: str, name: str) -> bytes:
         with tempfile.TemporaryDirectory() as td:
