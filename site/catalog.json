@@ -44,6 +44,18 @@
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-05dfce29-38db-4c42-b65c-e7d1196af540/05dfce29-38db-4c42-b65c-e7d1196af540-cover-940db1af.png"
     },
     {
+      "id": "0adb8d0f-a778-48f6-8750-1641430e113f",
+      "name": "Galaxy Lockers",
+      "author": "uncool_1234",
+      "version": "",
+      "description": "",
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-0adb8d0f-a778-48f6-8750-1641430e113f/Galaxy-Lockers-package.zip",
+      "size": 3386774,
+      "sha256": "7c771a18ee1b7942c33302c78c975ab0e834085d3cd318d86e2f37bc9adb347d",
+      "uploader": "1509993694902878381",
+      "updated": "2026-11-04T22:23:41Z"
+    },
+    {
       "id": "ceaddf7b-b079-4661-b36c-1e74feb091ca",
       "name": "Horologium Core",
       "author": "uncool_1234",
