@@ -2,11 +2,12 @@
   "schemaVersion": 1,
   "name": "Mod Catalog",
   "description": "Community mod catalog for ModManager (and anyone else who wants the mods).",
+  "verifiedAuthors": true,
   "mods": [
     {
       "id": "94daad40-07ad-4237-9a80-5f5b6b82ceb0",
       "name": "adadghhjg",
-      "author": "ghgfh435",
+      "author": "uncool_1234",
       "version": "43.1",
       "gameVersion": "54.0.0",
       "description": "234",
@@ -41,6 +42,20 @@
       "uploader": null,
       "updated": "2026-10-29T10:35:45Z",
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-05dfce29-38db-4c42-b65c-e7d1196af540/05dfce29-38db-4c42-b65c-e7d1196af540-cover-940db1af.png"
+    },
+    {
+      "id": "ceaddf7b-b079-4661-b36c-1e74feb091ca",
+      "name": "Horologium Core",
+      "author": "uncool_1234",
+      "version": "",
+      "gameVersion": "10.2.1",
+      "description": "Blueprint mod loader",
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-ceaddf7b-b079-4661-b36c-1e74feb091ca/Horologium-Core-package.zip",
+      "size": 1268193,
+      "sha256": "a9124d0f11e205e8db8ea60abe482fc9dcb968328616deb7608ccc48f3f2967d",
+      "uploader": "1509993694902878381",
+      "updated": "2026-11-04T20:52:44Z",
+      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-ceaddf7b-b079-4661-b36c-1e74feb091ca/ceaddf7b-b079-4661-b36c-1e74feb091ca-cover-2e7e39b8.png"
     },
     {
       "id": "742c2e78-a272-44dc-9ea4-969c36eca47f",
