@@ -31,6 +31,18 @@
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-70397db8-f70a-4f85-a17a-d3e3ab1d5067/70397db8-f70a-4f85-a17a-d3e3ab1d5067-cover-b7d038b8.jpg"
     },
     {
+      "id": "9704a204-c4f1-46f5-82d7-6396c0316ac5",
+      "name": "fghfgh",
+      "author": "uncool_1234",
+      "version": "",
+      "description": "",
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-9704a204-c4f1-46f5-82d7-6396c0316ac5/fghfgh-package.zip",
+      "size": 4822288,
+      "sha256": "cf416c45ec68ae019e744432ae25ab7cb015531e89796c168c2956e3ec1dc2e1",
+      "uploader": "1509993694902878381",
+      "updated": "2026-11-04T22:25:42Z"
+    },
+    {
       "id": "05dfce29-38db-4c42-b65c-e7d1196af540",
       "name": "Frostbound Interiors",
       "author": "Aurora Studio",
