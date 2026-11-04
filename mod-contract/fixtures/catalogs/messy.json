@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 99,
+  "mods": [
+    "not an object",
+    { "id": "no-file", "name": "No File" },
+    { "id": "ftp", "name": "FTP Mod", "file": "ftp://example.com/x.zip" },
+    {
+      "id": "keeper",
+      "name": "Keeper",
+      "file": "keeper.zip",
+      "size": -5,
+      "sha256": "not-a-hash",
+      "cover": "javascript:alert(1)",
+      "tags": ["Skin", 42, null],
+      "version": true
+    },
+    { "id": "keeper", "name": "Duplicate Id", "file": "dup.zip" },
+    { "id": 7, "file": "https://example.com/seven.zip?x=1" }
+  ]
+}

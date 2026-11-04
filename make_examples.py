@@ -75,15 +75,9 @@ def main() -> int:
     pair_dir = pathlib.Path(sys.argv[1]).resolve()
     utoc, companions = find_pair(pair_dir)
 
-    # Start from the clean TOC: strip any existing trailer (e.g. the pair may
-    # already carry one from Development-tab work) so we always append fresh.
+    # write_trailer replaces a trailer the pair may already carry (e.g. from
+    # Development-tab work) and refuses foreign trailing data.
     utoc_bytes = utoc.read_bytes()
-    try:
-        trailer_offset, _ = trailer.find_trailer(utoc_bytes)
-        utoc_bytes = utoc_bytes[:trailer_offset]
-        print(f"note: {utoc.name} already had a trailer; stripped it (TocEnd = {trailer_offset})")
-    except trailer.TrailerError:
-        pass
 
     covers = {}
     if MODS[0][5] == "jpeg":
@@ -106,13 +100,13 @@ def main() -> int:
             "description": description, "guid": str(uuid.uuid4()),
             "image": {"mime": mime, "data": image_data},
         }
-        payload = trailer.build_payload(meta)
+        utoc_with_trailer, _, _ = trailer.write_trailer(utoc_bytes, meta)
 
         out_zip = ASSETS / zip_name
         with tempfile.TemporaryDirectory() as td:
             staged = pathlib.Path(td)
             utoc_copy = staged / utoc.name
-            utoc_copy.write_bytes(utoc_bytes + trailer.build_trailer(payload))
+            utoc_copy.write_bytes(utoc_with_trailer)
             with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
                 # pak, ucas, then the trailer-carrying utoc (same order as example_server/build.py)
                 for src in companions:

@@ -11,6 +11,7 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "mod-contract/tags.json"
 
 permissions:
   pages: write
@@ -21,6 +22,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Add the tag vocabulary to the site
+        run: cp mod-contract/tags.json site/tags.json
 
       - name: Upload site artifact
         uses: actions/upload-pages-artifact@v4

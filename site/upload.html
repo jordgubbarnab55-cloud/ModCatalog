@@ -77,6 +77,8 @@
     #statusLine.wait { color: var(--fg2); }
     #metaCard { display: none; }
     #metaForm { display: none; }
+    #mTags { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+    #mTags label { display: inline-flex; align-items: center; gap: 6px; margin: 0; color: var(--fg); }
     .notconfigured {
         color: var(--fg2);
         background: var(--layer2);
@@ -110,8 +112,8 @@
 
     <div class="card">
         <h2>2. Your package</h2>
-        <label for="file">A .zip package — or the raw container files (.utoc / .ucas / .pak)</label>
-        <input type="file" id="file" multiple accept=".zip,.pak,.ucas,.utoc">
+        <label for="file">A .zip package — or the raw container files (.utoc / .ucas / .pak, + .sig if you have one)</label>
+        <input type="file" id="file" multiple accept=".zip,.pak,.ucas,.utoc,.sig">
         <div id="modeLine"></div>
     </div>
 
@@ -125,8 +127,14 @@
             <input type="text" id="mAuthor" maxlength="256">
             <label for="mVersion">Version *</label>
             <input type="text" id="mVersion" maxlength="64" placeholder="1.0.0">
+            <label for="mGameVersion">Game version</label>
+            <input type="text" id="mGameVersion" maxlength="64" placeholder="5.6">
             <label for="mDesc">Description</label>
             <textarea id="mDesc" maxlength="16384"></textarea>
+            <div id="mTagsWrap" hidden>
+                <label>Tags</label>
+                <div id="mTags"></div>
+            </div>
         </div>
     </div>
 
@@ -176,9 +184,9 @@
         mode = null; rawFiles = []; utocName = null;
         if (files.length === 0) { updateUi(); return; }
         const zips = files.filter((f) => f.name.toLowerCase().endsWith(".zip"));
-        const raw = files.filter((f) => /\.(pak|ucas|utoc)$/i.test(f.name));
+        const raw = files.filter((f) => /\.(pak|ucas|utoc|sig)$/i.test(f.name));
         if (zips.length + raw.length !== files.length) {
-            setStatus("Only .zip packages or .utoc/.ucas/.pak files are accepted.", "err");
+            setStatus("Only .zip packages or .utoc/.ucas/.pak (+.sig) files are accepted.", "err");
             updateUi(); return;
         }
         if (zips.length > 0) {
@@ -187,9 +195,16 @@
             mode = "zip";
             modeEl.textContent = "One .zip package: " + zips[0].name + " (" + fmtSize(zips[0].size) + ")";
         } else {
-            const utocs = raw.filter((f) => f.name.toLowerCase().endsWith(".utoc"));
-            if (utocs.length !== 1) { setStatus("Exactly one .utoc is required for raw files.", "err"); updateUi(); return; }
             if (new Set(raw.map((f) => f.name)).size !== raw.length) { setStatus("Duplicate file names in the selection.", "err"); updateUi(); return; }
+            const set = classifyRawSet(raw.map((f) => f.name));
+            const problem = {
+                "bad-files": "Select exactly the .utoc, .ucas and .pak (+ optional .sig) files of one mod.",
+                "name-mismatch": "The files must share one name (mod.utoc, mod.ucas, mod.pak).",
+                "incomplete": "Missing a file: a mod needs its .utoc, .ucas and .pak.",
+            }[set.result];
+            if (problem) { setStatus(problem, "err"); updateUi(); return; }
+            setStatus("", "");
+            const utocs = raw.filter((f) => f.name.toLowerCase().endsWith(".utoc"));
             mode = "raw"; rawFiles = raw; utocName = utocs[0].name;
             modeEl.textContent = raw.length + " raw files (" + fmtSize(raw.reduce((s, f) => s + f.size, 0)) + ") — will be zipped by the catalog job";
             inspectTrailer();
@@ -284,7 +299,7 @@
             pollCatalog(before, sizeKey, expectedTitle);
         } catch (e) {
             progWrap.style.display = "none";
-            setStatus(e && /HTTP \d+/.test(String(e.message)) ? e.message : statusMessage("network"), "err");
+            setStatus(e && (e.userFacing || /HTTP \d+/.test(String(e.message))) ? e.message : statusMessage("network"), "err");
             ready();
         }
     });
@@ -299,8 +314,15 @@
         if (!existingMeta) {
             const m = { title: $("mTitle").value.trim(), author: $("mAuthor").value.trim(),
                       description: $("mDesc").value, version: $("mVersion").value.trim(),
-                      guid: crypto.randomUUID() };
-            buffers[utocName] = appendTrailer(buffers[utocName], m);
+                      game_version: $("mGameVersion").value.trim(), guid: null,
+                      tags: [...document.querySelectorAll("#mTags input:checked")].map((c) => c.value) };
+            try {
+                buffers[utocName] = appendTrailer(buffers[utocName], m);
+            } catch (e) {
+                const err = new Error("Cannot write the metadata into " + utocName + ": " + e.message);
+                err.userFacing = true;
+                throw err;
+            }
             onTitle(m.title);
         } else {
             onTitle(existingMeta.title);
@@ -370,11 +392,28 @@
     fileEl.addEventListener("change", analyzeSelection);
     tokenEl.addEventListener("input", updateUi);
 
+    // tags.json is mod-contract/tags.json, copied into the site at deploy time
+    async function loadTagChoices() {
+        let tags = [];
+        try { tags = (await (await fetch("tags.json", { cache: "no-store" })).json()).tags || []; } catch (e) { return; }
+        const box = $("mTags");
+        for (const tag of tags) {
+            const label = document.createElement("label");
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.value = tag;
+            label.append(cb, document.createTextNode(tag));
+            box.append(label);
+        }
+        $("mTagsWrap").hidden = tags.length === 0;
+    }
+
     function init() {
         if (typeof window.configOk !== "function") {  // module scripts not loaded yet
             document.addEventListener("DOMContentLoaded", init);
             return;
         }
+        loadTagChoices();
         (async () => {
             let cfg = null;
             try { cfg = await (await fetch("config.json", { cache: "no-store" })).json(); } catch (e) { /* no config yet */ }

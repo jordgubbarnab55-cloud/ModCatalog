@@ -3,8 +3,10 @@
 
 Single source of truth: the release assets. A mod is a `.zip` release asset
 whose package contains a `.utoc` carrying a valid metadata trailer (see
-trailer.py); the catalog entry (name/author/version/description/id/file/
-size/sha256/cover/updated) is derived from it. Packages without a valid
+trailer.py); the catalog entry (name/author/version/gameVersion/description/
+tags/id/file/size/sha256/cover/updated) is derived from it. The shared
+formats (trailer, catalog schema, package shape, tag vocabulary) live in the
+vendored `mod-contract/` folder. Packages without a valid
 trailer are REJECTED — the inbox asset is deleted, the reason is logged,
 and the rest of the run continues.
 
@@ -27,7 +29,7 @@ Usage:
 
 Two upload shapes are accepted in the inbox (both end in a release-asset zip):
   * a ready-made .zip package, or
-  * a RAW file set (.utoc/.ucas/.pak, no client-side zipping): each file is
+  * a RAW file set (.utoc/.ucas/.pak/+.sig, no client-side zipping): each file is
     streamed to the inbox (part-split when over 100 MB) together with a
     small JSON manifest; this pipeline reassembles the parts, verifies the
     per-file sha256 from the manifest, and zips the set HERE on the runner
@@ -52,10 +54,11 @@ import trailer
 ROOT = pathlib.Path(__file__).resolve().parent
 SITE = ROOT / "site"
 CATALOG_DEFAULT = SITE / "catalog.json"
+CONTRACT = ROOT / "mod-contract"
+CATALOG_SCHEMA_VERSION = 1
 
 INBOX_TAG = "inbox"
 MOD_TAG_PREFIX = "mod-"
-MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # matches the Cloudflare free-plan body limit
 MAX_RELEASE_ASSET_BYTES = 2 * 1024 * 1024 * 1024  # GitHub release asset cap
 STALE_AFTER = 7 * 24 * 3600  # seconds; incomplete/stalled inbox items are swept
 MANIFEST_PART = "manifest.json"
@@ -65,6 +68,35 @@ CATALOG_NAME = "Mod Catalog"
 CATALOG_DESCRIPTION = "Community mod catalog for ModManager (and anyone else who wants the mods)."
 
 IMAGE_EXT = {"image/png": ".png", "image/jpeg": ".jpg"}
+
+SET_REQUIRED = (".utoc", ".ucas", ".pak")
+SET_EXTENSIONS = SET_REQUIRED + (".sig",)
+
+
+def load_tag_vocabulary() -> list[str]:
+    with (CONTRACT / "tags.json").open(encoding="utf-8") as f:
+        return list(json.load(f)["tags"])
+
+
+TAGS = load_tag_vocabulary()
+
+
+def sanitize_tags(tags) -> tuple[list[str], list[str]]:
+    """(kept, dropped): kept = vocabulary tags in the vocabulary's casing,
+    order-preserving, deduplicated case-insensitively; blanks are skipped."""
+    by_key = {t.lower(): t for t in TAGS}
+    kept, dropped = [], []
+    for raw in tags or []:
+        tag = (raw or "").strip()
+        if not tag:
+            continue
+        match = by_key.get(tag.lower())
+        if match is None:
+            if tag.lower() not in {d.lower() for d in dropped}:
+                dropped.append(tag)
+        elif match not in kept:
+            kept.append(match)
+    return kept, dropped
 
 
 class PackageError(Exception):
@@ -276,47 +308,89 @@ class GhClient(PackageClient):
 # ------------------------------------------------------------ validation
 
 
+def is_unsafe_member(name: str) -> bool:
+    n = name.replace("\\", "/")
+    return n.startswith("/") or bool(re.match(r"^[A-Za-z]:", n)) or ".." in n.split("/")
+
+
 def check_member_names(names: list[str]) -> None:
     for n in names:
-        if n.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", n):
-            raise PackageError(f"unsafe member name (absolute path): {n!r}")
-        if ".." in n.replace("\\", "/").split("/"):
-            raise PackageError(f"unsafe member name (path traversal): {n!r}")
+        if is_unsafe_member(n):
+            raise PackageError(f"unsafe member name: {n!r}")
 
 
-def _member_names(zf: zipfile.ZipFile) -> list[str]:
-    return [n for n in zf.namelist() if not n.endswith("/")]
+def _split(name: str) -> tuple[str, str]:
+    """(base name, lowercase extension) of a member's file name."""
+    leaf = name.replace("\\", "/").rsplit("/", 1)[-1]
+    stem, dot, ext = leaf.rpartition(".")
+    return (stem, "." + ext.lower()) if dot and stem else (leaf, "")
 
 
-def find_members(zf: zipfile.ZipFile, ext: str) -> list[str]:
-    return [n for n in _member_names(zf) if n.lower().endswith(ext)]
+def classify_members(names: list[str]) -> tuple[str, str | None, dict]:
+    """Package-shape rule for a zip (mod-contract/package-spec.md).
+
+    Returns (verdict, base, {ext: member}) with verdict one of
+    "ok" / "unsafe-path" / "multiple-sets" / "incomplete".
+    """
+    groups: dict[str, dict[str, str]] = {}
+    for name in names:
+        if not name or name.replace("\\", "/").endswith("/"):
+            continue
+        if is_unsafe_member(name):
+            return "unsafe-path", None, {}
+        base, ext = _split(name)
+        if base and ext in SET_EXTENSIONS:
+            groups.setdefault(base, {}).setdefault(ext, name)
+    complete = [b for b, exts in groups.items() if all(e in exts for e in SET_REQUIRED)]
+    if len(complete) > 1:
+        return "multiple-sets", None, {}
+    if not complete:
+        return "incomplete", None, {}
+    return "ok", complete[0], groups[complete[0]]
+
+
+def classify_raw(names: list[str]) -> tuple[str, str | None]:
+    """Package-shape rule for loose files: "ok" / "bad-files" /
+    "name-mismatch" / "incomplete", plus the base name when known."""
+    if not 3 <= len(names) <= 4:
+        return "bad-files", None
+    bases = {_split(n)[0] for n in names}
+    if len(bases) > 1:
+        return "name-mismatch", None
+    base = bases.pop()
+    exts = {_split(n)[1] for n in names}
+    if exts - set(SET_EXTENSIONS):
+        return "bad-files", base
+    if not set(SET_REQUIRED) <= exts:
+        return "incomplete", base
+    return "ok", base
 
 
 def validate_package(zip_path: pathlib.Path) -> dict:
     """Validates a package zip; returns the trailer metadata dict.
 
-    Rules: valid zip; safe member names; exactly one .utoc with a valid
-    trailer; at least one .ucas and one .pak; size under 100 MB.
+    Rules: a valid zip within the release-asset limit; the package-shape
+    rule (safe member names, exactly one complete .utoc/.ucas/.pak set);
+    that set's .utoc carries a valid trailer.
     """
-    if zip_path.stat().st_size >= MAX_UPLOAD_BYTES:
-        raise PackageError(f"package is {zip_path.stat().st_size} bytes; limit {MAX_UPLOAD_BYTES}")
+    size = zip_path.stat().st_size
+    if size > MAX_RELEASE_ASSET_BYTES:
+        raise PackageError(f"package is {size} bytes; the release asset limit is {MAX_RELEASE_ASSET_BYTES}")
     if not zipfile.is_zipfile(zip_path):
         raise PackageError("not a valid zip file")
     with zipfile.ZipFile(zip_path) as zf:
-        names = _member_names(zf)
-        check_member_names(names)
-        utocs = find_members(zf, ".utoc")
-        if len(utocs) != 1:
-            raise PackageError(f"expected exactly one .utoc in the package, found {len(utocs)}: {utocs}")
-        if not find_members(zf, ".ucas"):
-            raise PackageError("package has no .ucas file")
-        if not find_members(zf, ".pak"):
-            raise PackageError("package has no .pak file")
-        utoc_data = zf.read(utocs[0])
+        verdict, _, members = classify_members(zf.namelist())
+        if verdict == "unsafe-path":
+            raise PackageError("unsafe member name (absolute path or path traversal)")
+        if verdict == "multiple-sets":
+            raise PackageError("more than one complete .utoc/.ucas/.pak set — one mod per package")
+        if verdict == "incomplete":
+            raise PackageError("no complete .utoc/.ucas/.pak set sharing one base name")
+        utoc_data = zf.read(members[".utoc"])
     try:
         return trailer.read_trailer(utoc_data)
     except trailer.TrailerError as ex:
-        raise PackageError(f"invalid or missing trailer: {ex}") from ex
+        raise PackageError(f"invalid or missing trailer ({ex.kind}): {ex}") from ex
 
 
 def sanitize_name(s: str) -> str:
@@ -361,9 +435,35 @@ def load_catalog(path: pathlib.Path) -> tuple[dict, dict]:
     return {"mods": []}, {}
 
 
+def entry_from_meta(meta: dict, *, file_url: str, size: int, sha256: str,
+                    uploader: str | None, updated: str, cover_url: str | None) -> dict:
+    """The catalog entry for one package (mod-contract/catalog.schema.json).
+    Tags outside the vocabulary are dropped with a log line."""
+    tags, dropped = sanitize_tags(meta.get("tags"))
+    if dropped:
+        print(f"  {meta['guid']}: unknown tag(s) dropped: {', '.join(dropped)}")
+    entry = {
+        "id": meta["guid"],
+        "name": meta["title"],
+        "author": meta["author"],
+        "version": meta["version"],
+    }
+    if meta.get("game_version"):
+        entry["gameVersion"] = meta["game_version"]
+    entry["description"] = meta["description"]
+    if tags:
+        entry["tags"] = tags
+    entry.update({"file": file_url, "size": size, "sha256": sha256,
+                  "uploader": uploader, "updated": updated})
+    if cover_url is not None:
+        entry["cover"] = cover_url
+    return entry
+
+
 def write_catalog(path: pathlib.Path, entries: list[dict]) -> None:
     entries = sorted(entries, key=lambda e: (e["name"] or "").lower())
-    catalog = {"name": CATALOG_NAME, "description": CATALOG_DESCRIPTION, "mods": entries}
+    catalog = {"schemaVersion": CATALOG_SCHEMA_VERSION, "name": CATALOG_NAME,
+               "description": CATALOG_DESCRIPTION, "mods": entries}
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as f:
         json.dump(catalog, f, indent=2, ensure_ascii=False)
@@ -464,11 +564,10 @@ def parse_inbox_name(name: str) -> dict | None:
 def make_package_zip(files: dict, dest: pathlib.Path) -> None:
     """Zips a raw file set into one package (deterministic member order,
     .pak/.ucas/.utoc first, same compression as the example packages)."""
-    order = {".pak": 0, ".ucas": 1, ".utoc": 2}
+    order = {".pak": 0, ".ucas": 1, ".utoc": 2, ".sig": 3}
 
     def rank(n: str) -> tuple:
-        ext = n.rsplit(".", 1)[-1].lower() if "." in n else ""
-        return (order.get(ext, 3), n)
+        return (order.get(_split(n)[1], 4), n)
 
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for n in sorted(files, key=rank):
@@ -538,8 +637,11 @@ def raw_group_source(client: PackageClient, uploader: str | None, uid: str,
                                   f"(client said {want[:12]}…, got {got[:12]}…)")
             data[f["name"]] = bytes(blob)
         check_member_names(list(data))
-        if len(set(data)) != len(data):
+        if len(files) != len(data):
             raise PackageError("duplicate file names in the upload")
+        verdict, _ = classify_raw(list(data))
+        if verdict != "ok":
+            raise PackageError(f"not one complete .utoc/.ucas/.pak (+.sig) set: {verdict}")
         make_package_zip(data, dest)
         if dest.stat().st_size > MAX_RELEASE_ASSET_BYTES:
             raise PackageError(f"package zip is {dest.stat().st_size} bytes; "
@@ -635,20 +737,10 @@ class Processor:
             else:
                 new_owner = owner or uploader
 
-            entry = {
-                "id": guid,
-                "name": meta["title"],
-                "author": meta["author"],
-                "version": meta["version"],
-                "description": meta["description"],
-                "file": asset_url(self.owner, self.repo, tag, zip_name),
-                "size": tmp.stat().st_size,
-                "sha256": sha,
-                "uploader": new_owner,
-                "updated": _iso(now),
-            }
-            if image is not None:
-                entry["cover"] = asset_url(self.owner, self.repo, tag, cname)
+            entry = entry_from_meta(
+                meta, file_url=asset_url(self.owner, self.repo, tag, zip_name),
+                size=tmp.stat().st_size, sha256=sha, uploader=new_owner, updated=_iso(now),
+                cover_url=asset_url(self.owner, self.repo, tag, cname) if image is not None else None)
             return True, entry
 
     def run(self, sources: list[PackageSource]) -> dict:
@@ -717,26 +809,18 @@ def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.
                       file=sys.stderr)
                 continue
             sha = hashlib.sha256(tmp.read_bytes()).hexdigest()
-            entry = {
-                "id": meta["guid"],
-                "name": meta["title"],
-                "author": meta["author"],
-                "version": meta["version"],
-                "description": meta["description"],
-                "file": asset_url(owner, repo, tag, newest.name),
-                "size": newest.size,
-                "sha256": sha,
-                "uploader": old_entries.get(meta["guid"], {}).get("uploader"),
-                "updated": _iso(newest.created),
-            }
+            cover_url = None
             image = meta.get("image")
             if image is not None:
                 _, cname = cover_name(meta["guid"], image)
                 if any(a.name == cname for a in rel.assets):
-                    entry["cover"] = asset_url(owner, repo, tag, cname)
+                    cover_url = asset_url(owner, repo, tag, cname)
                 else:
                     print(f"  {tag}: cover {cname} missing from the release, omitted")
-            entries.append(entry)
+            entries.append(entry_from_meta(
+                meta, file_url=asset_url(owner, repo, tag, newest.name), size=newest.size,
+                sha256=sha, uploader=old_entries.get(meta["guid"], {}).get("uploader"),
+                updated=_iso(newest.created), cover_url=cover_url))
     write_catalog(catalog_path, entries)
     print(f"\n{catalog_path.name}: {len(entries)} mod(s) rebuilt")
     return {"ok": len(entries)}

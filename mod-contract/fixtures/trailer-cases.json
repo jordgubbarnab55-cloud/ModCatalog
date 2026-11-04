@@ -1,0 +1,635 @@
+{
+  "read": [
+    {
+      "file": "minimal.utoc",
+      "note": "bare v8 header (TocEnd = 144) + minimal trailer",
+      "expect": {
+        "result": "trailer",
+        "offset": 144,
+        "metadata": {
+          "title": "Minimal Mod",
+          "author": "Some Author",
+          "description": "",
+          "version": "1.0.0",
+          "game_version": "",
+          "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+          "identifier": "SomeAuthor.MinimalMod",
+          "tags": [],
+          "image": null
+        }
+      }
+    },
+    {
+      "file": "full-signed-indexed.utoc",
+      "note": "signed + indexed TocEnd formula; all fields; uppercase GUID is normalized to lowercase",
+      "expect": {
+        "result": "trailer",
+        "offset": 470,
+        "metadata": {
+          "title": "Full Mod",
+          "author": "Team Name",
+          "description": "Line one\nLine \"two\" — ünïcødé 日本 🚀",
+          "version": "2.3.4-beta",
+          "game_version": "5.6.1",
+          "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+          "identifier": "TeamName.FullMod",
+          "tags": [
+            "Skin",
+            "VFX"
+          ],
+          "image": {
+            "mime": "image/png",
+            "size": 25,
+            "sha256": "680b1436122582f093793bb51a369ed7956559cd684dd2d71214f1c7668ae936"
+          }
+        }
+      }
+    },
+    {
+      "file": "legacy-no-optional-fields.utoc",
+      "note": "no game_version/identifier/tags: identifier is derived, game_version is empty",
+      "expect": {
+        "result": "trailer",
+        "offset": 144,
+        "metadata": {
+          "title": "Old Mod",
+          "author": "Legacy Author",
+          "description": "written before tags",
+          "version": "0.9",
+          "game_version": "",
+          "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+          "identifier": "LegacyAuthor.OldMod",
+          "tags": [],
+          "image": null
+        }
+      }
+    },
+    {
+      "file": "empty-version.utoc",
+      "note": "version and game_version may be empty (0..64)",
+      "expect": {
+        "result": "trailer",
+        "offset": 144,
+        "metadata": {
+          "title": "No Version",
+          "author": "A",
+          "description": "",
+          "version": "",
+          "game_version": "",
+          "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+          "identifier": "A.NoVersion",
+          "tags": [],
+          "image": null
+        }
+      }
+    },
+    {
+      "file": "null-description-custom-identifier.utoc",
+      "note": "JSON null string = empty; an explicit identifier is kept; tags are structural only",
+      "expect": {
+        "result": "trailer",
+        "offset": 144,
+        "metadata": {
+          "title": "T",
+          "author": "A",
+          "description": "",
+          "version": "1",
+          "game_version": "",
+          "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+          "identifier": "custom.id",
+          "tags": [
+            "anything-goes-structurally"
+          ],
+          "image": null
+        }
+      }
+    },
+    {
+      "file": "jpeg-image.utoc",
+      "note": "JPEG cover",
+      "expect": {
+        "result": "trailer",
+        "offset": 144,
+        "metadata": {
+          "title": "Jpeg Mod",
+          "author": "A",
+          "description": "",
+          "version": "1",
+          "game_version": "",
+          "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+          "identifier": "A.JpegMod",
+          "tags": [],
+          "image": {
+            "mime": "image/jpeg",
+            "size": 21,
+            "sha256": "a2e702b419ec9cac76677df2047662b3f4269522ec52510ce5b273c66de65e42"
+          }
+        }
+      }
+    },
+    {
+      "file": "real-ue56-signed-with-trailer.utoc",
+      "note": "real UE 5.6 encrypted + signed container with a trailer at TocEnd",
+      "expect": {
+        "result": "trailer",
+        "offset": 23686,
+        "metadata": {
+          "title": "Minimal Mod",
+          "author": "Some Author",
+          "description": "",
+          "version": "1.0.0",
+          "game_version": "",
+          "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+          "identifier": "SomeAuthor.MinimalMod",
+          "tags": [],
+          "image": null
+        }
+      }
+    },
+    {
+      "file": "scan-after-garbage.utoc",
+      "note": "unknown bytes at TocEnd, a valid trailer later: found by the scan",
+      "expect": {
+        "result": "trailer",
+        "offset": 272,
+        "metadata": {
+          "title": "Minimal Mod",
+          "author": "Some Author",
+          "description": "",
+          "version": "1.0.0",
+          "game_version": "",
+          "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+          "identifier": "SomeAuthor.MinimalMod",
+          "tags": [],
+          "image": null
+        }
+      }
+    },
+    {
+      "file": "unknown-toc-version-scan.utoc",
+      "note": "TOC version 9: TocEnd unknown, scan mode finds the trailer",
+      "expect": {
+        "result": "trailer",
+        "offset": 144,
+        "metadata": {
+          "title": "Minimal Mod",
+          "author": "Some Author",
+          "description": "",
+          "version": "1.0.0",
+          "game_version": "",
+          "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+          "identifier": "SomeAuthor.MinimalMod",
+          "tags": [],
+          "image": null
+        }
+      }
+    },
+    {
+      "file": "real-ue56-signed.utoc",
+      "note": "real UE 5.6 container, vanilla",
+      "expect": {
+        "result": "none"
+      }
+    },
+    {
+      "file": "vanilla.utoc",
+      "note": "file ends at TocEnd",
+      "expect": {
+        "result": "none"
+      }
+    },
+    {
+      "file": "foreign-trailing-data.utoc",
+      "note": "unknown trailing data, no trailer magic anywhere",
+      "expect": {
+        "result": "none"
+      }
+    },
+    {
+      "file": "scan-only-corrupt.utoc",
+      "note": "scan candidates that fail validation are skipped, not reported",
+      "expect": {
+        "result": "none"
+      }
+    },
+    {
+      "file": "not-a-toc.utoc",
+      "note": "shorter than the 144-byte header",
+      "expect": {
+        "result": "error",
+        "kind": "NotAToc"
+      }
+    },
+    {
+      "file": "bad-toc-magic.utoc",
+      "note": "TOC magic mismatch",
+      "expect": {
+        "result": "error",
+        "kind": "BadMagic"
+      }
+    },
+    {
+      "file": "bad-header-size.utoc",
+      "note": "tocHeaderSize != 144",
+      "expect": {
+        "result": "error",
+        "kind": "BadHeaderSize"
+      }
+    },
+    {
+      "file": "bad-block-entry-size.utoc",
+      "note": "tocCompressedBlockEntrySize != 12",
+      "expect": {
+        "result": "error",
+        "kind": "BadHeaderSize"
+      }
+    },
+    {
+      "file": "tocend-past-eof.utoc",
+      "note": "the header declares sections past the end of the file",
+      "expect": {
+        "result": "error",
+        "kind": "TocEndMismatch"
+      }
+    },
+    {
+      "file": "bad-crc.utoc",
+      "note": "CRC mismatch",
+      "expect": {
+        "result": "error",
+        "kind": "BadCrc"
+      }
+    },
+    {
+      "file": "bad-format-version.utoc",
+      "note": "format_version 2",
+      "expect": {
+        "result": "error",
+        "kind": "UnsupportedTrailerVersion"
+      }
+    },
+    {
+      "file": "reserved-nonzero.utoc",
+      "note": "reserved bytes must be zero",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "misaligned-total.utoc",
+      "note": "total_size not a multiple of 64 KiB",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "truncated.utoc",
+      "note": "total_size runs past the end of the file",
+      "expect": {
+        "result": "error",
+        "kind": "TruncatedTrailer"
+      }
+    },
+    {
+      "file": "bad-json.utoc",
+      "note": "payload is not JSON",
+      "expect": {
+        "result": "error",
+        "kind": "BadJson"
+      }
+    },
+    {
+      "file": "json-array-root.utoc",
+      "note": "payload root is not an object",
+      "expect": {
+        "result": "error",
+        "kind": "BadJson"
+      }
+    },
+    {
+      "file": "title-is-number.utoc",
+      "note": "wrong JSON type for a string field",
+      "expect": {
+        "result": "error",
+        "kind": "BadJson"
+      }
+    },
+    {
+      "file": "tags-not-array.utoc",
+      "note": "tags must be an array",
+      "expect": {
+        "result": "error",
+        "kind": "BadJson"
+      }
+    },
+    {
+      "file": "schema-2.utoc",
+      "note": "unknown payload schema",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "missing-guid.utoc",
+      "note": "guid is required",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "bad-guid-shape.utoc",
+      "note": "guid must be an RFC 4122 GUID",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "missing-title.utoc",
+      "note": "title is required (1..256)",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "title-too-long.utoc",
+      "note": "title over 256 characters",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "title-256-astral.utoc",
+      "note": "lengths count UTF-16 code units: 128 astral chars = 256 units, allowed",
+      "expect": {
+        "result": "trailer",
+        "offset": 144,
+        "metadata": {
+          "title": "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀",
+          "author": "A",
+          "description": "",
+          "version": "1",
+          "game_version": "",
+          "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+          "identifier": "A.🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀",
+          "tags": [],
+          "image": null
+        }
+      }
+    },
+    {
+      "file": "title-258-astral.utoc",
+      "note": "129 astral chars = 258 UTF-16 units, over the limit",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "too-many-tags.utoc",
+      "note": "more than 10 tags",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "duplicate-tags.utoc",
+      "note": "case-insensitive duplicate tag",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "blank-tag.utoc",
+      "note": "blank tag",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "tag-too-long.utoc",
+      "note": "tag over 32 characters",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "image-mime-mismatch.utoc",
+      "note": "PNG mime with JPEG bytes",
+      "expect": {
+        "result": "error",
+        "kind": "ImageMimeMismatch"
+      }
+    },
+    {
+      "file": "image-unsupported-mime.utoc",
+      "note": "only image/png and image/jpeg",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "image-bad-base64.utoc",
+      "note": "image data is not base64",
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    },
+    {
+      "file": "image-null-data.utoc",
+      "note": "null image data = empty bytes, which are not a PNG",
+      "expect": {
+        "result": "error",
+        "kind": "ImageMimeMismatch"
+      }
+    }
+  ],
+  "write": [
+    {
+      "file": "write-vanilla.utoc",
+      "note": "append to a vanilla container",
+      "metadata": {
+        "title": "Written Mod",
+        "author": "Writer",
+        "description": "desc",
+        "version": "1.2.3",
+        "game_version": "5.6",
+        "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+        "identifier": null,
+        "tags": [
+          "Sound"
+        ]
+      },
+      "expect": {
+        "result": "written",
+        "replaced": false,
+        "toc_end": 144,
+        "payload": "{\"schema\":1,\"title\":\"Written Mod\",\"author\":\"Writer\",\"description\":\"desc\",\"version\":\"1.2.3\",\"game_version\":\"5.6\",\"guid\":\"3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b\",\"identifier\":\"Writer.WrittenMod\",\"tags\":[\"Sound\"]}",
+        "size": 65680,
+        "sha256": "68a5c333a074b7d0a9a778bf2805bbffd063681267af63f8eb7fcfb12b48efde"
+      }
+    },
+    {
+      "file": "write-real.utoc",
+      "note": "append to the real container",
+      "metadata": {
+        "title": "Written Mod",
+        "author": "Writer",
+        "description": "desc",
+        "version": "1.2.3",
+        "game_version": "5.6",
+        "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+        "identifier": null,
+        "tags": [
+          "Sound"
+        ]
+      },
+      "expect": {
+        "result": "written",
+        "replaced": false,
+        "toc_end": 23686,
+        "payload": "{\"schema\":1,\"title\":\"Written Mod\",\"author\":\"Writer\",\"description\":\"desc\",\"version\":\"1.2.3\",\"game_version\":\"5.6\",\"guid\":\"3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b\",\"identifier\":\"Writer.WrittenMod\",\"tags\":[\"Sound\"]}",
+        "size": 89222,
+        "sha256": "430e03309cc05e7ac05c2a233701c771e4cb6a17984ff74b3d83a9f5648c7b52"
+      }
+    },
+    {
+      "file": "write-replace.utoc",
+      "note": "replace an existing trailer; a null guid preserves the existing GUID",
+      "metadata": {
+        "title": "Renamed Mod",
+        "author": "Writer",
+        "description": "desc",
+        "version": "1.2.3",
+        "game_version": "5.6",
+        "guid": null,
+        "identifier": null,
+        "tags": [
+          "Sound"
+        ]
+      },
+      "expect": {
+        "result": "written",
+        "replaced": true,
+        "toc_end": 144,
+        "payload": "{\"schema\":1,\"title\":\"Renamed Mod\",\"author\":\"Writer\",\"description\":\"desc\",\"version\":\"1.2.3\",\"game_version\":\"5.6\",\"guid\":\"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d\",\"identifier\":\"Writer.RenamedMod\",\"tags\":[\"Sound\"]}",
+        "size": 65680,
+        "sha256": "64a430face689157897236f0bc051ffdebe0f25161a4a20fedf48f415f5db86e"
+      }
+    },
+    {
+      "file": "write-escaping.utoc",
+      "note": "exact payload bytes: escaping, astral chars, control chars, GUID lowercased",
+      "metadata": {
+        "title": "Ünïcødé \"quoted\" \\ <&>",
+        "author": "Tab\tAuthor",
+        "description": "multi\nline 😀 \u0001",
+        "version": "1",
+        "game_version": "",
+        "guid": "3F2B8C1E-5A4D-4E6F-9B0A-1C2D3E4F5A6B",
+        "identifier": null,
+        "tags": []
+      },
+      "expect": {
+        "result": "written",
+        "replaced": false,
+        "toc_end": 144,
+        "payload": "{\"schema\":1,\"title\":\"Ünïcødé \\\"quoted\\\" \\\\ <&>\",\"author\":\"Tab\\tAuthor\",\"description\":\"multi\\nline \\uD83D\\uDE00 \\u0001\",\"version\":\"1\",\"game_version\":\"\",\"guid\":\"3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b\",\"identifier\":\"TabAuthor.Ünïcødé\\\"quoted\\\"\\\\<&>\"}",
+        "size": 65680,
+        "sha256": "bd3d419f8d2f5df4b9af31e207c86c0d3f5512fa6c91ec733e48dfe388ae05cf"
+      }
+    },
+    {
+      "file": "write-foreign.utoc",
+      "note": "never clobber unknown data at TocEnd",
+      "metadata": {
+        "title": "Written Mod",
+        "author": "Writer",
+        "description": "desc",
+        "version": "1.2.3",
+        "game_version": "5.6",
+        "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+        "identifier": null,
+        "tags": [
+          "Sound"
+        ]
+      },
+      "expect": {
+        "result": "error",
+        "kind": "ForeignTrailer"
+      }
+    },
+    {
+      "file": "write-ondemand.utoc",
+      "note": "OnDemand containers are read-only",
+      "metadata": {
+        "title": "Written Mod",
+        "author": "Writer",
+        "description": "desc",
+        "version": "1.2.3",
+        "game_version": "5.6",
+        "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+        "identifier": null,
+        "tags": [
+          "Sound"
+        ]
+      },
+      "expect": {
+        "result": "error",
+        "kind": "OnDemandRefused"
+      }
+    },
+    {
+      "file": "write-v9.utoc",
+      "note": "writes need the known v8 layout",
+      "metadata": {
+        "title": "Written Mod",
+        "author": "Writer",
+        "description": "desc",
+        "version": "1.2.3",
+        "game_version": "5.6",
+        "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+        "identifier": null,
+        "tags": [
+          "Sound"
+        ]
+      },
+      "expect": {
+        "result": "error",
+        "kind": "UnsupportedVersion"
+      }
+    },
+    {
+      "file": "write-invalid-meta.utoc",
+      "note": "metadata is validated before writing",
+      "metadata": {
+        "title": "Written Mod",
+        "author": "",
+        "description": "desc",
+        "version": "1.2.3",
+        "game_version": "5.6",
+        "guid": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+        "identifier": null,
+        "tags": [
+          "Sound"
+        ]
+      },
+      "expect": {
+        "result": "error",
+        "kind": "SchemaViolation"
+      }
+    }
+  ]
+}

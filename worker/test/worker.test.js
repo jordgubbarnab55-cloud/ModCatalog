@@ -340,6 +340,25 @@ test("raw mode: wrong extension, missing headers, bad part index -> 400 before G
   assert.equal((await handle(mk({ ...base, filename: "a.pak", headers: { ...base.headers, "X-Part-Idx": "5" } }), makeEnv(kv, pub), makeFetch())).status, 400);
 });
 
+test("raw mode: a .sig file is part of a set (mod-contract/package-spec.md)", async () => {
+  const kv = new FakeKV();
+  const pub = await publicKeyB64();
+  const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
+  const f = makeFetch((url) =>
+    url.includes("releases/tags/inbox") ? new Response(JSON.stringify({ id: 7 }), { status: 200 })
+    : new Response(null, { status: 201 }));
+  const req = uploadRequest({
+    token, contentLength: 10, filename: "mod.sig",
+    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(10)); c.close(); } }),
+  });
+  req.headers.set("X-Upload-Id", "abc-123");
+  req.headers.set("X-File-Idx", "3");
+  req.headers.set("X-Part-Idx", "0");
+  req.headers.set("X-Part-Count", "1");
+  assert.equal((await handle(req, makeEnv(kv, pub), f)).status, 202);
+  assert.match(f.calls.find((c) => c.url.includes("uploads.github.com")).url, /__f3__p0of1__mod\.sig$/);
+});
+
 test("raw mode: zip mode still requires .zip and raw mode ignores it", async () => {
   const kv = new FakeKV();
   const pub = await publicKeyB64();

@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "name": "Canonical Catalog",
+  "description": "Every canonical field, absolute URLs (the ModCatalog shape).",
+  "mods": [
+    {
+      "id": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+      "name": "Full Mod",
+      "author": "Team Name",
+      "version": "2.3.4",
+      "gameVersion": "5.6.1",
+      "description": "All fields present.",
+      "tags": ["Skin", "VFX"],
+      "file": "https://cdn.example.org/releases/Full-Mod-2.3.4.zip",
+      "size": 123456,
+      "sha256": "e2731ef3fc6613868478475ae9eef231301ea8f7e130364df99a0d9fd63b132c",
+      "cover": "https://cdn.example.org/releases/cover.png",
+      "accent": "#206BD4",
+      "uploader": "1509993694902878381",
+      "updated": "2026-10-30T08:54:29Z"
+    },
+    {
+      "id": "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "name": "Bare Mod",
+      "file": "files/bare.zip"
+    }
+  ]
+}

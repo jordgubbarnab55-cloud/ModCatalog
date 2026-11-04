@@ -1,0 +1,122 @@
+{
+  "base": "https://mods.example.com/sub/catalog.json",
+  "cases": [
+    {
+      "file": "canonical.json",
+      "canonical": true,
+      "expect": {
+        "schemaVersion": 1,
+        "name": "Canonical Catalog",
+        "skipped": 0,
+        "mods": [
+          {
+            "id": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
+            "name": "Full Mod",
+            "author": "Team Name",
+            "version": "2.3.4",
+            "gameVersion": "5.6.1",
+            "description": "All fields present.",
+            "tags": ["Skin", "VFX"],
+            "file": "https://cdn.example.org/releases/Full-Mod-2.3.4.zip",
+            "size": 123456,
+            "sha256": "e2731ef3fc6613868478475ae9eef231301ea8f7e130364df99a0d9fd63b132c",
+            "cover": "https://cdn.example.org/releases/cover.png",
+            "accent": "#206BD4"
+          },
+          {
+            "id": "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+            "name": "Bare Mod",
+            "author": "",
+            "version": "",
+            "gameVersion": "",
+            "description": "",
+            "tags": [],
+            "file": "https://mods.example.com/sub/files/bare.zip",
+            "size": 0,
+            "sha256": null,
+            "cover": null,
+            "accent": null
+          }
+        ]
+      }
+    },
+    {
+      "file": "foreign.json",
+      "canonical": false,
+      "expect": {
+        "schemaVersion": null,
+        "name": null,
+        "skipped": 0,
+        "mods": [
+          {
+            "id": "AAAA-1",
+            "name": "Foreign Mod",
+            "author": "Someone Else",
+            "version": "2",
+            "gameVersion": "5.6",
+            "description": "A catalog from another server: bare array root, alias keys, loose types.",
+            "tags": ["skin", "VFX"],
+            "file": "https://mods.example.com/packages/foreign%20mod.zip",
+            "size": 2048,
+            "sha256": "e2731ef3fc6613868478475ae9eef231301ea8f7e130364df99a0d9fd63b132c",
+            "cover": "https://mods.example.com/sub/covers/foreign.jpg",
+            "accent": null
+          },
+          {
+            "id": "http://other.example.net/b.zip",
+            "name": "b",
+            "author": "",
+            "version": "",
+            "gameVersion": "",
+            "description": "",
+            "tags": [],
+            "file": "http://other.example.net/b.zip",
+            "size": 0,
+            "sha256": null,
+            "cover": "https://other.example.net/b.png",
+            "accent": null
+          }
+        ]
+      }
+    },
+    {
+      "file": "messy.json",
+      "canonical": false,
+      "expect": {
+        "schemaVersion": 99,
+        "name": null,
+        "skipped": 4,
+        "mods": [
+          {
+            "id": "keeper",
+            "name": "Keeper",
+            "author": "",
+            "version": "",
+            "gameVersion": "",
+            "description": "",
+            "tags": ["Skin"],
+            "file": "https://mods.example.com/sub/keeper.zip",
+            "size": 0,
+            "sha256": null,
+            "cover": null,
+            "accent": null
+          },
+          {
+            "id": "7",
+            "name": "seven",
+            "author": "",
+            "version": "",
+            "gameVersion": "",
+            "description": "",
+            "tags": [],
+            "file": "https://example.com/seven.zip?x=1",
+            "size": 0,
+            "sha256": null,
+            "cover": null,
+            "accent": null
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -5,6 +5,9 @@ __pycache__/
 # local credentials (moved into secrets/; never commit)
 secrets/
 
+# copied from mod-contract/tags.json at deploy time
+site/tags.json
+
 # local scratch / tool caches
 .local/
 .wrangler/

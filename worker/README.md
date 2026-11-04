@@ -63,6 +63,9 @@ node --test        # 47 offline tests: fake KV, injected fetch, Ed25519 keypair
 
 ## Upload API contract (for the ModManager app)
 
+The client-facing contract is `mod-contract/upload.md` (shared with
+ModManager's `UploadClient`); this section is the Worker's side of it.
+
 ### Shape 1 — a ready-made .zip package
 
 ```
@@ -74,7 +77,7 @@ X-Filename: <name>.zip          # required, must end in .zip
 
 ### Shape 2 — raw container files (no client-side zipping)
 
-Send the `.utoc` / `.ucas` / `.pak` files directly (the workflow zips them
+Send the `.utoc` / `.ucas` / `.pak` (+ optional `.sig`) files directly (the workflow zips them
 on the runner). Each file goes through the same endpoint, **part-split into
 ≤ 90 MB slices when a file is over 100 MB** (7z-style contiguous slices —
 plain byte chunks, concatenated = the original file). Every upload of the
@@ -84,7 +87,7 @@ set carries the same `X-Upload-Id`, plus the set's `manifest.json` upload:
 POST <worker-url>/upload
 Authorization: Bearer <token from /token>
 X-Upload-Id: <uuid>            # one per set; switches the Worker into raw mode
-X-Filename: <file name>        # .pak/.ucas/.utoc, or "manifest.json"
+X-Filename: <file name>        # .pak/.ucas/.utoc/.sig, or "manifest.json"
 X-File-Idx:  <i>               # 0-based file index ("-1" = the manifest)
 X-Part-Idx:  <j>
 X-Part-Count: <n>
@@ -109,7 +112,7 @@ Order the `files` entries the way you want them inside the package zip.
 | `411`  | `Content-Length` header missing (required). |
 | `413`  | A single upload over 100 MB (Cloudflare free-plan request-body limit) — split the file into parts. |
 | `429`  | Daily per-user byte quota exceeded (default 2 GiB/day, UTC). |
-| `400`  | Bad name/headers (zip mode: not a .zip; raw mode: not .pak/.ucas/.utoc, or bad part/manifest headers). |
+| `400`  | Bad name/headers (zip mode: not a .zip; raw mode: not .pak/.ucas/.utoc/.sig, or bad part/manifest headers). |
 | `502`  | GitHub failed (token wrong/expired, or upload/dispatch error). Nothing was stored; do not retry blindly — check the token. |
 | `503`  | The `inbox` release does not exist yet; run the Seed legacy mods (or Process inbox) workflow once. |
 

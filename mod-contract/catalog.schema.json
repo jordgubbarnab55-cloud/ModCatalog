@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jordgubbarnab55-cloud/mod-contract/catalog.schema.json",
+  "title": "Mod catalog",
+  "description": "The canonical shape a catalog SHOULD have. Readers are lenient (see catalog.md): this schema is what writers produce, not the minimum a reader accepts.",
+  "type": "object",
+  "required": ["mods"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "mods": { "type": "array", "items": { "$ref": "#/$defs/mod" } }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "mod": {
+      "type": "object",
+      "required": ["id", "name", "file"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "author": { "type": "string", "maxLength": 256 },
+        "version": { "type": "string", "maxLength": 64 },
+        "gameVersion": { "type": "string", "maxLength": 64 },
+        "description": { "type": "string", "maxLength": 16384 },
+        "tags": { "type": "array", "maxItems": 10, "uniqueItems": true,
+                  "items": { "type": "string", "minLength": 1, "maxLength": 32 } },
+        "file": { "type": "string", "minLength": 1 },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "cover": { "type": "string", "minLength": 1 },
+        "accent": { "type": "string", "pattern": "^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$" },
+        "uploader": { "type": ["string", "null"] },
+        "updated": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

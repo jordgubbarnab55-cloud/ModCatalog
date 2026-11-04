@@ -23,12 +23,23 @@ REPO = "ModCatalog"
 ADMIN = "999999"
 
 
+def fake_toc() -> bytes:
+    """A minimal valid UE 5.6 (v8) .utoc header with no sections: TocEnd = 144."""
+    h = bytearray(trailer.TOC_HEADER_SIZE)
+    h[0:16] = trailer.TOC_MAGIC
+    h[0x10] = trailer.TOC_SUPPORTED_VERSION
+    h[0x14:0x18] = trailer.TOC_HEADER_SIZE.to_bytes(4, "little")
+    h[0x20:0x24] = trailer.TOC_BLOCK_ENTRY_SIZE.to_bytes(4, "little")
+    return bytes(h)
+
+
 def make_package(dest: pathlib.Path, title: str = "Test Mod", author: str = "Tester",
                  version: str = "1.0.0", description: str = "a test package",
                  guid: str | None = None, image: dict | None = None,
-                 n_utoc: int = 1, include_ucas: bool = True, include_pak: bool = True,
+                 second_set: bool = False, include_ucas: bool = True, include_pak: bool = True,
                  no_trailer: bool = False, extra_members: list[str] | None = None,
-                 corrupt: bool = False) -> pathlib.Path:
+                 corrupt: bool = False, tags: list[str] | None = None,
+                 game_version: str = "") -> pathlib.Path:
     """Builds a synthetic package zip (fake utoc/ucas/pak bytes + a real trailer)."""
     if guid is None:
         guid = str(uuid.uuid4())
@@ -36,18 +47,20 @@ def make_package(dest: pathlib.Path, title: str = "Test Mod", author: str = "Tes
         dest.write_bytes(b"\x00\x01\x02 not a zip at all " + uuid.uuid4().bytes * 4)
         return dest
     meta = {"title": title, "author": author, "description": description,
-            "version": version, "guid": guid, "image": image}
-    utoc = b"FAKE-UTOC-" + (b"\x00" * 4096)
+            "version": version, "guid": guid, "image": image, "tags": tags or [],
+            "game_version": game_version}
+    utoc = fake_toc()
     if not no_trailer:
-        utoc += trailer.build_trailer(trailer.build_payload(meta))
+        utoc = trailer.write_trailer(utoc, meta)[0]
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
         if include_pak:
             z.writestr("mod.pak", b"FAKE-PAK-" + guid.encode() + b"\x00" * 1024)
         if include_ucas:
             z.writestr("mod.ucas", b"FAKE-UCAS-" + guid.encode() + b"\x00" * 1024)
-        for i in range(n_utoc):
-            name = f"mod{i}.utoc" if i else "mod.utoc"
-            z.writestr(name, utoc if i == 0 else b"FAKE-UTOC with no trailer")
+        z.writestr("mod.utoc", utoc)
+        if second_set:
+            for ext in (".utoc", ".ucas", ".pak"):
+                z.writestr("other" + ext, b"second set")
         for name in extra_members or []:
             z.writestr(name, b"oops")
     return dest
@@ -150,8 +163,8 @@ class TestRejections(Base):
         self.to_inbox(self.root / "corrupt.zip", "12345", "12345__2__corrupt.zip")
         make_package(self.root / "notrail.zip", no_trailer=True)
         self.to_inbox(self.root / "notrail.zip", "12345", "12345__3__notrail.zip")
-        make_package(self.root / "two-utoc.zip", n_utoc=2)
-        self.to_inbox(self.root / "two-utoc.zip", "12345", "12345__4__two-utoc.zip")
+        make_package(self.root / "two-sets.zip", second_set=True)
+        self.to_inbox(self.root / "two-sets.zip", "12345", "12345__4__two-sets.zip")
         make_package(self.root / "noupak.zip", include_pak=False)
         self.to_inbox(self.root / "noupak.zip", "12345", "12345__5__noupak.zip")
         make_package(self.root / "noucas.zip", include_ucas=False)
@@ -376,7 +389,7 @@ class TestRawUploads(Base):
         payload = build.trailer.build_payload(
             {"title": title, "author": "Raw Author", "description": "raw",
              "version": "1.0.0", "guid": guid})
-        return b"FAKE-UTOC-" + (b"\x00" * 1024) + build.trailer.build_trailer(payload)
+        return fake_toc() + build.trailer.build_trailer(payload)
 
     def test_raw_set_is_zipped_and_rehomed(self):
         guid = str(uuid.uuid4())

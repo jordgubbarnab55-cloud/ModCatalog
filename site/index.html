@@ -12,24 +12,30 @@
         --layer2-border: #272730;
         --layer2-hl: #3D3D4C;      /* card hover surface */
         --layer2-hl-border: #585871;
+        --layer3: #262630;   /* text input fill */
+        --layer3-hl: #3B3D4A;
         --fg: #F0F0F0;
         --fg2: rgba(240, 240, 240, 0.75);
+        --fg3: rgba(240, 240, 240, 0.58);
         --accent: #206BD4;
         --accent-hover: #3C81E2;
-        --success: #00B14A;
+        --accent-active: #1C5EBA;
         --danger: #C22B2B;
+        --scrim: rgba(0, 0, 0, 0.55);
     }
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     body {
         margin: 0;
         background: var(--layer0);
         color: var(--fg);
         font-family: Inter, "Segoe UI", system-ui, sans-serif;
     }
+    body.modal-open { overflow: hidden; }
     .page {
         max-width: 940px;
         margin: 0 auto;
-        padding: 24px 16px 48px;
+        padding: 24px 16px 172px;   /* the last row scrolls above the filter panel */
     }
     header h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
     header .sub { font-size: 13px; color: var(--fg2); margin: 0 0 20px; }
@@ -40,8 +46,9 @@
         gap: 12px;
     }
     @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .empty { grid-column: 1 / -1; color: var(--fg2); font-size: 13px; margin: 8px 0; }
 
-    /* Card: mirrors BrowseModCard (90x90 cover left, info center, download right) */
+    /* Card: mirrors BrowseModCard (fixed 90x90 cover drives the height, info, download column) */
     .card {
         display: grid;
         grid-template-columns: auto 1fr auto;
@@ -50,22 +57,23 @@
         border: 1px solid var(--layer2-border);
         border-radius: 8px;
         overflow: hidden;
+        cursor: pointer;
         transition: background 80ms, border-color 80ms;
     }
     .card:hover {
         background: var(--layer2-hl);
         border-color: var(--layer2-hl-border);
     }
+    .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
     .cover {
         position: relative;
         width: 90px;
-        align-self: stretch;   /* full card height: no top/bottom margin */
-        margin: 0;
+        height: 90px;
         border-radius: 4px;
         overflow: hidden;
         flex: none;
     }
-    .cover .letter {
+    .cover .letter, .lbx-cover .letter {
         position: absolute;
         inset: 0;
         display: flex;
@@ -75,7 +83,7 @@
         font-weight: bold;
         color: #fff;
     }
-    .cover img {
+    .cover img, .lbx-cover img {
         position: absolute;
         inset: 0;
         width: 100%;
@@ -84,8 +92,7 @@
     }
     .info {
         min-width: 0;
-        padding: 12px;
-        padding-right: 0;
+        margin: 12px 0 12px 12px;
         display: flex;
         flex-direction: column;
         gap: 2px;
@@ -97,8 +104,14 @@
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    .meta { font-size: 12px; color: var(--fg2); }
-    .meta .dot { margin: 0 6px; }
+    .meta {
+        display: flex;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--fg2);
+        white-space: nowrap;
+        overflow: hidden;
+    }
     .desc {
         font-size: 12px;
         color: var(--fg2);
@@ -106,33 +119,203 @@
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    /* No fixed width: the column sizes to max(button, hint) and hugs the
-       right edge, so the button's right margin (12) equals the column's
-       top/bottom margin (12) — same rule as BrowseModCard. The hint centers
-       under the button and grows left (never past the button's right edge)
-       when wider. */
+    /* The stack hugs the column's right edge and sizes to max(button, hint):
+       the hint centers under the button, and when wider grows left only. */
     .dl {
-        margin: 12px;
+        width: 116px;
+        margin: 12px 12px 12px 0;
         display: flex;
         flex-direction: column;
-        align-items: center;
+        align-items: flex-end;
+    }
+    .dlstack {
+        display: flex;
+        flex-direction: column;
         gap: 6px;
-        flex: none;
     }
     .dlbtn {
-        width: 52px;
-        height: 52px;
+        align-self: flex-end;
+        width: 44px;
+        height: 44px;
         display: flex;
         align-items: center;
         justify-content: center;
         background: var(--accent);
-        border-radius: 4px;
+        border-radius: 3px;
         color: #fff;
         cursor: pointer;
     }
     .dlbtn:hover { background: var(--accent-hover); }
-    .dlbtn svg { width: 24px; height: 24px; }
-    .hint { font-size: 11px; color: var(--fg2); text-align: center; }
+    .dlbtn:active { background: var(--accent-active); }
+    .dlbtn svg { width: 20px; height: 20px; }
+    .hint { align-self: center; font-size: 11px; color: var(--fg2); white-space: nowrap; }
+
+    /* Details lightbox: mirrors ModDetailsDialog (720x240 panel, 240 cover) */
+    .scrim {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        overflow: auto;
+        background: var(--scrim);
+    }
+    .lbx {
+        position: relative;
+        width: 720px;
+        height: 240px;
+        flex: none;
+        margin: auto;
+        display: grid;
+        grid-template-columns: 240px minmax(0, 1fr);
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        background: var(--layer2);
+        border: 1px solid var(--layer2-border);
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .lbx-cover {
+        position: relative;
+        grid-row: 1 / 4;
+        border-radius: 4px;
+        overflow: hidden;
+    }
+    .lbx-cover .letter { font-size: 72px; }
+    .lbx-head {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        margin: 20px 48px 0 20px;
+    }
+    .lbx-title {
+        flex: 1;
+        min-width: 0;
+        font-size: 16px;
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .lbx-meta {
+        display: flex;
+        gap: 6px;
+        flex: none;
+        font-size: 12px;
+        color: var(--fg2);
+    }
+    .lbx-desc {
+        min-height: 0;
+        margin: 12px 20px;
+        overflow: auto;
+        font-size: 12px;
+        color: var(--fg2);
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
+    .lbx-foot { display: flex; flex-direction: column; gap: 5px; margin: 8px 20px 20px; }
+    .lbx-sep { height: 1px; margin: 2px 0 4px; background: var(--layer2-border); }
+    .lbx-label { font-size: 11px; color: var(--fg2); }
+    .lbx-value { font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lbx-tags { display: grid; grid-template-columns: 48px 1fr; }
+    .lbx-tags .wrap { display: flex; flex-wrap: wrap; }
+    .lbx-file { display: flex; justify-content: space-between; gap: 12px; }
+    .lbx-file > span { display: flex; gap: 8px; min-width: 0; }
+    .tag {
+        margin-right: 6px;
+        padding: 2px 8px;
+        border-radius: 10px;
+        border: 1px solid var(--layer2-border);
+        background: var(--layer2-hl);
+        color: var(--fg2);
+        font-size: 11px;
+    }
+    .lbx-close {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        width: 30px;
+        height: 30px;
+        padding: 0;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--fg2);
+        font-size: 14px;
+        cursor: pointer;
+    }
+    .lbx-close:hover { background: var(--layer2-hl); color: var(--fg); }
+    .lbx-close:focus-visible { outline: 2px solid var(--accent); }
+    @media (max-width: 760px) {
+        .lbx { width: 100%; height: auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto auto; }
+        .lbx-cover { grid-row: auto; height: 200px; }
+        .lbx-head { margin: 16px 48px 0 16px; flex-wrap: wrap; row-gap: 2px; }
+        .lbx-desc { margin: 12px 16px; }
+        .lbx-foot { margin: 8px 16px 16px; }
+        .lbx-close { background: rgba(0, 0, 0, 0.45); color: var(--fg); }
+    }
+
+    /* Floating filter panel: mirrors FilterBar + SearchBox */
+    .filter {
+        position: fixed;
+        left: 50%;
+        bottom: 24px;
+        transform: translateX(-50%);
+        z-index: 10;
+        width: 50vw;
+        padding: 12px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        background: var(--layer2);
+        border: 1px solid var(--layer2-border);
+        border-radius: 12px;
+    }
+    @media (max-width: 720px) { .filter { width: calc(100% - 32px); } }
+    .chips { overflow-x: auto; }
+    .chiprow { display: flex; width: max-content; margin: 0 auto; }
+    .chip {
+        flex: none;
+        margin: 0 6px 0 0;
+        padding: 2px 8px;
+        border-radius: 10px;
+        border: 1px solid var(--layer2-border);
+        background: var(--layer2-hl);
+        color: var(--fg2);
+        font: inherit;
+        font-size: 11px;
+        cursor: pointer;
+    }
+    .chip:hover { background: var(--layer2-hl-border); }
+    .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .chip[aria-pressed="true"]:hover { background: var(--accent-hover); }
+    .chip:focus-visible, .search input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .search { position: relative; }
+    .search svg {
+        position: absolute;
+        left: 14px;
+        top: 10px;
+        width: 20px;
+        height: 20px;
+        color: var(--fg2);
+        pointer-events: none;
+    }
+    .search input {
+        width: 100%;
+        height: 40px;
+        padding: 0 12px 0 44px;
+        border: 1px solid transparent;
+        border-radius: 12px;
+        background: var(--layer3);
+        color: var(--fg);
+        font: inherit;
+        font-size: 14px;
+    }
+    .search input:hover { background: var(--layer3-hl); }
+    .search input:focus { border-color: var(--accent); outline: none; }
+    .search input::placeholder { color: var(--fg3); }
+
     .error {
         color: var(--danger);
         font-size: 13px;
@@ -155,82 +338,250 @@
     </header>
     <div class="grid" id="grid"></div>
 </div>
-<script>
+<div class="filter" id="filter" hidden>
+    <div class="chips" id="chips" hidden><div class="chiprow" id="chiprow"></div></div>
+    <div class="search">
+        <input id="search" type="search" placeholder="Search mods and tags…" aria-label="Search mods and tags" autocomplete="off">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/>
+        </svg>
+    </div>
+</div>
+<script type="module">
+    import {
+        parseCatalog, sanitizeTags, formatBytes, singleLine, metaParts,
+        fileNameOf, placeholder, matches,
+    } from './catalog-lib.js';
+
     const INBOX_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
-        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M22 12h-6l-2 3h-4l-2-3H2"/>
         <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
     </svg>`;
 
-    function esc(s) {
-        const d = document.createElement('div');
-        d.textContent = s ?? '';
-        return d.innerHTML;
+    const grid = document.getElementById('grid');
+    const countEl = document.getElementById('catCount');
+    const searchEl = document.getElementById('search');
+    const selected = new Set();
+    const entries = [];   // { mod, card }
+
+    function h(tag, cls, content) {
+        const el = document.createElement(tag);
+        if (cls) el.className = cls;
+        if (content !== undefined) el.textContent = content;
+        return el;
     }
 
-    function fmtSize(n) {
-        if (n == null) return '';
-        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-        let i = 0, v = n;
-        while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-        return (i ? (v >= 10 ? v.toFixed(0) : v.toFixed(1)) : v) + ' ' + units[i];
+    function metaLine(cls, mod) {
+        const meta = h('div', cls);
+        for (const part of metaParts(mod)) meta.appendChild(h('span', '', part));
+        return meta;
     }
 
-    function fileName(url) {
-        try {
-            const seg = new URL(url, location.origin).pathname.split('/').pop();
-            return decodeURIComponent(seg);
-        } catch { return 'download'; }
+    function coverBox(cls, mod) {
+        const box = h('div', cls);
+        const { initial, color } = placeholder(mod);
+        const letter = h('div', 'letter', initial);
+        letter.style.background = color;
+        box.appendChild(letter);
+        if (mod.cover) {
+            const img = document.createElement('img');
+            img.src = mod.cover;
+            img.alt = '';
+            img.loading = 'lazy';
+            img.addEventListener('error', () => img.remove());
+            box.appendChild(img);
+        }
+        return box;
     }
 
-    function renderMod(mod, base) {
-        const fileUrl = new URL(mod.file, base).href;
-        const card = document.createElement('div');
-        card.className = 'card';
+    function renderCard(mod) {
+        const card = h('div', 'card');
+        card.tabIndex = 0;
+        card.setAttribute('role', 'button');
+        card.setAttribute('aria-label', 'Details for ' + mod.name);
 
-        const initial = esc((mod.name || '?').trim().charAt(0).toUpperCase());
-        const accent = mod.accent || '#206BD4';
-        let cover = `<div class="letter" style="background:${esc(accent)}">${initial}</div>`;
-        if (mod.cover) cover += `<img src="${esc(new URL(mod.cover, base).href)}" alt="" loading="lazy">`;
+        const info = h('div', 'info');
+        info.append(h('div', 'title', mod.name), metaLine('meta', mod), h('div', 'desc', singleLine(mod.description)));
 
-        card.innerHTML = `
-            <div class="cover">${cover}</div>
-            <div class="info">
-                <div class="title">${esc(mod.name)}</div>
-                <div class="meta"><span>${esc(mod.author)}</span><span class="dot">&bull;</span><span>v${esc(mod.version)}</span></div>
-                <div class="desc">${esc(mod.description)}</div>
-            </div>
-            <div class="dl">
-                <a class="dlbtn" href="${esc(fileUrl)}" download="${esc(fileName(fileUrl))}"
-                   title="Download ${esc(mod.name)}">
-                    ${INBOX_ICON}
-                </a>
-                <div class="hint">${esc(fmtSize(mod.size))}</div>
-            </div>`;
+        const dl = h('a', 'dlbtn');
+        dl.href = mod.file;
+        dl.setAttribute('download', fileNameOf(mod.file));
+        dl.title = 'Download ' + mod.name;
+        dl.setAttribute('aria-label', 'Download ' + mod.name);
+        dl.innerHTML = INBOX_ICON;
+        const stack = h('div', 'dlstack');
+        stack.append(dl, h('div', 'hint', formatBytes(mod.size)));
+        const right = h('div', 'dl');
+        right.appendChild(stack);
+
+        card.append(coverBox('cover', mod), info, right);
+        card.addEventListener('click', (e) => {
+            if (!e.target.closest('.dlbtn')) openDetails(mod, card);
+        });
+        card.addEventListener('keydown', (e) => {
+            if (e.target === card && (e.key === 'Enter' || e.key === ' ')) {
+                e.preventDefault();
+                openDetails(mod, card);
+            }
+        });
         return card;
     }
 
-    (async function main() {
-        const grid = document.getElementById('grid');
+    function openDetails(mod, opener) {
+        const scrim = h('div', 'scrim');
+        const panel = h('div', 'lbx');
+        panel.setAttribute('role', 'dialog');
+        panel.setAttribute('aria-modal', 'true');
+        panel.setAttribute('aria-label', mod.name);
+
+        const head = h('div', 'lbx-head');
+        head.append(h('div', 'lbx-title', mod.name), metaLine('lbx-meta', mod));
+        const desc = h('div', 'lbx-desc', mod.description);
+
+        const foot = h('div', 'lbx-foot');
+        foot.appendChild(h('div', 'lbx-sep'));
+        if (mod.tags.length > 0) {
+            const row = h('div', 'lbx-tags');
+            const wrap = h('div', 'wrap');
+            for (const tag of mod.tags) wrap.appendChild(h('span', 'tag', tag));
+            row.append(h('span', 'lbx-label', 'Tags'), wrap);
+            foot.appendChild(row);
+        }
+        const file = h('div', 'lbx-file');
+        const left = h('span');
+        left.append(h('span', 'lbx-label', 'File'), h('span', 'lbx-value', fileNameOf(mod.file)));
+        const size = h('span');
+        size.append(h('span', 'lbx-label', 'Size'), h('span', 'lbx-value', formatBytes(mod.size)));
+        file.append(left, size);
+        foot.appendChild(file);
+
+        const close = h('button', 'lbx-close', '✕');
+        close.type = 'button';
+        close.setAttribute('aria-label', 'Close');
+
+        panel.append(coverBox('lbx-cover', mod), head, desc, foot, close);
+        scrim.appendChild(panel);
+
+        function dismiss() {
+            document.removeEventListener('keydown', onKey, true);
+            scrim.remove();
+            document.body.classList.remove('modal-open');
+            opener.focus({ preventScroll: true });
+        }
+        function onKey(e) {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                dismiss();
+            } else if (e.key === 'Tab') {
+                e.preventDefault();
+                close.focus();
+            }
+        }
+        close.addEventListener('click', dismiss);
+        scrim.addEventListener('click', (e) => { if (e.target === scrim) dismiss(); });
+        document.addEventListener('keydown', onKey, true);
+        document.body.classList.add('modal-open');
+        document.body.appendChild(scrim);
+        close.focus({ preventScroll: true });
+    }
+
+    function applyFilter() {
+        const query = searchEl.value;
+        const tags = [...selected];
+        let shown = 0;
+        for (const { mod, card } of entries) {
+            const ok = matches(mod, query, tags);
+            card.hidden = !ok;
+            if (ok) shown++;
+        }
+        const total = entries.length;
+        const active = selected.size > 0 || query.trim().length > 0;
+        countEl.textContent = active
+            ? `${shown} of ${total} shown`
+            : `${total} mod${total === 1 ? '' : 's'} available`;
+        const empty = grid.querySelector('.empty');
+        if (shown === 0 && total > 0) {
+            if (!empty) grid.appendChild(h('p', 'empty', 'No mods match'));
+        } else if (empty) {
+            empty.remove();
+        }
+    }
+
+    function buildChips(vocabulary) {
+        const row = document.getElementById('chiprow');
+        const chips = [];
+        const refresh = () => {
+            for (const { el, tag } of chips) {
+                el.setAttribute('aria-pressed', String(tag === null ? selected.size === 0 : selected.has(tag)));
+            }
+        };
+        for (const tag of [null, ...vocabulary]) {
+            const el = h('button', 'chip', tag ?? 'All');
+            el.type = 'button';
+            el.addEventListener('click', () => {
+                if (tag === null) {
+                    if (selected.size === 0) return;
+                    selected.clear();
+                } else if (!selected.delete(tag)) {
+                    selected.add(tag);
+                }
+                refresh();
+                applyFilter();
+            });
+            chips.push({ el, tag });
+            row.appendChild(el);
+        }
+        refresh();
+        document.getElementById('chips').hidden = false;
+    }
+
+    async function loadVocabulary() {
         try {
-            const res = await fetch('catalog.json', { cache: 'no-store' });
+            const res = await fetch('tags.json', { cache: 'no-store' });
+            if (!res.ok) return null;
+            const data = await res.json();
+            const tags = Array.isArray(data) ? data : data.tags;
+            return Array.isArray(tags) ? tags.filter((t) => typeof t === 'string') : null;
+        } catch {
+            return null;
+        }
+    }
+
+    (async function main() {
+        try {
+            const catalogUrl = new URL('catalog.json', location.href);
+            const [res, vocabulary] = await Promise.all([
+                fetch(catalogUrl, { cache: 'no-store' }),
+                loadVocabulary(),
+            ]);
             if (!res.ok) throw new Error('catalog.json: HTTP ' + res.status);
-            const catalog = await res.json();
+            const doc = parseCatalog(await res.json(), catalogUrl.href);
+            for (const warning of doc.warnings) console.warn('catalog: ' + warning);
 
-            document.title = catalog.name || 'Mod Catalog';
-            document.getElementById('catName').textContent = catalog.name || 'Mod Catalog';
-            document.getElementById('catDesc').textContent = catalog.description || '';
-            document.getElementById('catCount').textContent =
-                (catalog.mods || []).length + ' mod' + ((catalog.mods || []).length === 1 ? '' : 's') + ' available';
+            document.title = doc.name || 'Mod Catalog';
+            document.getElementById('catName').textContent = doc.name || 'Mod Catalog';
+            document.getElementById('catDesc').textContent = doc.description || '';
 
-            const base = new URL('catalog.json', location.href);
-            for (const mod of catalog.mods || []) grid.appendChild(renderMod(mod, base));
+            for (const mod of doc.mods) {
+                const { kept, dropped } = sanitizeTags(mod.tags, vocabulary);
+                if (dropped.length > 0) {
+                    console.warn(`catalog: '${mod.name}': unknown tag(s) dropped: ${dropped.join(', ')}`);
+                }
+                mod.tags = kept;
+                const card = renderCard(mod);
+                grid.appendChild(card);
+                entries.push({ mod, card });
+            }
+
+            if (vocabulary) buildChips(vocabulary);
+            searchEl.addEventListener('input', applyFilter);
+            document.getElementById('filter').hidden = false;
+            applyFilter();
         } catch (err) {
             grid.innerHTML = '';
-            const box = document.createElement('div');
-            box.className = 'error';
-            box.textContent = 'Failed to load catalog: ' + err.message;
-            grid.appendChild(box);
+            grid.appendChild(h('div', 'error', 'Failed to load catalog: ' + err.message));
         }
     })();
 </script>

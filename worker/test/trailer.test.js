@@ -1,12 +1,27 @@
-// Offline tests for site/trailer.js (the .utoc trailer twin of trailer.py).
+// Offline unit tests for site/trailer.js (the .utoc trailer twin of trailer.py).
+// The cross-implementation cases live in contract.test.js.
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { crc32, hasTrailer, readTrailerMeta, appendTrailer, findTrailer, ALIGNMENT, HEADER_SIZE } from "../../site/trailer.js";
+import {
+  crc32, hasTrailer, readTrailerMeta, appendTrailer, readTrailer, writeTrailer, TrailerError,
+  ALIGNMENT, HEADER_SIZE, TOC_HEADER_SIZE, TOC_MAGIC, TOC_SUPPORTED_VERSION,
+} from "../../site/trailer.js";
+
+/** A minimal valid v8 .utoc header with no sections: TocEnd = 144. */
+function fakeToc() {
+  const h = new Uint8Array(TOC_HEADER_SIZE);
+  h.set(new TextEncoder().encode(TOC_MAGIC), 0);
+  h[0x10] = TOC_SUPPORTED_VERSION;
+  const dv = new DataView(h.buffer);
+  dv.setInt32(0x14, TOC_HEADER_SIZE, true);
+  dv.setInt32(0x20, 12, true);
+  return h;
+}
 
 function meta(over = {}) {
   return { title: "Test Mod", author: "Tester", description: "a test", version: "1.0.0",
-    guid: "11111111-2222-3333-4444-555555555555", ...over };
+    guid: "11111111-2222-4333-8444-555555555555", ...over };
 }
 
 test("crc32 known vector (IEEE, as Python's zlib.crc32)", () => {
@@ -14,70 +29,63 @@ test("crc32 known vector (IEEE, as Python's zlib.crc32)", () => {
   assert.equal(crc32(new Uint8Array(0)), 0);
 });
 
-test("appendTrailer output: alignment, size, and magic position", () => {
-  const utoc = new Uint8Array(4096).fill(0);
-  out: {
-    const out = appendTrailer(utoc, meta());
-    const total = out.length - 4096;
-    assert.equal(total % ALIGNMENT, 0);
-    assert.ok(total >= HEADER_SIZE + 50); // header + payload, padded
-    const magic = String.fromCharCode(...out.slice(4096, 4096 + 8));
-    assert.equal(magic, "UEMODMET");
-  }
+test("appendTrailer writes at TocEnd, aligned", () => {
+  const out = appendTrailer(fakeToc(), meta());
+  const total = out.length - TOC_HEADER_SIZE;
+  assert.equal(total % ALIGNMENT, 0);
+  assert.ok(total >= HEADER_SIZE + 50);
+  assert.equal(String.fromCharCode(...out.slice(TOC_HEADER_SIZE, TOC_HEADER_SIZE + 8)), "UEMODMET");
+  assert.deepEqual(out.slice(0, TOC_HEADER_SIZE), fakeToc()); // prefix untouched
 });
 
-test("round trip: hasTrailer + readTrailerMeta return what appendTrailer wrote", () => {
-  const utoc = new Uint8Array(8192).fill(7);
-  const m = meta({ title: "Ünïcode Tïtle", description: "desc with ünïcode" });
-  const withTrailer = appendTrailer(utoc, m);
-  assert.ok(hasTrailer(withTrailer));
-  assert.deepEqual(readTrailerMeta(withTrailer), m);
-  // the original .utoc prefix is untouched
-  assert.deepEqual(withTrailer.slice(0, 8192), utoc);
+test("round trip: readTrailerMeta returns the normalized metadata", () => {
+  const m = meta({ title: "Ünïcode Tïtle", description: "desc with ünïcode", tags: ["Skin"], game_version: "5.6" });
+  const got = readTrailerMeta(appendTrailer(fakeToc(), m));
+  assert.equal(got.title, m.title);
+  assert.equal(got.description, m.description);
+  assert.equal(got.guid, m.guid);
+  assert.deepEqual(got.tags, ["Skin"]);
+  assert.equal(got.game_version, "5.6");
+  assert.equal(got.identifier, "Tester.ÜnïcodeTïtle");
 });
 
-test("plain bytes have no trailer", () => {
-  assert.equal(hasTrailer(new Uint8Array(2048)), false);
-  assert.equal(hasTrailer(new Uint8Array(16)), false); // too small
+test("writing again replaces the trailer and keeps the GUID", () => {
+  const first = appendTrailer(fakeToc(), meta());
+  const { bytes, replaced } = writeTrailer(first, meta({ guid: null, title: "Renamed" }));
+  assert.equal(replaced, true);
+  assert.equal(bytes.length, first.length);
+  const got = readTrailerMeta(bytes);
+  assert.equal(got.title, "Renamed");
+  assert.equal(got.guid, meta().guid);
 });
 
-test("a corrupted payload (crc mismatch) is not a trailer", () => {
-  const out = appendTrailer(new Uint8Array(4096), meta());
-  // flip one payload byte (header is 32 bytes; payload starts at offset+32)
-  out[out.length - 65536 + HEADER_SIZE + 5] ^= 0xff;
+test("a missing GUID on a fresh container gets a v4", () => {
+  const got = readTrailerMeta(appendTrailer(fakeToc(), meta({ guid: null })));
+  assert.match(got.guid, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+});
+
+test("a vanilla container has no trailer; non-TOC bytes are not a .utoc", () => {
+  assert.equal(readTrailer(fakeToc()).trailer, null);
+  assert.equal(hasTrailer(fakeToc()), false);
+  assert.equal(hasTrailer(new Uint8Array(16)), false);
+  assert.throws(() => readTrailer(new Uint8Array(2048)), (e) => e.kind === "BadMagic");
+});
+
+test("a corrupted payload at TocEnd is an error, and hasTrailer says no", () => {
+  const out = appendTrailer(fakeToc(), meta());
+  out[TOC_HEADER_SIZE + HEADER_SIZE + 5] ^= 0xff;
+  assert.throws(() => readTrailer(out), (e) => e instanceof TrailerError && e.kind === "BadCrc");
   assert.equal(hasTrailer(out), false);
 });
 
-test("a stray magic without a valid header is not a trailer", () => {
-  const bytes = new Uint8Array(8192);
-  bytes.set(new TextEncoder().encode("UEMODMET"), 100); // magic, garbage header
-  assert.equal(hasTrailer(bytes), false);
+test("each required field is actually validated", () => {
+  for (const [field, bad] of [["title", ""], ["author", ""], ["title", "x".repeat(257)], ["version", "v".repeat(65)]])
+    assert.throws(() => appendTrailer(fakeToc(), meta({ [field]: bad })), (e) => e.kind === "SchemaViolation", field);
+  assert.throws(() => appendTrailer(fakeToc(), meta({ guid: "nope" })), /GUID/);
 });
 
-test("findTrailer rejects a wrong version and a non-multiple-of-64KiB total", () => {
-  const out = appendTrailer(new Uint8Array(4096), meta());
-  const off = 4096;
-  const bad = out.slice();
-  new DataView(bad.buffer).setUint16(off + 8, 2, true); // version 2
-  assert.equal(hasTrailer(bad), false);
-
-  const bad2 = out.slice();
-  const dv = new DataView(bad2.buffer);
-  // total_size low word +1 (was a multiple of 65536) -> not aligned
-  dv.setUint32(off + 0x10, dv.getUint32(off + 0x10, true) + 1, true);
-  assert.equal(hasTrailer(bad2), false);
-});
-
-test("appendTrailer validates its inputs", () => {
-  assert.throws(() => appendTrailer(new Uint8Array(8), meta({ title: "" })), /title/);
-  assert.throws(() => appendTrailer(new Uint8Array(8), meta({ guid: "" })), /guid/);
-  assert.throws(() => appendTrailer(new Uint8Array(8), meta({ title: "x".repeat(257) })), /title/);
-});
-
-test("a trailer is still found when prefixed bytes contain the magic", () => {
-  const prefix = new Uint8Array(4096);
-  prefix.set(new TextEncoder().encode("UEMODMET"), 10); // stray magic in the body
-  const out = appendTrailer(prefix, meta());
-  assert.ok(hasTrailer(out));
-  assert.deepEqual(readTrailerMeta(out), meta());
+test("foreign trailing data is never clobbered", () => {
+  const bytes = new Uint8Array(TOC_HEADER_SIZE + 10);
+  bytes.set(fakeToc(), 0);
+  assert.throws(() => appendTrailer(bytes, meta()), (e) => e.kind === "ForeignTrailer");
 });

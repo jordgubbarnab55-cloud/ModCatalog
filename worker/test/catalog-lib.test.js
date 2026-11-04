@@ -1,0 +1,129 @@
+// site/catalog-lib.js against the shared catalog fixtures and the app's recorded vectors.
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import {
+  parseCatalog, sanitizeTags, formatBytes, singleLine, metaParts, fileNameOf,
+  parseAccent, accentFor, placeholder, matches,
+} from "../../site/catalog-lib.js";
+
+const FIXTURES = new URL("../../mod-contract/fixtures/", import.meta.url);
+const load = (name) => JSON.parse(readFileSync(new URL(name, FIXTURES), "utf8"));
+const all = load("catalog-cases.json");
+const vocabulary = load("../tags.json").tags;
+
+for (const c of all.cases) {
+  test(`catalog parse: ${c.file}`, () => {
+    const doc = parseCatalog(load(`catalogs/${c.file}`), all.base);
+    assert.equal(doc.schemaVersion, c.expect.schemaVersion);
+    assert.equal(doc.name, c.expect.name);
+    assert.equal(doc.skipped, c.expect.skipped);
+    assert.deepEqual(doc.mods, c.expect.mods);
+  });
+}
+
+test("catalog parse: unusable roots throw", () => {
+  assert.throws(() => parseCatalog({ items: [] }, all.base));
+  assert.throws(() => parseCatalog({ mods: {} }, all.base));
+  assert.throws(() => parseCatalog("nope", all.base));
+  assert.throws(() => parseCatalog(null, all.base));
+});
+
+test("catalog parse: warnings describe skipped entries", () => {
+  const doc = parseCatalog(load("catalogs/messy.json"), all.base);
+  assert.equal(doc.warnings.length >= 5, true);
+  assert.ok(doc.warnings.some((w) => w.includes("newer than")));
+  assert.ok(doc.warnings.some((w) => w.includes("duplicate id 'keeper'")));
+  assert.ok(doc.warnings.some((w) => w.includes("not http(s)")));
+});
+
+test("catalog parse: whitespace-padded and relative URLs resolve like the app", () => {
+  const doc = parseCatalog([{ file: "  a/b%20c.zip ", cover: "../c.png" }], "https://h.example/x/y/catalog.json");
+  assert.equal(doc.mods[0].file, "https://h.example/x/y/a/b%20c.zip");
+  assert.equal(doc.mods[0].cover, "https://h.example/x/c.png");
+  assert.equal(doc.mods[0].name, "b c");
+});
+
+test("catalog parse: size leniency", () => {
+  const sizes = [1.5, "12", " 12", "-1", -3, "x", 0, 7].map((size) =>
+    parseCatalog([{ file: "https://h.example/a.zip", size }], "https://h.example/").mods[0].size);
+  assert.deepEqual(sizes, [0, 12, 0, 0, 0, 0, 0, 7]);
+});
+
+test("sanitizeTags keeps vocabulary casing, order, drops unknowns and duplicates", () => {
+  const { kept, dropped } = sanitizeTags([" skin ", "VFX", "SKIN", "", "  ", "Nope", "nope", "sound"], vocabulary);
+  assert.deepEqual(kept, ["Skin", "VFX", "Sound"]);
+  assert.deepEqual(dropped, ["Nope"]);
+  assert.deepEqual(sanitizeTags(["a", "A", "b"], null).kept, ["a", "b"]);
+  assert.deepEqual(sanitizeTags(undefined, vocabulary), { kept: [], dropped: [] });
+});
+
+test("formatBytes", () => {
+  const cases = [
+    [0, "0 B"], [1, "1 B"], [1023, "1023 B"], [1024, "1 KB"], [1536, "1.5 KB"],
+    [10485760, "10 MB"], [10 * 1024 * 1024 + 512 * 1024, "10.5 MB"],
+    [1024 ** 3, "1 GB"], [1024 ** 4, "1 TB"], [1024 ** 5, "1024 TB"], [1280, "1.3 KB"],
+  ];
+  for (const [n, s] of cases) assert.equal(formatBytes(n), s, String(n));
+  assert.equal(formatBytes(undefined), "0 B");
+});
+
+test("singleLine", () => {
+  assert.equal(singleLine("a\r\nb\nc\rd"), "a b c d");
+  assert.equal(singleLine("plain"), "plain");
+  assert.equal(singleLine(""), "");
+  assert.equal(singleLine(null), "");
+});
+
+test("metaParts", () => {
+  assert.deepEqual(metaParts({ author: "A", version: "1", gameVersion: "" }), ["A", "•", "v1"]);
+  assert.deepEqual(metaParts({ author: "A", version: "1", gameVersion: "5.6" }), ["A", "•", "v1", "•", "[5.6]"]);
+  assert.deepEqual(metaParts({ author: "", version: "", gameVersion: "" }), ["", "•", "v"]);
+});
+
+test("fileNameOf", () => {
+  assert.equal(fileNameOf("https://h.example/p/foreign%20mod.zip"), "foreign mod.zip");
+  assert.equal(fileNameOf("https://h.example/"), "download");
+  assert.equal(fileNameOf("nonsense"), "download");
+});
+
+// Recorded from ModManager.Tests/PlaceholderAccentTests.cs (the app's PlaceholderAccent.HexFor).
+const VECTORS = [
+  ["", "#408C3F"], ["a", "#8C3F73"], ["ExampleUEMod", "#583F8C"],
+  ["mod-guid-1", "#8C3F64"], ["Zebra", "#3F628C"], ["Lava Skin", "#493F8C"],
+];
+for (const [key, hex] of VECTORS) {
+  test(`accentFor(${JSON.stringify(key)}) = ${hex}`, () => assert.equal(accentFor(key), hex));
+}
+
+test("placeholder: initial and colour", () => {
+  assert.deepEqual(placeholder({ id: "Zebra", name: "zebra skin" }), { initial: "Z", color: "#3F628C" });
+  assert.deepEqual(placeholder({ id: "Zebra", name: "" }), { initial: "?", color: "#3F628C" });
+  assert.deepEqual(placeholder({ id: "Zebra", name: "x", accent: "#112233" }), { initial: "X", color: "#112233" });
+  assert.deepEqual(placeholder({ id: "Zebra", name: "x", accent: "#80112233" }), { initial: "X", color: "#11223380" });
+  assert.equal(placeholder({ id: "Zebra", name: "x", accent: "blue" }).color, "#3F628C");
+  assert.equal(placeholder({ id: "k", name: "ß" }).initial, "ß");
+});
+
+test("parseAccent", () => {
+  assert.equal(parseAccent("#abc"), "#AABBCC");
+  assert.equal(parseAccent("#206bd4"), "#206BD4");
+  assert.equal(parseAccent("red"), null);
+  assert.equal(parseAccent("#12345"), null);
+  assert.equal(parseAccent(null), null);
+});
+
+test("matches: tag filter is OR-ed, query hits name/author/description/tags", () => {
+  const mod = { name: "Lava Skin", author: "Ann", description: "Hot stuff", tags: ["Skin", "VFX"] };
+  assert.equal(matches(mod, "", []), true);
+  assert.equal(matches(mod, "", ["sound"]), false);
+  assert.equal(matches(mod, "", ["sound", "vfx"]), true);
+  assert.equal(matches(mod, "  LAVA ", []), true);
+  assert.equal(matches(mod, "ann", []), true);
+  assert.equal(matches(mod, "hot", []), true);
+  assert.equal(matches(mod, "vf", []), true);
+  assert.equal(matches(mod, "zzz", []), false);
+  assert.equal(matches(mod, "lava", ["Sound"]), false);
+  assert.equal(matches({ name: "x", author: "", description: "", tags: [] }, "x", ["Skin"]), false);
+});

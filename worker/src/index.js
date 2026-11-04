@@ -8,14 +8,14 @@
 //
 // Two upload shapes:
 //   * zip packages: X-Filename <name>.zip, one upload per package
-//   * raw file sets (no client-side zipping): each .utoc/.ucas/.pak file
+//   * raw file sets (no client-side zipping): each .utoc/.ucas/.pak(/.sig) file
 //     (part-split when over 100 MB) plus a manifest.json upload, all tagged
 //     with the same X-Upload-Id; the workflow reassembles + zips on the
 //     runner (this Worker cannot — 10 ms CPU, stateless).
 
 const MAX_BODY_BYTES = 100 * 1024 * 1024; // Cloudflare free-plan request-body limit
 const DEFAULT_DAILY_BYTES = 2147483648; // 2 GiB of uploads per user per UTC day
-const RAW_EXTENSIONS = [".pak", ".ucas", ".utoc"];
+const RAW_EXTENSIONS = [".pak", ".ucas", ".utoc", ".sig"];
 const INBOX_CACHE_KEY = "cache:inbox_release_id";
 const INBOX_CACHE_MS = 3600 * 1000;
 const INBOX_TAG = "inbox";
@@ -249,7 +249,7 @@ async function handleUpload(request, env, fetchImpl) {
     } else {
       const lower = filename.toLowerCase();
       if (!RAW_EXTENSIONS.some((e) => lower.endsWith(e))) {
-        return json({ error: "raw files must be .pak/.ucas/.utoc (plus the manifest.json upload)" }, 400, cors);
+        return json({ error: "raw files must be .pak/.ucas/.utoc/.sig (plus the manifest.json upload)" }, 400, cors);
       }
       assetName = `${discordId}__${uploadId}__f${fileIdx}__p${partIdx}of${partCount}__${sanitizeFilename(filename)}`;
     }

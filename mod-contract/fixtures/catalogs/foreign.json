@@ -1,0 +1,20 @@
+[
+  {
+    "guid": "AAAA-1",
+    "title": "Foreign Mod",
+    "author": "Someone Else",
+    "version": 2,
+    "game_version": "5.6",
+    "description": "A catalog from another server: bare array root, alias keys, loose types.",
+    "tags": "skin, VFX ,  ",
+    "url": "../packages/foreign mod.zip",
+    "size": "2048",
+    "image": "covers/foreign.jpg",
+    "sha256": "E2731EF3FC6613868478475AE9EEF231301EA8F7E130364DF99A0D9FD63B132C",
+    "extraField": { "ignored": true }
+  },
+  {
+    "download": "http://other.example.net/b.zip",
+    "thumbnail": "https://other.example.net/b.png"
+  }
+]

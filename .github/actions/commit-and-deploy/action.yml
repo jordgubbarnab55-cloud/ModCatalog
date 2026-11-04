@@ -31,6 +31,10 @@ runs:
           echo "Catalog already up to date; nothing to commit."
         fi
 
+    - name: Add the tag vocabulary to the site
+      shell: bash
+      run: cp mod-contract/tags.json site/tags.json
+
     - name: Upload site artifact
       uses: actions/upload-pages-artifact@v4
       with:
