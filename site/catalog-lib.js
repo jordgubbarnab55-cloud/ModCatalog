@@ -218,11 +218,25 @@ export function singleLine(value) {
   return value.replace(/\r\n/g, " ").replace(/[\n\r]/g, " ");
 }
 
-/** The meta line pieces: author • vVersion [• [gameVersion]]. */
+/**
+ * The meta line pieces (VersionMetaConverter): author, then `• vVersion` when
+ * there is a version and `• [gameVersion]` when there is a game version.
+ */
 export function metaParts(mod) {
-  const parts = [mod.author, "•", `v${mod.version}`];
+  const parts = [mod.author ?? ""];
+  if (mod.version) parts.push("•", `v${mod.version}`);
   if (mod.gameVersion) parts.push("•", `[${mod.gameVersion}]`);
   return parts;
+}
+
+export const DEFAULT_TITLE = "Mod Catalog";
+
+/** The page title: config.json `title`, else the catalog's `name`, else the default (both trimmed). */
+export function catalogTitle(configTitle, catalogName) {
+  for (const v of [configTitle, catalogName]) {
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+  }
+  return DEFAULT_TITLE;
 }
 
 /** The file name of a package URL, decoded; "download" when there is none. */
@@ -304,6 +318,6 @@ export function matches(mod, query, selectedTags) {
 if (typeof window !== "undefined") {
   Object.assign(window, {
     parseCatalog, sanitizeTags, formatBytes, singleLine, metaParts,
-    fileNameOf, parseAccent, accentFor, placeholder, matches,
+    fileNameOf, parseAccent, accentFor, placeholder, matches, catalogTitle,
   });
 }

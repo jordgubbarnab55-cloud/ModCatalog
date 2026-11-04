@@ -78,6 +78,14 @@ because moving `index.html` into `site/` breaks the old Pages build.
 12. Put that URL into `site/config.json` as `uploadUrl` (replace
     `REPLACE_ME_WORKER_URL`), commit and push — the push to `site/**`
     redeploys Pages (workflow `Deploy site`).
+    **Catalog title:** set `title` in the same file (e.g.
+    `"title": "XYZ Community Mods"`); it is the page heading, the browser
+    tab title and the catalog's `name` (what ModManager's Browse tab shows).
+    An optional `description` sets the catalog's `description` (not shown on
+    the page). Absent or blank, they default to "Mod Catalog" and a generic
+    description. `Deploy site` applies them to the deployed `catalog.json`
+    (`python build.py retitle`); the committed copy follows on the next
+    catalog run (or run **Rebuild catalog**).
 
 **Part 4 — Discord**
 

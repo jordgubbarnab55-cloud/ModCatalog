@@ -1,0 +1,2 @@
+# The vendored contract must stay byte-identical to the canonical copy.
+mod-contract/** -text

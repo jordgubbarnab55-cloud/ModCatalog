@@ -32,8 +32,10 @@ repos sit side by side) and runs the shared fixtures against `trailer.py`,
   catalog `author` and `identifier` are **verified** (see "Ownership").
 - `site/catalog.json` is a **generated artifact — never edit it by hand**.
   All mod data (including the `id`, the trailer GUID) is derived from the
-  packages. Top-level catalog `name`/`description` are constants in
-  `build.py`.
+  packages. Top-level catalog `name`/`description` come from
+  `site/config.json` `title`/`description` (`build.load_catalog_identity`;
+  defaults `DEFAULT_CATALOG_NAME`/`DEFAULT_CATALOG_DESCRIPTION` when absent
+  or blank); `python build.py retitle` re-applies only those two.
 - **Packages without a valid trailer are rejected** with a clear reason and
   removed from the inbox; **one bad package never blocks the rest of the
   run**. No hand-filled entries — if a package is rejected, fix the package.
@@ -221,8 +223,10 @@ to 64 KiB.
   account), commit, deploy. Run once after cutover, then delete
   `legacy-assets/` (SETUP.md step 8).
 - `deploy-site.yml` — push to `site/**` (a human editing `index.html` /
-  `config.json`): upload `site/` as the Pages artifact and
-  deploy. Bot pushes with `GITHUB_TOKEN` do not trigger it → no loops.
+  `config.json`): `python build.py retitle` (the deployed catalog.json gets
+  the config's title at once; nothing is committed), upload `site/` as the
+  Pages artifact and deploy. Bot pushes with `GITHUB_TOKEN` do not trigger
+  it → no loops.
 - `.github/actions/commit-and-deploy/action.yml` — commit
   `site/catalog.json` **only if changed** (scoped `git status --porcelain`
   + `git add` — a whole-tree check broke once when Python left
@@ -297,14 +301,31 @@ HTML**. ModManager's Browse tab is the reference; the page mirrors it:
   `#32323F` / hover `#3D3D4C`, fg `#F0F0F0` @ 75% secondary, accent
   `#206BD4` / hover `#3C81E2`), fixed 90×90 cover (card = 92 px tall) with
   the letter placeholder underneath (initial + the catalog `accent`, else a
-  colour hashed from the mod id), title 14 semibold, `author • vVersion
-  [• [gameVersion]]`, single-line description, and a 116 px right column
+  colour hashed from the mod id), title 14 semibold, `author [• vVersion]
+  [• [gameVersion]]` (each segment only when non-empty — the app's
+  `VersionMetaConverter`; the details view too), single-line description,
+  and a 116 px right column
   with a 44×44 solid-accent button (Lucide inbox 20 px) + `formatBytes`
   size hint. 2 cards/row, 1 on narrow screens, catalog order.
 - **Details lightbox** (`ModDetailsDialog`): a card click (not the download
   button) opens a 720×240 panel — 240 cover, wrapped description, Tags
   chips, File / Size; Esc, scrim click or ✕ closes and returns focus to
-  the card. Below 760 px it stacks.
+  the card. Below 760 px it stacks. It is a `modal.js` modal
+  (`panelClass: "lbx"`), so it opens and closes with the same animation as
+  the upload modals.
+- **Modal animation** (`modal.js` `MOTION`, DialogHost.Avalonia 0.12.3's
+  dialog animation, which the app's dialogs use): open = panel scale
+  0.8→1 + opacity 0→1, 300 ms SineEaseInOut; close = hold to 60 % of the
+  eased progress, then scale →0.5 + opacity →0; the scrim's background
+  fades linearly over 300 ms. A closing scrim becomes `scrim-out` (inert,
+  no pointer events) until it is removed, so `.scrim` only ever matches
+  live modals. A step that replaces the previous one (open the next, then
+  close the old) swaps without replaying the animation. None under
+  `prefers-reduced-motion: reduce`.
+- **Header**: the centred title is `site/config.json` `title`, else the
+  catalog's `name`, else "Mod Catalog" (`catalogTitle`); it also sets the
+  tab `<title>`. Below it the count line and the "Upload a mod" button. The
+  catalog `description` is not shown.
 - **Filter panel** (`FilterBar` + `SearchBox`): floating, bottom-centred,
   50% of the window; chips `All` + one per tag of `site/tags.json`
   (OR-combined; hidden when `tags.json` is missing), a search box matching
@@ -337,8 +358,9 @@ still start.
 
 **Uploading** is a chain of modals on `index.html` (the header's "Upload a
 mod" button; `upload.html` is only a redirect to `index.html#upload`, which
-opens the flow, so old links work). `config.json` (`{"uploadUrl": ...}`, the
-one value the owner edits after deploying the Worker) feeds it; while it is a
+opens the flow, so old links work). `config.json` (`{"title": ...,
+"uploadUrl": ...}`, the deployer's settings; `uploadUrl` is filled in after
+deploying the Worker) feeds it; while `uploadUrl` is a
 placeholder the button shows "upload is not configured yet". The steps, each
 its own modal in the details lightbox's style (`modal.js`: scrim, panel,
 floating ✕, Esc/scrim close, focus trap; closing any step cancels the whole
@@ -358,14 +380,19 @@ flow; nothing is uploaded before the confirm):
    and inflates it with `DecompressionStream('deflate-raw')` — the whole zip
    is never read; the zip package-shape rule is `classifyMembers`.
    Loose files: the `.utoc` is read directly. The `.utoc` must be a UE 5.6
-   (v8), non-OnDemand TOC (what the server can write to).
+   (v8), non-OnDemand TOC (what the server can write to). There is no
+   Continue button: a valid pick or drop goes straight to the editor; while
+   the `.utoc` is read the drop zone shows a spinner (`aria-busy`, further
+   picks ignored), and an invalid selection stays on the step with the error
+   in a boxed `role="alert"` line under the zone.
 3. **Metadata editor** (`upload-editor.js`) — ModManager's
    `DevelopmentEditor` on the web: Title \*, Author \*, Version, Game
    version, the 160×160 image picker (PNG/JPEG by magic bytes, hard limit
    4 MiB, over 512 KiB warns and downscales to ≤ 512 px PNG through a
    canvas; a small ✕ removes the cover, which the app lacks), Description,
-   the read-only Identifier (`Author.Title`, whitespace removed),
-   Tags as toggle chips from `site/tags.json`, and a live preview card (the
+   Tags as toggle chips from `site/tags.json`, then the read-only Identifier
+   (`Author.Title`, whitespace removed; the app puts it above the tags, the
+   web puts the editable tags first), and a live preview card (the
    page's own `renderCard(mod, {preview: true})`). Prefilled from the
    package's trailer (`trailer.js readTrailer`; no trailer → empty form
    with the title from the file name; an unreadable one → empty form + a
@@ -383,9 +410,15 @@ flow; nothing is uploaded before the confirm):
 4. **Confirm** — "Upload ‹title› v‹version›?" over the editor (Cancel
    returns to the editor with the values kept), then the upload: manifest,
    `metadata.json`, the files part-split at 90 MB, through
-   `XMLHttpRequest` with a progress bar; then it polls `catalog.json`
-   (`findPublishedMod`, new id or changed file/version) for up to ~3
-   minutes. Statuses come from `statusMessage`.
+   `XMLHttpRequest` with a progress bar (not dismissible while sending). A
+   failed request leaves the editor open underneath ("Back to the editor" /
+   Esc keep the form). Once every request is accepted the editor modal closes
+   and the confirm modal becomes the result ("‹title› v‹version› is
+   uploaded", `uploadedText`), dismissible by Close / Esc / scrim / ✕, while
+   it polls `catalog.json` (`findPublishedMod`, new id or changed
+   file/version) for up to ~3 minutes and then shows `doneText`; dismissing
+   it ends the session and aborts the poll. Statuses come from
+   `statusMessage`.
 
 The browser sends the package bytes **unchanged** and never writes a
 trailer; the metadata travels as `metadata.json` (`buildMetadataJson`;

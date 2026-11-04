@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import {
   configOk, statusMessage, findNewMod, findNewModByName, POLL_MAX_MS,
   whoamiUrl, checkToken, forcedFields, authorMismatchNote, resolveForm, buildMetadataJson,
+  classifySelection, selectionLabel, uploadedText, confirmText,
 } from "../../site/upload-lib.js";
 
 test("configOk rejects placeholders, empty, non-http and missing values", () => {
@@ -135,4 +136,20 @@ test("authorMismatchNote only warns when the package names another author", () =
   assert.equal(note.kind, "warn");
   assert.match(note.text, /“alice”/);
   assert.match(note.text, /“Alice B\.”/);
+});
+
+test("selectionLabel names the zip, or counts the loose files in package order", () => {
+  const zip = classifySelection([{ name: "Mod-1.0.zip", size: 10 }]);
+  assert.equal(selectionLabel(zip), "Mod-1.0.zip");
+  const loose = classifySelection([
+    { name: "m.pak", size: 1 }, { name: "m.sig", size: 1 }, { name: "m.utoc", size: 1 }, { name: "m.ucas", size: 1 },
+  ]);
+  assert.equal(selectionLabel(loose), "4 files (m.utoc, m.ucas, m.pak, m.sig)");
+});
+
+test("uploadedText mirrors confirmText's title and optional version", () => {
+  assert.equal(uploadedText("  My Mod ", " 1.2 "), "“My Mod” v1.2 is uploaded");
+  assert.equal(uploadedText("My Mod", ""), "“My Mod” is uploaded");
+  assert.equal(uploadedText("My Mod", undefined), "“My Mod” is uploaded");
+  assert.match(confirmText("My Mod", "1.2"), /“My Mod” v1\.2/);
 });

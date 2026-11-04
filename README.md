@@ -85,7 +85,8 @@ site/
     upload-editor.js      the metadata editor (ModManager's, on the web)
     modal.js              modal helper; zip-lib.js: reads a zip's .utoc only
     upload-lib.js         pure helpers behind the flow (node --test-able)
-    config.json           {"uploadUrl": "<worker url>"} — set once after deploy
+    config.json           {"title": "<catalog title>", "uploadUrl": "<worker url>"}
+                          — the deployer's settings (SETUP.md step 12)
     catalog.json          generated manifest — do not edit
 worker/                   Cloudflare Worker: Discord /token + streaming /upload
 legacy-assets/            the original example zips (deleted after one-off seeding)
@@ -96,7 +97,8 @@ tests/                    offline unit tests for the pipeline (unittest)
 
 ## Catalog schema (what ModManager consumes)
 
-Top level: `{ "name", "description", "mods": [ ... ] }`. Each mod entry
+Top level: `{ "name", "description", "mods": [ ... ] }` (`name`/`description`
+from `site/config.json` `title`/`description`). Each mod entry
 (one per GUID, pointing at the most recently uploaded version):
 
 | Field         | Meaning                                                       |

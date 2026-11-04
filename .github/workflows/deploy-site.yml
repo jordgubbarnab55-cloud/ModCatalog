@@ -26,6 +26,15 @@ jobs:
       - name: Add the tag vocabulary to the site
         run: cp mod-contract/tags.json site/tags.json
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The deployed catalog.json carries config.json's title/description at
+      # once; the committed copy picks them up on the next catalog run.
+      - name: Apply the catalog title from config.json
+        run: python build.py retitle
+
       - name: Upload site artifact
         uses: actions/upload-pages-artifact@v4
         with:

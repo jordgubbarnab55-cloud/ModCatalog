@@ -10,7 +10,8 @@ import { el, openModal, focusFirst } from "./modal.js";
 import { createEditor } from "./upload-editor.js";
 import {
   classifySelection, buildManifest, buildMetadataJson, planRequests, sha256Hex, statusMessage,
-  findPublishedMod, confirmText, doneText, titleFromBase, POLL_MAX_MS, forcedFields, authorMismatchNote, whoamiUrl, checkToken,
+  findPublishedMod, confirmText, doneText, uploadedText, titleFromBase, POLL_MAX_MS, forcedFields, authorMismatchNote, whoamiUrl,
+  checkToken, selectionLabel,
 } from "./upload-lib.js";
 import { readUtocFromZip, shapeProblem, ZipError, MAX_UTOC_BYTES } from "./zip-lib.js";
 import { readTrailer, parseTocHeader, TrailerError, TOC_SUPPORTED_VERSION } from "./trailer.js";
@@ -163,7 +164,8 @@ export function createUploadFlow(ctx) {
       this.lastForm = null;
       this.pkg = null;
       this.ended = false;
-      this.finished = false;
+      this.uploaded = false;
+      this.stop = new AbortController();
     }
 
     open(label, className, closable = true) {
@@ -180,6 +182,7 @@ export function createUploadFlow(ctx) {
     end() {
       if (this.ended) return;
       this.ended = true;
+      this.stop.abort();
       this.confirm?.close();
       this.current?.close();
       this.editor?.dispose();
@@ -296,67 +299,84 @@ export function createUploadFlow(ctx) {
       const m = this.open("Package", "");
       m.panel.append(
         el("h2", "", "Choose your package"),
-        el("p", "", "One .zip, or the loose .utoc / .ucas / .pak files (and the .sig, if you have one) of a single mod. Nothing is uploaded yet."));
+        el("p", "", "One .zip, or the loose .utoc / .ucas / .pak files (and the .sig, if you have one) of a single mod. " +
+          "The metadata editor opens as soon as the package checks out; nothing is uploaded yet."));
 
       const zone = el("div", "dropzone");
       zone.tabIndex = 0;
       zone.setAttribute("role", "button");
-      zone.append(el("strong", "", "Drop the package here"), el("span", "", "or click to choose files"));
+      const headline = el("strong");
+      const detail = el("span");
+      zone.append(headline, detail);
       const picker = el("input");
       picker.type = "file";
       picker.multiple = true;
       picker.accept = ".zip,.pak,.ucas,.utoc,.sig";
       picker.hidden = true;
       const info = el("div", "pkg-info");
-      info.setAttribute("aria-live", "polite");
-      const go = el("button", "btn primary", "Continue");
-      go.type = "button";
-      go.disabled = true;
+      info.setAttribute("role", "alert");
+      info.hidden = true;
       const actions = el("div", "actions");
-      actions.append(this.differentToken(), go);
+      actions.append(this.differentToken());
       m.panel.append(zone, picker, info, actions);
 
-      let seq = 0;
-      let ready = null;
-      const show = (text, kind) => {
-        info.textContent = text;
-        info.className = "pkg-info " + (kind || "");
+      let busy = false;
+      const idle = (error) => {
+        busy = false;
+        zone.classList.remove("busy");
+        zone.classList.toggle("invalid", !!error);
+        zone.removeAttribute("aria-busy");
+        zone.removeAttribute("aria-disabled");
+        headline.textContent = error ? "Drop another package here" : "Drop the package here";
+        detail.textContent = "or click to choose files";
+        zone.setAttribute("aria-label", error ? `Choose a different package. ${error}` : "Choose the package files");
+        info.textContent = error || "";
+        info.className = "pkg-info" + (error ? " err" : "");
+        info.hidden = !error;
+      };
+      const reading = (selection) => {
+        busy = true;
+        zone.classList.remove("invalid");
+        zone.classList.add("busy");
+        zone.setAttribute("aria-busy", "true");
+        zone.setAttribute("aria-disabled", "true");
+        zone.setAttribute("aria-label", "Reading the package");
+        const size = selection.files.reduce((sum, f) => sum + f.size, 0);
+        headline.replaceChildren(el("span", "spinner"), document.createTextNode("Reading the package…"));
+        detail.textContent = `${selectionLabel(selection)} — ${formatBytes(size)}`;
+        info.hidden = true;
+        return size;
       };
       const handle = async (list) => {
-        const mine = ++seq;
-        ready = null;
-        go.disabled = true;
+        if (busy) return;
         const files = [...list];
         const selection = classifySelection(files.map((f) => ({ name: f.name, size: f.size })));
         if (selection.error) {
-          show(selection.error, "err");
+          idle(selection.error);
           return;
         }
-        show("Reading the package…", "");
+        const size = reading(selection);
         let result;
         try {
           result = await analyze(selection, files, await ctx.vocabulary());
         } catch (e) {
           result = { error: "That package could not be read: " + (e && e.message ? e.message : e) };
         }
-        if (mine !== seq) return;
+        if (this.ended || this.current !== m) return;
         if (result.error) {
-          show(result.error, "err");
+          idle(result.error);
+          zone.focus({ preventScroll: true });
           return;
         }
-        const size = selection.files.reduce((sum, f) => sum + f.size, 0);
-        const what = selection.kind === "zip"
-          ? selection.files[0].name
-          : `${selection.files.length} files (${selection.files.map((f) => f.name).join(", ")})`;
-        show(`${what} — ${formatBytes(size)}`, "ok");
-        ready = { selection, size, byName: result.byName, prefill: result.prefill, notes: result.notes };
-        go.disabled = false;
+        this.pkg = { selection, size, byName: result.byName, prefill: result.prefill, notes: result.notes };
+        this.stepEditor();
       };
-      zone.addEventListener("click", () => picker.click());
+      const choose = () => { if (!busy) picker.click(); };
+      zone.addEventListener("click", choose);
       zone.addEventListener("keydown", (e) => {
         if (e.target === zone && (e.key === "Enter" || e.key === " ")) {
           e.preventDefault();
-          picker.click();
+          choose();
         }
       });
       picker.addEventListener("change", () => {
@@ -367,7 +387,7 @@ export function createUploadFlow(ctx) {
       zone.addEventListener("dragover", (e) => {
         if (!e.dataTransfer?.types?.includes("Files")) return;
         e.preventDefault();
-        zone.classList.add("over");
+        if (!busy) zone.classList.add("over");
       });
       zone.addEventListener("dragleave", () => zone.classList.remove("over"));
       zone.addEventListener("drop", (e) => {
@@ -375,11 +395,7 @@ export function createUploadFlow(ctx) {
         zone.classList.remove("over");
         if (e.dataTransfer.files.length > 0) handle(e.dataTransfer.files);
       });
-      go.addEventListener("click", () => {
-        if (!ready) return;
-        this.pkg = ready;
-        this.stepEditor();
-      });
+      idle(null);
       this.show(m);
       zone.focus({ preventScroll: true });
     }
@@ -427,10 +443,11 @@ export function createUploadFlow(ctx) {
       this.lastForm = form;
       const m = openModal({
         label: "Confirm upload", className: "small", returnFocus: this.opener,
-        onDismiss: () => (this.finished ? this.end() : this.backToEditor()),
+        onDismiss: () => (this.uploaded ? this.end() : this.backToEditor()),
       });
       this.confirm = m;
-      m.panel.appendChild(el("h2", "", confirmText(form.title, form.version)));
+      const heading = el("h2", "", confirmText(form.title, form.version));
+      m.panel.appendChild(heading);
       const body = el("div", "confirm-body");
       body.appendChild(el("p", "", "The package is uploaded as it is; the catalog then adds your metadata and publishes it " +
         `under the author name “${this.identity.username}”.`));
@@ -446,7 +463,7 @@ export function createUploadFlow(ctx) {
         m.close();
         this.backToEditor();
       });
-      go.addEventListener("click", () => this.upload(form, m, body));
+      go.addEventListener("click", () => this.upload(form, m, heading, body));
       go.focus({ preventScroll: true });
     }
 
@@ -456,8 +473,17 @@ export function createUploadFlow(ctx) {
       this.editor?.focus();
     }
 
+    /** Closes the metadata editor under the confirm modal once the upload went through. */
+    dismissEditor() {
+      this.editorModal?.close();
+      this.editor?.dispose();
+      this.editor = null;
+      this.editorModal = null;
+      this.current = null;
+    }
+
     // ------------------------------------------------------------ upload
-    async upload(form, modal, body) {
+    async upload(form, modal, heading, body) {
       modal.setClosable(false);
       this.editor.setBusy(true);
       body.replaceChildren();
@@ -469,7 +495,8 @@ export function createUploadFlow(ctx) {
       const actions = el("div", "actions");
       body.append(bar, status, actions);
       const setStatus = (text, kind) => {
-        status.textContent = text;
+        status.replaceChildren(text);
+        if (kind === "wait") status.prepend(el("span", "spinner"));
         status.className = "upload-status " + (kind || "");
       };
       const finish = (...buttons) => {
@@ -507,9 +534,16 @@ export function createUploadFlow(ctx) {
         }
         return;
       }
-      fill.style.width = "100%";
+      this.uploaded = true;
+      this.dismissEditor();
+      heading.textContent = uploadedText(form.title, form.version);
+      bar.remove();
       setStatus(statusMessage(202), "wait");
-      await this.waitForPublish(form, setStatus, finish, button, close);
+      const hint = el("p", "upload-hint", "This window updates once the mod is in the catalog. " +
+        "You can close it at any time; the processing continues.");
+      status.after(hint);
+      finish(button("Close", close, true));
+      await this.waitForPublish(form, setStatus, () => hint.remove(), finish, button, close);
     }
 
     async send(form, onFraction, setStatus) {
@@ -553,28 +587,34 @@ export function createUploadFlow(ctx) {
       }
     }
 
-    async waitForPublish(form, setStatus, finish, button, close) {
+    async waitForPublish(form, setStatus, settled, finish, button, close) {
       const target = { id: form.guid, name: form.title.trim(), version: form.version.trim() };
       const deadline = Date.now() + POLL_MAX_MS;
+      const signal = this.stop.signal;
       for (;;) {
-        if (this.ended) return;
+        if (signal.aborted) return;
         try {
-          const mod = findPublishedMod(this.before, await ctx.fetchMods(), target);
+          const mods = await ctx.fetchMods();
+          if (signal.aborted) return;
+          const mod = findPublishedMod(this.before, mods, target);
           if (mod) {
-            this.finished = true;
+            settled();
             setStatus(doneText(mod.name, mod.version), "ok");
             finish(button("Show in the catalog", () => location.reload()), button("Close", close, true));
             return;
           }
         } catch { /* the catalog is briefly redeploying; keep polling */ }
         if (Date.now() > deadline) {
-          this.finished = true;
+          settled();
           setStatus("Still not in the catalog after about 3 minutes. It may still be processing — check back later; " +
             "if the package was rejected, it will never appear.", "wait");
           finish(button("Close", close, true));
           return;
         }
-        await new Promise((resolve) => setTimeout(resolve, POLL_EVERY_MS));
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, POLL_EVERY_MS);
+          signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+        });
       }
     }
   }

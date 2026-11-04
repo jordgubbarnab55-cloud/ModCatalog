@@ -40,9 +40,24 @@
         margin: 0 auto;
         padding: 24px 16px 172px;   /* the last row scrolls above the filter panel */
     }
-    header h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
-    header .sub { font-size: 13px; color: var(--fg2); margin: 0 0 20px; }
-    header .count { font-size: 12px; color: var(--fg2); margin-bottom: 12px; }
+    header {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        margin: 8px 0 24px;
+        text-align: center;
+    }
+    header h1 {
+        margin: 0;
+        font-size: 34px;
+        font-weight: 600;
+        min-height: 1.2em;
+        line-height: 1.2;
+        overflow-wrap: anywhere;
+    }
+    header .count { margin: 0; min-height: 16px; font-size: 12px; line-height: 16px; color: var(--fg2); }
+    @media (max-width: 720px) { header h1 { font-size: 28px; } }
     .grid {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -154,7 +169,7 @@
     .hint { align-self: center; font-size: 11px; color: var(--fg2); white-space: nowrap; }
 
     /* Details lightbox: mirrors ModDetailsDialog (720x240 panel, 240 cover) */
-    .scrim {
+    .scrim, .scrim-out {
         position: fixed;
         inset: 0;
         z-index: 20;
@@ -165,6 +180,7 @@
         overflow: auto;
         background: var(--scrim);
     }
+    .scrim-out { pointer-events: none; }
     .lbx {
         position: relative;
         width: 720px;
@@ -236,6 +252,7 @@
     }
     .lbx-close {
         position: absolute;
+        z-index: 2;
         top: 8px;
         right: 8px;
         width: 30px;
@@ -377,7 +394,7 @@
     .input::placeholder { color: var(--fg3); }
     .input:disabled, .input[readonly] { opacity: 0.65; }
     .input:disabled:hover, .input[readonly]:hover { background: var(--layer3); }
-    textarea.input { min-height: 64px; resize: vertical; }
+    textarea.input { min-height: 64px; resize: none; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--layer2-hl-border) transparent; }
     .btn {
         padding: 7px 16px;
         border: 1px solid var(--layer2-border);
@@ -412,12 +429,32 @@
     }
     .dropzone strong { color: var(--fg); font-weight: 600; }
     .dropzone:hover, .dropzone.over { border-color: var(--accent); background: var(--layer3-hl); }
-    .pkg-info { min-height: 18px; margin-top: 10px; font-size: 12px; color: var(--fg2); overflow-wrap: anywhere; }
+    .dropzone.invalid { border-color: var(--danger-text); }
+    .dropzone.busy { border-style: solid; border-color: var(--accent); background: var(--layer3); cursor: progress; }
+    .dropzone.busy strong { display: inline-flex; align-items: center; }
+    .dropzone span { overflow-wrap: anywhere; }
+    .pkg-info { margin-top: 10px; font-size: 12px; color: var(--fg2); overflow-wrap: anywhere; }
     .pkg-info.err, .upload-status.err, .ed-msg.err { color: var(--danger-text); }
+    .pkg-info.err { padding: 8px 10px; border: 1px solid var(--danger); border-radius: 4px; background: rgba(194, 43, 43, 0.14); font-size: 13px; }
     .pkg-info.ok, .upload-status.ok { color: var(--ok-text); }
     .progress { height: 6px; margin: 12px 0 8px; border-radius: 3px; background: var(--layer3); overflow: hidden; }
     .progress > div { width: 0; height: 100%; background: var(--accent); transition: width 120ms; }
     .upload-status { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+    .modal .upload-hint { margin: 8px 0 0; }
+    .spinner {
+        display: inline-block;
+        flex: none;
+        width: 14px;
+        height: 14px;
+        margin-right: 8px;
+        border: 2px solid var(--layer2-hl-border);
+        border-top-color: var(--accent-hover);
+        border-radius: 50%;
+        vertical-align: -2px;
+        animation: upload-spin 0.8s linear infinite;
+    }
+    @keyframes upload-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
 
     /* Metadata editor: mirrors ModManager's DevelopmentEditor */
     .ed { display: flex; flex-direction: column; gap: 12px; }
@@ -428,7 +465,8 @@
         border: 1px solid var(--layer2-border);
         border-radius: 8px;
         background-color: var(--layer2-hl);
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='170' height='90'%3E%3Ctext x='85' y='50' text-anchor='middle' transform='rotate(-18 85 45)' font-family='sans-serif' font-size='15' font-weight='700' fill='%23ffffff' fill-opacity='0.07'%3EPREVIEW%3C/text%3E%3C/svg%3E");
+        /* "PREVIEW" in Inter Regular 14px as outlines, centred in a 70x50 tile and rotated 45deg about its centre */
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='70' height='50'%3E%3Cpath transform='rotate(45 35 25)' fill='%23a8acc4' fill-opacity='0.2196' d='M5.72 30.09V19.91H9.16Q10.36 19.91 11.12 20.34Q11.88 20.77 12.25 21.5Q12.62 22.23 12.62 23.13Q12.62 24.03 12.25 24.77Q11.89 25.5 11.13 25.94Q10.37 26.37 9.18 26.37H6.71V25.28H9.14Q9.96 25.28 10.46 25Q10.95 24.71 11.18 24.23Q11.4 23.74 11.4 23.13Q11.4 22.52 11.18 22.04Q10.95 21.55 10.45 21.28Q9.95 21 9.12 21H6.95V30.09ZM14.61 30.09V19.91H18.05Q19.24 19.91 20.01 20.31Q20.77 20.72 21.14 21.43Q21.51 22.13 21.51 23.03Q21.51 23.93 21.14 24.63Q20.77 25.32 20.01 25.72Q19.25 26.11 18.07 26.11H15.28V25H18.03Q18.84 25 19.34 24.76Q19.84 24.52 20.07 24.08Q20.29 23.64 20.29 23.03Q20.29 22.42 20.07 21.96Q19.84 21.5 19.33 21.25Q18.83 21 18.01 21H15.84V30.09ZM19.4 25.52 21.9 30.09H20.47L18.01 25.52ZM23.56 30.09V19.91H29.7V21H24.79V24.44H29.38V25.54H24.79V29H29.78V30.09ZM32.35 19.91 35.37 28.48H35.49L38.51 19.91H39.8L36.06 30.09H34.79L31.05 19.91ZM42.63 19.91V30.09H41.39V19.91ZM45.09 30.09V19.91H51.24V21H46.33V24.44H50.92V25.54H46.33V29H51.32V30.09ZM55.31 30.09 52.53 19.91H53.78L55.91 28.2H56.01L58.18 19.91H59.57L61.74 28.2H61.84L63.96 19.91H65.22L62.43 30.09H61.16L58.91 21.98H58.83L56.59 30.09Z'/%3E%3C/svg%3E");
     }
     .ed-preview .card { width: 420px; max-width: 100%; }
     .card.preview { cursor: default; pointer-events: none; }
@@ -440,7 +478,7 @@
     .ed-grid > .field:nth-child(2) { grid-column: 2; grid-row: 1; }
     .ed-versions { grid-column: 3; grid-row: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-width: 0; }
     .ed-desc { grid-column: 1 / span 3; grid-row: 2 / span 2; }
-    .ed-desc textarea { height: 64px; }
+    .ed-desc textarea { height: 64px; max-height: 64px; }
     .ed-image {
         position: relative;
         grid-column: 4;
@@ -449,7 +487,7 @@
         display: flex;
         flex-direction: column;
         align-items: center;
-        justify-content: space-between;
+        justify-content: flex-start;
         width: 160px;
         height: 160px;
         padding: 8px;
@@ -462,7 +500,7 @@
         cursor: pointer;
     }
     .ed-image:hover, .ed-image.over { border-color: var(--accent); background: var(--layer3-hl); }
-    .ed-image .icon { color: var(--accent-hover); }
+    .ed-image .icon { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--accent-hover); }
     .ed-image .icon svg { display: block; width: 48px; height: 48px; }
     .ed-image img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
     .ed-image .label, .ed-image .info { position: relative; }
@@ -498,10 +536,9 @@
 <body>
 <div class="page">
     <header>
-        <h1 id="catName">Mod Catalog</h1>
-        <p class="sub" id="catDesc"></p>
+        <h1 id="catName"></h1>
         <p class="count" id="catCount"></p>
-        <p><button type="button" class="uploadBtn" id="uploadBtn">Upload a mod</button></p>
+        <button type="button" class="uploadBtn" id="uploadBtn">Upload a mod</button>
     </header>
     <div class="grid" id="grid"></div>
 </div>
@@ -518,10 +555,11 @@
 <script type="module">
     import {
         parseCatalog, sanitizeTags, formatBytes, singleLine, metaParts,
-        fileNameOf, placeholder, matches,
+        fileNameOf, placeholder, matches, catalogTitle,
     } from './catalog-lib.js';
     import { createUploadFlow } from './upload-flow.js';
     import { configOk } from './upload-lib.js';
+    import { openModal } from './modal.js';
 
     const INBOX_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -607,11 +645,7 @@
     }
 
     function openDetails(mod, opener) {
-        const scrim = h('div', 'scrim');
-        const panel = h('div', 'lbx');
-        panel.setAttribute('role', 'dialog');
-        panel.setAttribute('aria-modal', 'true');
-        panel.setAttribute('aria-label', mod.name);
+        const { panel } = openModal({ label: mod.name, panelClass: 'lbx', returnFocus: opener });
 
         const head = h('div', 'lbx-head');
         head.append(h('div', 'lbx-title', mod.name), metaLine('lbx-meta', mod));
@@ -634,34 +668,8 @@
         file.append(left, size);
         foot.appendChild(file);
 
-        const close = h('button', 'lbx-close', '✕');
-        close.type = 'button';
-        close.setAttribute('aria-label', 'Close');
-
-        panel.append(coverBox('lbx-cover', mod), head, desc, foot, close);
-        scrim.appendChild(panel);
-
-        function dismiss() {
-            document.removeEventListener('keydown', onKey, true);
-            scrim.remove();
-            document.body.classList.remove('modal-open');
-            opener.focus({ preventScroll: true });
-        }
-        function onKey(e) {
-            if (e.key === 'Escape') {
-                e.preventDefault();
-                dismiss();
-            } else if (e.key === 'Tab') {
-                e.preventDefault();
-                close.focus();
-            }
-        }
-        close.addEventListener('click', dismiss);
-        scrim.addEventListener('click', (e) => { if (e.target === scrim) dismiss(); });
-        document.addEventListener('keydown', onKey, true);
-        document.body.classList.add('modal-open');
-        document.body.appendChild(scrim);
-        close.focus({ preventScroll: true });
+        panel.append(coverBox('lbx-cover', mod), head, desc, foot);
+        panel.querySelector('.lbx-close').focus({ preventScroll: true });
     }
 
     function applyFilter() {
@@ -728,12 +736,23 @@
 
     const vocabularyPromise = loadVocabulary();
 
-    // config.json holds the upload Worker's URL; null while it is a placeholder
+    // config.json holds the upload Worker's URL (null while it is a placeholder)
+    // and the catalog title
     let uploadUrl = null;
+    let configTitle = null;
     const configPromise = fetch('config.json', { cache: 'no-store' })
         .then((res) => res.json())
-        .then((cfg) => { uploadUrl = configOk(cfg && cfg.uploadUrl) ? cfg.uploadUrl : null; })
+        .then((cfg) => {
+            uploadUrl = configOk(cfg && cfg.uploadUrl) ? cfg.uploadUrl : null;
+            configTitle = cfg && cfg.title;
+        })
         .catch(() => {});
+
+    function showTitle(catalogName) {
+        const title = catalogTitle(configTitle, catalogName);
+        document.title = title;
+        document.getElementById('catName').textContent = title;
+    }
 
     const flow = createUploadFlow({
         uploadUrl: () => uploadUrl,
@@ -763,14 +782,12 @@
             const [res, vocabulary] = await Promise.all([
                 fetch(catalogUrl, { cache: 'no-store' }),
                 vocabularyPromise,
+                configPromise,
             ]);
             if (!res.ok) throw new Error('catalog.json: HTTP ' + res.status);
             const doc = parseCatalog(await res.json(), catalogUrl.href);
             for (const warning of doc.warnings) console.warn('catalog: ' + warning);
-
-            document.title = doc.name || 'Mod Catalog';
-            document.getElementById('catName').textContent = doc.name || 'Mod Catalog';
-            document.getElementById('catDesc').textContent = doc.description || '';
+            showTitle(doc.name);
 
             for (const mod of doc.mods) {
                 const { kept, dropped } = sanitizeTags(mod.tags, vocabulary);
@@ -788,6 +805,8 @@
             document.getElementById('filter').hidden = false;
             applyFilter();
         } catch (err) {
+            await configPromise;
+            showTitle(null);
             grid.innerHTML = '';
             grid.appendChild(h('div', 'error', 'Failed to load catalog: ' + err.message));
         }

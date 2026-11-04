@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   parseCatalog, sanitizeTags, formatBytes, singleLine, metaParts, fileNameOf,
-  parseAccent, accentFor, placeholder, matches,
+  parseAccent, accentFor, placeholder, matches, catalogTitle,
 } from "../../site/catalog-lib.js";
 
 const FIXTURES = new URL("../../mod-contract/fixtures/", import.meta.url);
@@ -86,7 +86,26 @@ test("singleLine", () => {
 test("metaParts", () => {
   assert.deepEqual(metaParts({ author: "A", version: "1", gameVersion: "" }), ["A", "•", "v1"]);
   assert.deepEqual(metaParts({ author: "A", version: "1", gameVersion: "5.6" }), ["A", "•", "v1", "•", "[5.6]"]);
-  assert.deepEqual(metaParts({ author: "", version: "", gameVersion: "" }), ["", "•", "v"]);
+  assert.deepEqual(metaParts({ author: "A", version: "", gameVersion: "" }), ["A"]);
+  assert.deepEqual(metaParts({ author: "A", version: "", gameVersion: "5.6" }), ["A", "•", "[5.6]"]);
+  assert.deepEqual(metaParts({ author: "", version: "", gameVersion: "" }), [""]);
+});
+
+test("metaParts: parsed entries without a version show no 'v'", () => {
+  const doc = parseCatalog({ mods: [
+    { id: "a", name: "A", author: "Ann", file: "a.zip" },
+    { id: "b", name: "B", author: "Bob", version: "", gameVersion: "5.6", file: "b.zip" },
+    { id: "c", name: "C", author: "Cy", version: 2, file: "c.zip" },
+  ] }, "https://h.example/catalog.json");
+  assert.deepEqual(doc.mods.map(metaParts), [["Ann"], ["Bob", "•", "[5.6]"], ["Cy", "•", "v2"]]);
+});
+
+test("catalogTitle: config title, then the catalog name, then the default", () => {
+  assert.equal(catalogTitle("  XYZ Community Mods ", "Mod Catalog"), "XYZ Community Mods");
+  assert.equal(catalogTitle(undefined, "Catalog Name"), "Catalog Name");
+  assert.equal(catalogTitle("   ", " Catalog Name "), "Catalog Name");
+  assert.equal(catalogTitle(42, null), "Mod Catalog");
+  assert.equal(catalogTitle(null, ""), "Mod Catalog");
 });
 
 test("fileNameOf", () => {

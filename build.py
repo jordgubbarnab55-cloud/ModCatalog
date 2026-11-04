@@ -24,6 +24,10 @@ Usage:
   python build.py process --from-dir legacy-assets --as-uid ID --as-username NAME
                                                     # seed a dir's zips as that Discord user
   python build.py rebuild                           # regenerate from all mod-* releases
+  python build.py retitle                           # only re-apply the name/description
+
+  The catalog's name/description come from site/config.json (`title`,
+  `description`; defaults when absent), `--config` picks another file.
 
   --client local --root DIR selects the directory-backed client.
   --owner / --repo default to GITHUB_OWNER/GITHUB_REPO (or GITHUB_REPOSITORY).
@@ -67,6 +71,7 @@ import trailer
 ROOT = pathlib.Path(__file__).resolve().parent
 SITE = ROOT / "site"
 CATALOG_DEFAULT = SITE / "catalog.json"
+CONFIG_DEFAULT = SITE / "config.json"
 CONTRACT = ROOT / "mod-contract"
 CATALOG_SCHEMA_VERSION = 1
 
@@ -77,9 +82,9 @@ STALE_AFTER = 7 * 24 * 3600  # seconds; incomplete/stalled inbox items are swept
 MANIFEST_PART = "manifest.json"
 METADATA_PART = "metadata.json"
 
-# Top-level catalog identity (edit here, not in the generated catalog).
-CATALOG_NAME = "Mod Catalog"
-CATALOG_DESCRIPTION = "Community mod catalog for ModManager (and anyone else who wants the mods)."
+# Top-level catalog identity when site/config.json sets none (`title`, `description`).
+DEFAULT_CATALOG_NAME = "Mod Catalog"
+DEFAULT_CATALOG_DESCRIPTION = "Community mod catalog for ModManager (and anyone else who wants the mods)."
 
 IMAGE_EXT = {"image/png": ".png", "image/jpeg": ".jpg"}
 
@@ -590,10 +595,38 @@ def entry_from_meta(meta: dict, *, file_url: str, size: int, sha256: str,
     return entry
 
 
-def write_catalog(path: pathlib.Path, entries: list[dict]) -> None:
+def load_catalog_identity(config_path: pathlib.Path = CONFIG_DEFAULT) -> tuple[str, str]:
+    """(name, description) of the catalog: site/config.json's `title` and
+    `description` (trimmed). A missing or unreadable file, a non-object, or a
+    missing/blank/non-string value falls back to the defaults."""
+    try:
+        with config_path.open(encoding="utf-8") as f:
+            cfg = json.load(f)
+    except FileNotFoundError:
+        cfg = {}
+    except (OSError, ValueError) as e:
+        print(f"  {config_path.name}: unreadable ({e}); using the default catalog title")
+        cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    def value(key: str, default: str) -> str:
+        v = cfg.get(key)
+        return v.strip() if isinstance(v, str) and v.strip() else default
+
+    return value("title", DEFAULT_CATALOG_NAME), value("description", DEFAULT_CATALOG_DESCRIPTION)
+
+
+def write_catalog(path: pathlib.Path, entries: list[dict],
+                  config_path: pathlib.Path = CONFIG_DEFAULT) -> None:
     entries = sorted(entries, key=lambda e: (e["name"] or "").lower())
-    catalog = {"schemaVersion": CATALOG_SCHEMA_VERSION, "name": CATALOG_NAME,
-               "description": CATALOG_DESCRIPTION, "verifiedAuthors": True, "mods": entries}
+    name, description = load_catalog_identity(config_path)
+    catalog = {"schemaVersion": CATALOG_SCHEMA_VERSION, "name": name,
+               "description": description, "verifiedAuthors": True, "mods": entries}
+    dump_catalog(path, catalog)
+
+
+def dump_catalog(path: pathlib.Path, catalog: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as f:
         json.dump(catalog, f, indent=2, ensure_ascii=False)
@@ -890,12 +923,14 @@ class Processor:
     """Drains inbox items, re-homes valid ones, and merges into the catalog."""
 
     def __init__(self, client: PackageClient, owner: str, repo: str,
-                 admins: set[str], catalog_path: pathlib.Path):
+                 admins: set[str], catalog_path: pathlib.Path,
+                 config_path: pathlib.Path = CONFIG_DEFAULT):
         self.client = client
         self.owner = owner
         self.repo = repo
         self.admins = admins
         self.catalog_path = catalog_path
+        self.config_path = config_path
 
     # -- ownership -----------------------------------------------------
     def _is_admin(self, uid: str) -> bool:
@@ -1002,7 +1037,7 @@ class Processor:
                 rejected += 1
                 print(f"  REJECTED {src.label}: {result}", file=sys.stderr)
         if ok:
-            write_catalog(self.catalog_path, list(entries.values()))
+            write_catalog(self.catalog_path, list(entries.values()), self.config_path)
             print(f"\n{self.catalog_path.name}: catalog written ({ok} new/updated, {rejected} rejected)")
         else:
             print(f"\nnothing processed ({rejected} rejected); catalog left unchanged")
@@ -1012,7 +1047,8 @@ class Processor:
 # --------------------------------------------------------------- rebuild
 
 
-def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.Path) -> dict:
+def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.Path,
+            config_path: pathlib.Path = CONFIG_DEFAULT) -> dict:
     """Regenerates the whole catalog from the mod-* releases alone.
 
     Each entry points at the most recently uploaded version zip of that
@@ -1081,9 +1117,21 @@ def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.
             {**meta, "author": latest_by_uid[owner_uid][1]},
             file_url=asset_url(owner, repo, tag, asset.name), size=asset.size, sha256=sha,
             uploader=owner_uid, updated=_iso(asset.created), cover_url=cover_url))
-    write_catalog(catalog_path, entries)
+    write_catalog(catalog_path, entries, config_path)
     print(f"\n{catalog_path.name}: {len(entries)} mod(s) rebuilt")
     return {"ok": len(entries)}
+
+
+def retitle(catalog_path: pathlib.Path, config_path: pathlib.Path = CONFIG_DEFAULT) -> None:
+    """Sets only the catalog's name/description from the site config; every
+    other field is kept as it is."""
+    data, _ = load_catalog(catalog_path)
+    name, description = load_catalog_identity(config_path)
+    catalog = {"schemaVersion": data.get("schemaVersion", CATALOG_SCHEMA_VERSION),
+               "name": name, "description": description}
+    catalog.update({k: v for k, v in data.items() if k not in catalog})
+    dump_catalog(catalog_path, catalog)
+    print(f"{catalog_path.name}: catalog name set to {name!r}")
 
 
 # ------------------------------------------------------------------ cli
@@ -1111,6 +1159,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--owner", default=os.environ.get("GITHUB_OWNER"))
         p.add_argument("--repo", default=os.environ.get("GITHUB_REPO"))
         p.add_argument("--catalog", default=str(CATALOG_DEFAULT))
+        p.add_argument("--config", default=str(CONFIG_DEFAULT),
+                       help="site config whose `title`/`description` name the catalog")
 
     p = sub.add_parser("process", help="drain inbox items and merge into the catalog")
     src = p.add_mutually_exclusive_group(required=True)
@@ -1124,7 +1174,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("rebuild", help="regenerate the whole catalog from mod-* releases")
     common(p)
 
+    p = sub.add_parser("retitle", help="rewrite only the catalog's name/description from the site config")
+    p.add_argument("--catalog", default=str(CATALOG_DEFAULT))
+    p.add_argument("--config", default=str(CONFIG_DEFAULT))
+
     args = ap.parse_args(argv)
+    config = pathlib.Path(args.config)
+    if args.cmd == "retitle":
+        retitle(pathlib.Path(args.catalog), config)
+        return 0
     owner, repo = args.owner, args.repo
     if not owner or not repo:
         gr = os.environ.get("GITHUB_REPOSITORY")
@@ -1137,7 +1195,7 @@ def main(argv: list[str] | None = None) -> int:
     client = make_client(args, owner, repo)
     catalog = pathlib.Path(args.catalog)
     if args.cmd == "rebuild":
-        rebuild(client, owner, repo, catalog)
+        rebuild(client, owner, repo, catalog, config)
         return 0
 
     if args.from_dir:
@@ -1162,7 +1220,7 @@ def main(argv: list[str] | None = None) -> int:
             print("inbox is empty; nothing to do")
             return 0
 
-    Processor(client, owner, repo, admins, catalog).run(sources)
+    Processor(client, owner, repo, admins, catalog, config).run(sources)
     return 0
 
 

@@ -91,6 +91,13 @@ export function classifySelection(picked) {
   return { kind: "loose", error: null, base: set.base, utocName: ordered[0].name, files: ordered };
 }
 
+/** What a valid selection is called on the package step: the zip's name, or
+ *  "N files (a.utoc, a.ucas, …)". */
+export function selectionLabel(selection) {
+  if (selection.kind === "zip") return selection.files[0].name;
+  return `${selection.files.length} files (${selection.files.map((f) => f.name).join(", ")})`;
+}
+
 // ------------------------------------------------------------------ images
 
 export const IMAGE_HARD_LIMIT = 4 * 1024 * 1024;
@@ -231,6 +238,12 @@ export function buildMetadataJson(form) {
 export function confirmText(title, version) {
   const v = (version ?? "").trim();
   return `Upload “${(title ?? "").trim()}”${v ? ` v${v}` : ""} to the catalog?`;
+}
+
+/** The result modal's heading once every request of the upload was accepted. */
+export function uploadedText(title, version) {
+  const v = (version ?? "").trim();
+  return `“${(title ?? "").trim()}”${v ? ` v${v}` : ""} is uploaded`;
 }
 
 /** The flow's final line once the mod shows up in the catalog. */

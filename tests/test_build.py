@@ -376,7 +376,83 @@ class TestRebuild(Base):
         with self.catalog.open(encoding="utf-8") as f:
             data = json.load(f)
         self.assertEqual(data["mods"], [])
-        self.assertEqual(data["name"], build.CATALOG_NAME)
+        self.assertEqual(data["name"], build.load_catalog_identity()[0])
+
+
+class TestCatalogConfig(Base):
+    """The catalog's name/description come from the site config (`title`/`description`)."""
+
+    def write_config(self, content) -> pathlib.Path:
+        path = self.root / "config.json"
+        path.write_text(content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
+        return path
+
+    def catalog_doc(self) -> dict:
+        with self.catalog.open(encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_title_and_description(self):
+        cfg = self.write_config({"uploadUrl": "https://w.example/upload",
+                                 "title": "  XYZ Community Mods ", "description": "XYZ mods."})
+        self.assertEqual(build.load_catalog_identity(cfg), ("XYZ Community Mods", "XYZ mods."))
+        build.rebuild(self.client, OWNER, REPO, self.catalog, cfg)
+        doc = self.catalog_doc()
+        self.assertEqual((doc["name"], doc["description"]), ("XYZ Community Mods", "XYZ mods."))
+
+    def test_defaults(self):
+        defaults = (build.DEFAULT_CATALOG_NAME, build.DEFAULT_CATALOG_DESCRIPTION)
+        self.assertEqual(build.load_catalog_identity(self.root / "missing.json"), defaults)
+        for content in ('{"uploadUrl": "x"}', '{"title": "   ", "description": 5}', "[1, 2]", "not json", ""):
+            with self.subTest(content=content):
+                self.assertEqual(build.load_catalog_identity(self.write_config(content)), defaults)
+
+    def test_process_uses_the_config(self):
+        cfg = self.write_config({"title": "Processed Title"})
+        self.processor = build.Processor(self.client, OWNER, REPO, {ADMIN}, self.catalog, cfg)
+        self.to_inbox(make_package(self.root / "p.zip"), "111")
+        self.run_process()
+        doc = self.catalog_doc()
+        self.assertEqual(doc["name"], "Processed Title")
+        self.assertEqual(doc["description"], build.DEFAULT_CATALOG_DESCRIPTION)
+        self.assertEqual(len(doc["mods"]), 1)
+
+    def test_retitle_keeps_entries_and_is_deterministic(self):
+        self.to_inbox(make_package(self.root / "p.zip"), "111")
+        self.run_process()
+        before = self.catalog_doc()
+        cfg = self.write_config({"title": "Renamed"})
+        build.main(["retitle", "--catalog", str(self.catalog), "--config", str(cfg)])
+        after = self.catalog_doc()
+        self.assertEqual(after["name"], "Renamed")
+        self.assertEqual(after["mods"], before["mods"])
+        first = self.catalog.read_bytes()
+        build.retitle(self.catalog, cfg)
+        self.assertEqual(self.catalog.read_bytes(), first)
+
+    def test_retitle_changes_nothing_else(self):
+        self.catalog.parent.mkdir(parents=True, exist_ok=True)
+        self.catalog.write_text(json.dumps({"schemaVersion": 1, "name": "Old", "extra": [1],
+                                            "mods": [{"id": "x", "name": "X", "file": "f"}]}),
+                                encoding="utf-8")
+        build.retitle(self.catalog, self.write_config({"title": "New", "description": "D"}))
+        self.assertEqual(self.catalog_doc(), {"schemaVersion": 1, "name": "New", "description": "D",
+                                              "extra": [1], "mods": [{"id": "x", "name": "X", "file": "f"}]})
+
+    def test_catalog_validates_against_the_schema(self):
+        sys.path.insert(0, str(ROOT / "mod-contract" / "tools"))
+        try:
+            import schema_check
+        finally:
+            sys.path.pop(0)
+        cfg = self.write_config({"title": "XYZ Community Mods"})
+        build.rebuild(self.client, OWNER, REPO, self.catalog, cfg)
+        self.assertEqual(schema_check.validate_catalog(self.catalog_doc()), [])
+
+    def test_site_config_is_valid(self):
+        with (ROOT / "site" / "config.json").open(encoding="utf-8") as f:
+            cfg = json.load(f)
+        self.assertIsInstance(cfg.get("title"), str)
+        self.assertTrue(cfg["title"].strip())
 
 
 class TestSanitize(unittest.TestCase):

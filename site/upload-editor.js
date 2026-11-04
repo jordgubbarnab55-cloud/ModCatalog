@@ -1,6 +1,6 @@
 // The metadata editor of the upload flow: ModManager's DevelopmentEditor on
-// the web (same fields, order, labels, placeholders and limits, the 160x160
-// image picker, the read-only identifier, tag chips, and a live preview card).
+// the web (same fields, labels, placeholders and limits, the 160x160 image
+// picker, tag chips, the read-only identifier, and a live preview card).
 // DOM only; the rules it applies live in upload-lib.js (tested).
 
 import { el } from "./modal.js";
@@ -170,9 +170,6 @@ export function createEditor(options) {
     message.className = "ed-msg " + (text ? kind : "");
   };
 
-  const identField = field("identifier", "Identifier", identifier);
-  root.appendChild(identField);
-
   const tagsWrap = el("div", "field ed-tags");
   tagsWrap.appendChild(el("label", "", "Tags"));
   const chipRow = el("div", "ed-chips");
@@ -191,6 +188,8 @@ export function createEditor(options) {
     tagsWrap.appendChild(chipRow);
     root.appendChild(tagsWrap);
   }
+
+  root.appendChild(field("identifier", "Identifier", identifier));
 
   // -------------------------------------------------------------- actions
   const actions = el("div", "actions");
