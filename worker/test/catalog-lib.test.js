@@ -19,6 +19,7 @@ for (const c of all.cases) {
     assert.equal(doc.schemaVersion, c.expect.schemaVersion);
     assert.equal(doc.name, c.expect.name);
     assert.equal(doc.skipped, c.expect.skipped);
+  assert.equal(doc.verifiedAuthors, c.expect.verifiedAuthors);
     assert.deepEqual(doc.mods, c.expect.mods);
   });
 }
@@ -65,8 +66,14 @@ test("formatBytes", () => {
     [10485760, "10 MB"], [10 * 1024 * 1024 + 512 * 1024, "10.5 MB"],
     [1024 ** 3, "1 GB"], [1024 ** 4, "1 TB"], [1024 ** 5, "1024 TB"], [1280, "1.3 KB"],
   ];
-  for (const [n, s] of cases) assert.equal(formatBytes(n), s, String(n));
-  assert.equal(formatBytes(undefined), "0 B");
+  for (const [n, s] of cases) assert.equal(formatBytes(n, "en-US"), s, String(n));
+  assert.equal(formatBytes(undefined, "en-US"), "0 B");
+});
+
+test("formatBytes follows the viewer's locale, like the app", () => {
+  assert.equal(formatBytes(10 * 1024 * 1024 + 717 * 1024, "sv-SE"), "10,7 MB");
+  assert.equal(formatBytes(1536, "de-DE"), "1,5 KB");
+  assert.equal(formatBytes(1023, "sv-SE"), "1023 B");
 });
 
 test("singleLine", () => {

@@ -130,6 +130,7 @@ export function parseCatalog(json, catalogUrl) {
   let schemaVersion = null;
   let name = null;
   let description = null;
+  let verifiedAuthors = false;
   if (Array.isArray(json)) {
     mods = json;
   } else if (isObject(json) && Array.isArray(json.mods)) {
@@ -138,6 +139,7 @@ export function parseCatalog(json, catalogUrl) {
     schemaVersion = typeof sv === "number" && Number.isInteger(sv) && Math.abs(sv) <= 2147483647 ? sv : null;
     name = str(json, "name");
     description = str(json, "description");
+    verifiedAuthors = json.verifiedAuthors === true;
     if (schemaVersion !== null && schemaVersion > SUPPORTED_SCHEMA_VERSION) {
       warnings.push(`catalog schemaVersion ${schemaVersion} is newer than ${SUPPORTED_SCHEMA_VERSION}; reading it leniently`);
     }
@@ -162,7 +164,7 @@ export function parseCatalog(json, catalogUrl) {
     seen.add(entry.id);
     entries.push(entry);
   });
-  return { schemaVersion, name, description, mods: entries, skipped, warnings };
+  return { schemaVersion, name, description, verifiedAuthors, mods: entries, skipped, warnings };
 }
 
 /**
@@ -195,8 +197,9 @@ export function sanitizeTags(tags, vocabulary) {
 
 const UNITS = ["B", "KB", "MB", "GB", "TB"];
 
-/** ByteFormat.FormatBytes: exact below 1 KB, else binary units with at most one decimal. */
-export function formatBytes(bytes) {
+/** ByteFormat.FormatBytes: exact below 1 KB, else binary units with at most one
+ *  decimal, in the viewer's number format (the app follows the OS culture). */
+export function formatBytes(bytes, locale) {
   const n = Number.isFinite(bytes) && bytes > 0 ? Math.floor(bytes) : 0;
   let size = n;
   let i = 0;
@@ -204,7 +207,9 @@ export function formatBytes(bytes) {
     size /= 1024;
     i++;
   }
-  return i === 0 ? `${n} B` : `${String(Number(size.toFixed(1)))} ${UNITS[i]}`;
+  const format = (v, digits) =>
+    new Intl.NumberFormat(locale, { maximumFractionDigits: digits, useGrouping: false }).format(v);
+  return i === 0 ? `${format(n, 0)} B` : `${format(Number(size.toFixed(1)), 1)} ${UNITS[i]}`;
 }
 
 /** SingleLineConverter: line breaks become single spaces. */

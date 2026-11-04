@@ -21,23 +21,35 @@ Two storage backends behind one thin interface (PackageClient):
 
 Usage:
   python build.py process --from-inbox              # drain the "inbox" release
-  python build.py process --from-dir legacy-assets  # treat a dir as admin inbox
+  python build.py process --from-dir legacy-assets --as-uid ID --as-username NAME
+                                                    # seed a dir's zips as that Discord user
   python build.py rebuild                           # regenerate from all mod-* releases
 
   --client local --root DIR selects the directory-backed client.
   --owner / --repo default to GITHUB_OWNER/GITHUB_REPO (or GITHUB_REPOSITORY).
 
 Two upload shapes are accepted in the inbox (both end in a release-asset zip):
-  * a ready-made .zip package, or
-  * a RAW file set (.utoc/.ucas/.pak/+.sig, no client-side zipping): each file is
-    streamed to the inbox (part-split when over 100 MB) together with a
-    small JSON manifest; this pipeline reassembles the parts, verifies the
-    per-file sha256 from the manifest, and zips the set HERE on the runner
+  * a ready-made .zip package (the original zip mode), or
+  * an upload SET announced by a small JSON manifest: either the loose
+    .utoc/.ucas/.pak/+.sig files or exactly one .zip, each streamed to the
+    inbox (part-split when over 100 MB), plus an optional metadata.json.
+    This pipeline reassembles the parts, verifies the per-file sha256 from
+    the manifest, applies the metadata and zips the set HERE on the runner
     (the Worker is a stateless pass-through and cannot do it).
+
+Verified authors: every stored package goes through `apply_metadata`, the one
+place a stored trailer is written, which FORCES `author` = the uploader's
+Discord username and `identifier` = `{discordId}.{Title, whitespace removed}`.
+The uploader is stamped into the inbox asset name by the Worker
+(`<discordId>-<hex of the UTF-8 username>__…`); nothing the client sends is
+trusted for it.
 """
 
 import argparse
+import base64
+import binascii
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -48,6 +60,7 @@ import sys
 import tempfile
 import zipfile
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 import trailer
 
@@ -62,6 +75,7 @@ MOD_TAG_PREFIX = "mod-"
 MAX_RELEASE_ASSET_BYTES = 2 * 1024 * 1024 * 1024  # GitHub release asset cap
 STALE_AFTER = 7 * 24 * 3600  # seconds; incomplete/stalled inbox items are swept
 MANIFEST_PART = "manifest.json"
+METADATA_PART = "metadata.json"
 
 # Top-level catalog identity (edit here, not in the generated catalog).
 CATALOG_NAME = "Mod Catalog"
@@ -366,6 +380,15 @@ def classify_raw(names: list[str]) -> tuple[str, str | None]:
     return "ok", base
 
 
+def shape_error(verdict: str) -> str | None:
+    """The rejection text for a `classify_members` verdict (None = ok)."""
+    return {
+        "unsafe-path": "unsafe member name (absolute path or path traversal)",
+        "multiple-sets": "more than one complete .utoc/.ucas/.pak set — one mod per package",
+        "incomplete": "no complete .utoc/.ucas/.pak set sharing one base name",
+    }.get(verdict)
+
+
 def validate_package(zip_path: pathlib.Path) -> dict:
     """Validates a package zip; returns the trailer metadata dict.
 
@@ -380,17 +403,124 @@ def validate_package(zip_path: pathlib.Path) -> dict:
         raise PackageError("not a valid zip file")
     with zipfile.ZipFile(zip_path) as zf:
         verdict, _, members = classify_members(zf.namelist())
-        if verdict == "unsafe-path":
-            raise PackageError("unsafe member name (absolute path or path traversal)")
-        if verdict == "multiple-sets":
-            raise PackageError("more than one complete .utoc/.ucas/.pak set — one mod per package")
-        if verdict == "incomplete":
-            raise PackageError("no complete .utoc/.ucas/.pak set sharing one base name")
+        problem = shape_error(verdict)
+        if problem:
+            raise PackageError(problem)
         utoc_data = zf.read(members[".utoc"])
     try:
         return trailer.read_trailer(utoc_data)
     except trailer.TrailerError as ex:
         raise PackageError(f"invalid or missing trailer ({ex.kind}): {ex}") from ex
+
+
+def parse_upload_metadata(raw: bytes) -> dict:
+    """Parses the untrusted metadata.json of an upload set into the dict
+    `apply_metadata` takes. `image` is present only when the upload says
+    something about the cover: None removes it, {"mime", "data"} replaces it."""
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise PackageError("metadata.json is not valid JSON")
+    if not isinstance(obj, dict):
+        raise PackageError("metadata.json is not a JSON object")
+    meta: dict = {}
+    for key in ("title", "author", "description", "version", "game_version"):
+        value = obj.get(key)
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            raise PackageError(f'metadata.json: "{key}" must be a string')
+        meta[key] = value
+    guid = obj.get("guid")
+    if guid is not None and not isinstance(guid, str):
+        raise PackageError('metadata.json: "guid" must be a string')
+    meta["guid"] = guid
+    tags = obj.get("tags")
+    if tags is None:
+        tags = []
+    if not isinstance(tags, list) or any(not isinstance(t, str) for t in tags):
+        raise PackageError('metadata.json: "tags" must be an array of strings')
+    meta["tags"] = tags
+    if "image" in obj:
+        image = obj["image"]
+        if image is None:
+            meta["image"] = None
+        elif isinstance(image, dict) and isinstance(image.get("mime"), str) and isinstance(image.get("data"), str):
+            try:
+                data = base64.b64decode(image["data"], validate=True)
+            except (binascii.Error, ValueError):
+                raise PackageError("metadata.json: image data is not valid base64")
+            meta["image"] = {"mime": image["mime"], "data": data}
+        else:
+            raise PackageError('metadata.json: "image" must be null or {"mime", "data"}')
+    try:
+        trailer.validate_metadata({**meta, "image": meta.get("image")})
+    except trailer.TrailerError as ex:
+        raise PackageError(f"metadata.json is invalid ({ex.kind}): {ex}") from ex
+    return meta
+
+
+class Uploader(NamedTuple):
+    """The verified identity an upload is stamped with: the Discord user id
+    and the Discord `username` (not the display name) at upload time."""
+    uid: str
+    username: str
+
+
+def forced_identifier(uid: str, title: str) -> str:
+    """`{discordId}.{title}` with all whitespace removed (the app's cosmetic
+    identifier shape, with the verified id in place of the author)."""
+    return trailer.build_identifier(uid, title)
+
+
+def uploader_from_identifier(identifier: str) -> str | None:
+    """The Discord id a catalog-written trailer identifier starts with."""
+    m = re.match(r"^(\d+)\.", identifier or "")
+    return m.group(1) if m else None
+
+
+def existing_trailer(utoc: bytes) -> dict | None:
+    """The .utoc's current trailer metadata, None when it has none."""
+    try:
+        return trailer.read_trailer(utoc)
+    except trailer.TrailerError as ex:
+        if ex.kind == "NoTrailer":
+            return None
+        raise PackageError(f"the package's .utoc trailer is unreadable ({ex.kind}): {ex}") from ex
+
+
+def apply_metadata(utoc: bytes, metadata: dict | None, existing: dict | None,
+                   uploader: Uploader) -> bytes:
+    """The one place a stored trailer is written: returns the .utoc with the
+    package's metadata as its trailer.
+
+    `metadata` is from `parse_upload_metadata`; None keeps the package's own
+    trailer fields (which must exist). Whatever the source, `author` and
+    `identifier` are FORCED from `uploader` — that is what makes the catalog's
+    authors verified.
+
+    The GUID is the package's existing one (a new one when it has none); a
+    metadata GUID that differs is rejected — identity changes go through
+    ModManager, not the catalog. A missing `image` key keeps the existing
+    cover; None removes it."""
+    if metadata is None:
+        if existing is None:
+            raise PackageError("invalid or missing trailer (NoTrailer): no metadata trailer")
+        metadata = existing
+    guid = metadata.get("guid")
+    if metadata is not existing and guid is not None and (
+            existing is None or guid.lower() != existing["guid"]):
+        raise PackageError("metadata guid is not the package's GUID (changing a mod's identity "
+                           "is done in ModManager, not through the catalog)")
+    meta = {k: metadata[k] for k in ("title", "description", "version", "game_version", "tags")}
+    meta["author"] = uploader.username
+    meta["identifier"] = forced_identifier(uploader.uid, meta["title"])
+    meta["guid"] = existing["guid"] if existing else None
+    meta["image"] = metadata["image"] if "image" in metadata else (existing or {}).get("image")
+    try:
+        return trailer.write_trailer(utoc, meta)[0]
+    except trailer.TrailerError as ex:
+        raise PackageError(f"cannot write the metadata ({ex.kind}): {ex}") from ex
 
 
 def sanitize_name(s: str) -> str:
@@ -436,7 +566,7 @@ def load_catalog(path: pathlib.Path) -> tuple[dict, dict]:
 
 
 def entry_from_meta(meta: dict, *, file_url: str, size: int, sha256: str,
-                    uploader: str | None, updated: str, cover_url: str | None) -> dict:
+                    uploader: str, updated: str, cover_url: str | None) -> dict:
     """The catalog entry for one package (mod-contract/catalog.schema.json).
     Tags outside the vocabulary are dropped with a log line."""
     tags, dropped = sanitize_tags(meta.get("tags"))
@@ -463,7 +593,7 @@ def entry_from_meta(meta: dict, *, file_url: str, size: int, sha256: str,
 def write_catalog(path: pathlib.Path, entries: list[dict]) -> None:
     entries = sorted(entries, key=lambda e: (e["name"] or "").lower())
     catalog = {"schemaVersion": CATALOG_SCHEMA_VERSION, "name": CATALOG_NAME,
-               "description": CATALOG_DESCRIPTION, "mods": entries}
+               "description": CATALOG_DESCRIPTION, "verifiedAuthors": True, "mods": entries}
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as f:
         json.dump(catalog, f, indent=2, ensure_ascii=False)
@@ -476,8 +606,8 @@ def write_catalog(path: pathlib.Path, entries: list[dict]) -> None:
 class PackageSource:
     """One inbox item: how to materialize it into a file and how to delete it."""
 
-    def __init__(self, uploader: str | None, materialize, delete, label: str):
-        self.uploader = uploader  # None == seeding == admin
+    def __init__(self, uploader: Uploader, materialize, delete, label: str):
+        self.uploader = uploader
         self._materialize = materialize  # (dest) -> path
         self._delete = delete
         self.label = label
@@ -489,26 +619,29 @@ class PackageSource:
         self._delete()
 
 
-def inbox_items_from_dir(d: pathlib.Path) -> list[PackageSource]:
+def inbox_items_from_dir(d: pathlib.Path, uploader: Uploader) -> list[PackageSource]:
+    """The dir's zips as uploads by `uploader` (seeding)."""
     out = []
     for p in sorted(d.glob("*.zip")):
         def materialize(dest: pathlib.Path, p: pathlib.Path = p) -> pathlib.Path:
             shutil.copyfile(p, dest)
-            return dest
-        out.append(PackageSource(None, materialize, (lambda: None), p.name))
+            return stamp_zip_file(dest, uploader)
+        out.append(PackageSource(uploader, materialize, (lambda: None), p.name))
     return out
 
 
 def inbox_items_from_release(client: PackageClient) -> list[PackageSource]:
     """Classifies inbox assets into PackageSources (drains the whole inbox).
 
-    Two upload shapes coexist:
-      zip packages   <discordId>__<ts>__<safe-name>.zip
-      raw file sets  <discordId>__<uploadId>__manifest.json   (the manifest)
-                     <discordId>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>
-    A raw set is reassembled (parts concatenated, per-file sha256 checked
-    against the manifest) and zipped HERE on the runner — the Worker is a
-    stateless pass-through and cannot do it. Incomplete groups are left
+    Two upload shapes coexist; <uploader> is the Worker's stamp
+    `<discordId>-<hex of the UTF-8 username>`:
+      zip packages   <uploader>__<ts>__<safe-name>.zip
+      upload sets    <uploader>__<uploadId>__manifest.json   (the manifest)
+                     <uploader>__<uploadId>__metadata.json   (optional)
+                     <uploader>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>
+    A set is reassembled (parts concatenated, per-file sha256 checked
+    against the manifest), its metadata applied and zipped HERE on the
+    runner — the Worker is a stateless pass-through and cannot do it. Incomplete groups are left
     alone (their parts are still arriving); groups stalled for over
     STALE_AFTER are deleted and logged.
     """
@@ -526,16 +659,20 @@ def inbox_items_from_release(client: PackageClient) -> list[PackageSource]:
                 client.delete_asset(INBOX_TAG, a.name)
                 print(f"  stale inbox zip {a.name} (>{STALE_AFTER // 86400} days), removed")
                 continue
+            def materialize(d: pathlib.Path, n: str = a.name, u: Uploader = info["uploader"]) -> pathlib.Path:
+                client.download_asset(INBOX_TAG, n, d)
+                return stamp_zip_file(d, u)
             sources.append(PackageSource(
-                info["uploader"],
-                (lambda d, n=a.name: (client.download_asset(INBOX_TAG, n, d), d)[1]),
-                (lambda n=a.name: client.delete_asset(INBOX_TAG, n)),
-                a.name))
+                info["uploader"], materialize,
+                (lambda n=a.name: client.delete_asset(INBOX_TAG, n)), a.name))
         else:
-            key = (info["uploader"], info["upload_id"])
+            key = (info["uploader"].uid, info["upload_id"])
             groups.setdefault(key, []).append((info, a))
-    for (uploader, uid), items in sorted(groups.items()):
-        src = raw_group_source(client, uploader, uid, items, now)
+    for (_, uid), items in sorted(groups.items()):
+        # the manifest's stamp names the uploader (a token minted mid-upload
+        # may change the username between parts)
+        first = next((i for i, _ in items if i["kind"] == "manifest"), items[0][0])
+        src = raw_group_source(client, first["uploader"], uid, items, now)
         if src is not None:
             sources.append(src)
     if unknown:
@@ -543,17 +680,37 @@ def inbox_items_from_release(client: PackageClient) -> list[PackageSource]:
     return sources
 
 
+def parse_uploader(field: str) -> Uploader | None:
+    """Parses the Worker's uploader stamp `<discordId>-<hex of the UTF-8
+    username>`; None for anything else."""
+    m = re.fullmatch(r"(\d+)-((?:[0-9a-f]{2})+)", field)
+    if not m:
+        return None
+    try:
+        username = bytes.fromhex(m.group(2)).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return Uploader(m.group(1), username) if username else None
+
+
 def parse_inbox_name(name: str) -> dict | None:
-    """Parses an inbox asset name; None when it matches neither shape."""
+    """Parses an inbox asset name; None when it matches neither shape or
+    carries no valid uploader stamp."""
     parts = name.split("__")
+    if len(parts) < 3:
+        return None
+    uploader = parse_uploader(parts[0])
+    if uploader is None:
+        return None
     if len(parts) == 3 and parts[2].lower() == MANIFEST_PART:
-        return {"kind": "manifest", "uploader": parts[0] or None, "upload_id": parts[1]}
-    if len(parts) == 2 and parts[1].lower().endswith(".zip"):
-        return {"kind": "zip", "uploader": None, "name": name}
+        return {"kind": "manifest", "uploader": uploader, "upload_id": parts[1]}
+    if len(parts) == 3 and parts[2].lower() == METADATA_PART:
+        return {"kind": "metadata", "uploader": uploader, "upload_id": parts[1]}
     if len(parts) == 3 and parts[2].lower().endswith(".zip"):
-        return {"kind": "zip", "uploader": parts[0] or None, "name": name}
-    if len(parts) == 5 and parts[2].startswith("f") and parts[3].startswith("p") and "of" in parts[3]:
-        return {"kind": "part", "uploader": parts[0] or None, "upload_id": parts[1],
+        return {"kind": "zip", "uploader": uploader, "name": name}
+    if (len(parts) == 5 and re.fullmatch(r"f\d+", parts[2])
+            and re.fullmatch(r"p\d+of\d+", parts[3])):
+        return {"kind": "part", "uploader": uploader, "upload_id": parts[1],
                 "file_idx": int(parts[2][1:]),
                 "part_idx": int(parts[3][1:].split("of")[0]),
                 "part_count": int(parts[3].split("of")[1]),
@@ -574,9 +731,76 @@ def make_package_zip(files: dict, dest: pathlib.Path) -> None:
             z.writestr(n, files[n])
 
 
-def raw_group_source(client: PackageClient, uploader: str | None, uid: str,
+def zip_members(blob: bytes) -> dict:
+    """The package's set members of a zip (name -> bytes), by the package-shape
+    rule; anything else in the zip is left behind."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(blob))
+    except zipfile.BadZipFile:
+        raise PackageError("not a valid zip file") from None
+    with zf:
+        verdict, _, chosen = classify_members(zf.namelist())
+        problem = shape_error(verdict)
+        if problem:
+            raise PackageError(problem)
+        return {name: zf.read(name) for name in chosen.values()}
+
+
+def stamp_members(members: dict, metadata: dict | None, uploader: Uploader) -> None:
+    """Rewrites the set's .utoc trailer in place (see `apply_metadata`)."""
+    utoc_name = next(n for n in members if _split(n)[1] == ".utoc")
+    members[utoc_name] = apply_metadata(members[utoc_name], metadata,
+                                        existing_trailer(members[utoc_name]), uploader)
+
+
+def stamp_zip_file(path: pathlib.Path, uploader: Uploader) -> pathlib.Path:
+    """The zip mode: re-zips the package at `path` around its .utoc with the
+    forced author/identifier (its other trailer fields are kept)."""
+    size = path.stat().st_size
+    if size > MAX_RELEASE_ASSET_BYTES:
+        raise PackageError(f"package is {size} bytes; the release asset limit is {MAX_RELEASE_ASSET_BYTES}")
+    members = zip_members(path.read_bytes())
+    stamp_members(members, None, uploader)
+    make_package_zip(members, path)
+    return path
+
+
+def build_set_package(data: dict, metadata: dict | None, uploader: Uploader,
+                      dest: pathlib.Path) -> None:
+    """Builds the package zip of a reassembled upload set at `dest`.
+
+    The set is the loose .utoc/.ucas/.pak(/.sig) files or exactly one .zip;
+    its members (and only those) are zipped around the .utoc that
+    `apply_metadata` rewrote, with or without a metadata.json."""
+    check_member_names(list(data))
+    zips = [n for n in data if n.lower().endswith(".zip")]
+    if zips:
+        if len(data) != 1:
+            raise PackageError("a .zip upload must be the only file in the set")
+        members = zip_members(data[zips[0]])
+    else:
+        verdict, _ = classify_raw(list(data))
+        if verdict != "ok":
+            raise PackageError(f"not one complete .utoc/.ucas/.pak (+.sig) set: {verdict}")
+        members = dict(data)
+    stamp_members(members, metadata, uploader)
+    make_package_zip(members, dest)
+
+
+def rejecting_source(client: PackageClient, uploader: Uploader, label: str,
+                     items: list, reason: str) -> PackageSource:
+    """A source whose materialization fails with `reason` (the normal
+    rejection path then deletes the whole group and logs it)."""
+    def materialize(dest: pathlib.Path) -> pathlib.Path:
+        raise PackageError(reason)
+    return PackageSource(uploader, materialize,
+                         (lambda: [client.delete_asset(INBOX_TAG, a.name) for _, a in items]),
+                         label)
+
+
+def raw_group_source(client: PackageClient, uploader: Uploader, uid: str,
                      items: list, now: datetime) -> PackageSource | None:
-    """Builds one PackageSource for a complete raw file set, or None (wait)."""
+    """Builds one PackageSource for a complete upload set, or None (wait)."""
     label = f"raw {uid}"
     newest = max(a.created for _, a in items)
     if (now - newest).total_seconds() > STALE_AFTER:
@@ -589,6 +813,7 @@ def raw_group_source(client: PackageClient, uploader: str | None, uid: str,
     if manifest_asset is None:
         print(f"  {label}: manifest missing, waiting")
         return None
+    metadata_asset = next((a for i, a in items if i["kind"] == "metadata"), None)
 
     parts_by_file: dict[int, list] = {}
     for i, a in items:
@@ -597,17 +822,20 @@ def raw_group_source(client: PackageClient, uploader: str | None, uid: str,
 
     try:
         manifest = json.loads(client.asset_bytes(INBOX_TAG, manifest_asset.name))
+        if not isinstance(manifest, dict):
+            raise ValueError("not a JSON object")
     except Exception as ex:
-        # an unparseable manifest is fatal (delete + log via the normal path)
-        def materialize_bad(dest: pathlib.Path) -> pathlib.Path:
-            raise PackageError(f"manifest is not valid JSON: {ex}")
-        return PackageSource(uploader, materialize_bad,
-                            (lambda: [client.delete_asset(INBOX_TAG, a.name) for _, a in items]),
-                            label)
+        return rejecting_source(client, uploader, label, items, f"manifest is not valid JSON: {ex}")
 
+    declared = manifest.get("metadata")
+    if declared is not None and not isinstance(declared, dict):
+        return rejecting_source(client, uploader, label, items, 'manifest "metadata" must be an object')
     files = manifest.get("files", [])
     if not files:
         print(f"  {label}: manifest has no files, waiting")
+        return None
+    if declared is not None and metadata_asset is None:
+        print(f"  {label}: metadata.json missing, waiting")
         return None
     if set(parts_by_file) - set(range(len(files))):
         print(f"  {label}: parts for unknown file indices, waiting")
@@ -636,13 +864,16 @@ def raw_group_source(client: PackageClient, uploader: str | None, uid: str,
                 raise PackageError(f"file {f.get('name')}: sha256 mismatch "
                                   f"(client said {want[:12]}…, got {got[:12]}…)")
             data[f["name"]] = bytes(blob)
-        check_member_names(list(data))
         if len(files) != len(data):
             raise PackageError("duplicate file names in the upload")
-        verdict, _ = classify_raw(list(data))
-        if verdict != "ok":
-            raise PackageError(f"not one complete .utoc/.ucas/.pak (+.sig) set: {verdict}")
-        make_package_zip(data, dest)
+        metadata = None
+        if declared is not None:
+            raw = client.asset_bytes(INBOX_TAG, metadata_asset.name)
+            want = declared.get("sha256")
+            if want and hashlib.sha256(raw).hexdigest() != want:
+                raise PackageError("metadata.json: sha256 mismatch")
+            metadata = parse_upload_metadata(raw)
+        build_set_package(data, metadata, uploader, dest)
         if dest.stat().st_size > MAX_RELEASE_ASSET_BYTES:
             raise PackageError(f"package zip is {dest.stat().st_size} bytes; "
                               f"the release asset limit is {MAX_RELEASE_ASSET_BYTES}")
@@ -667,8 +898,8 @@ class Processor:
         self.catalog_path = catalog_path
 
     # -- ownership -----------------------------------------------------
-    def _is_admin(self, uploader: str | None) -> bool:
-        return uploader is None or uploader in self.admins
+    def _is_admin(self, uid: str) -> bool:
+        return uid in self.admins
 
     def _owner_of(self, guid: str, old_entries: dict) -> str | None:
         entry = old_entries.get(guid)
@@ -687,11 +918,11 @@ class Processor:
                 return False, f"invalid package: {ex}"
 
             guid = meta["guid"]
-            uploader = src.uploader
+            uploader = src.uploader.uid
             admin = self._is_admin(uploader)
             # `entries` is live: an earlier item in this same run can set the owner
             owner = self._owner_of(guid, entries)
-            if owner and uploader and uploader != owner and not admin:
+            if owner and uploader != owner and not admin:
                 src._delete()
                 return False, f"GUID {guid} is owned by {owner}; uploader {uploader} rejected"
 
@@ -732,10 +963,11 @@ class Processor:
             sha = hashlib.sha256(tmp.read_bytes()).hexdigest()
             src._delete()  # always: success or failure
 
-            if admin:
-                new_owner = owner  # seeding keeps/leaves the owner as-is
-            else:
-                new_owner = owner or uploader
+            new_owner = owner or uploader
+            if new_owner != uploader:
+                # an admin updating someone else's mod: the package carries the
+                # admin's stamp, but the entry stays under its owner's name
+                meta = {**meta, "author": entries[guid]["author"]}
 
             entry = entry_from_meta(
                 meta, file_url=asset_url(self.owner, self.repo, tag, zip_name),
@@ -760,6 +992,9 @@ class Processor:
                 success, result = False, f"error: {ex}"
             if success:
                 entries[result["id"]] = result
+                for entry in entries.values():
+                    if entry.get("uploader") == src.uploader.uid:
+                        entry["author"] = src.uploader.username  # a rename follows the owner's uploads
                 ok += 1
                 print(f"  ok {src.label}: {result['name']} v{result['version']} "
                       f"(id {result['id']}, owner {result['uploader']})")
@@ -778,49 +1013,74 @@ class Processor:
 
 
 def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.Path) -> dict:
-    """Regenerates the whole catalog from the mod-* releases.
+    """Regenerates the whole catalog from the mod-* releases alone.
 
     Each entry points at the most recently uploaded version zip of that
-    release (by asset created-at). `uploader` is inherited from the existing
-    catalog when it is present (the re-homed asset names don't carry the
-    uploader id); otherwise it is null.
+    release (by asset created-at). Only the runner writes into `mod-*`
+    releases, so every package's trailer `identifier` starts with its
+    uploader's Discord id and its `author` is that uploader's username at
+    upload time. From that:
+
+      * `uploader` (the owner) = the uploader of the release's earliest
+        package (the first uploader of a GUID owns it);
+      * `author` = the author of the most recent package, in any release,
+        uploaded by the owner's id (a rename follows the owner's uploads).
     """
-    _, old_entries = load_catalog(catalog_path)
-    entries = []
+    candidates = []  # (meta, asset, sha256, cover_url, owner uid) of each release's newest package
+    latest_by_uid: dict[str, tuple] = {}  # uid -> ((created, name), author)
     for tag in client.list_tags(MOD_TAG_PREFIX):
         rel = client.get_release(tag)
         if rel is None:
             continue
-        zips = [a for a in rel.assets if a.name.lower().endswith(".zip")]
+        zips = sorted((a for a in rel.assets if a.name.lower().endswith(".zip")),
+                      key=lambda a: (a.created, a.name))
         if not zips:
             print(f"  {tag}: no zip assets, skipped")
             continue
-        newest = max(zips, key=lambda a: (a.created, a.name))
-        with tempfile.TemporaryDirectory() as td:
-            tmp = pathlib.Path(td) / newest.name
-            client.download_asset(tag, newest.name, tmp)
-            try:
-                meta = validate_package(tmp)
-            except PackageError as ex:
-                print(f"  {tag}: REJECTED {ex}", file=sys.stderr)
-                continue
-            if meta["guid"] != tag[len(MOD_TAG_PREFIX):]:
-                print(f"  {tag}: trailer guid {meta['guid']} does not match the tag, skipped",
-                      file=sys.stderr)
-                continue
-            sha = hashlib.sha256(tmp.read_bytes()).hexdigest()
-            cover_url = None
-            image = meta.get("image")
-            if image is not None:
-                _, cname = cover_name(meta["guid"], image)
-                if any(a.name == cname for a in rel.assets):
-                    cover_url = asset_url(owner, repo, tag, cname)
-                else:
-                    print(f"  {tag}: cover {cname} missing from the release, omitted")
-            entries.append(entry_from_meta(
-                meta, file_url=asset_url(owner, repo, tag, newest.name), size=newest.size,
-                sha256=sha, uploader=old_entries.get(meta["guid"], {}).get("uploader"),
-                updated=_iso(newest.created), cover_url=cover_url))
+        packages = []  # (asset, meta, uid, sha256) of the valid packages, oldest first
+        for asset in zips:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = pathlib.Path(td) / asset.name
+                client.download_asset(tag, asset.name, tmp)
+                try:
+                    meta = validate_package(tmp)
+                except PackageError as ex:
+                    print(f"  {tag}: {asset.name} REJECTED {ex}", file=sys.stderr)
+                    continue
+                if meta["guid"] != tag[len(MOD_TAG_PREFIX):]:
+                    print(f"  {tag}: {asset.name}: trailer guid {meta['guid']} does not match the tag, skipped",
+                          file=sys.stderr)
+                    continue
+                uid = uploader_from_identifier(meta["identifier"])
+                if uid is None:
+                    print(f"  {tag}: {asset.name}: identifier {meta['identifier']!r} carries no uploader id "
+                          "(not written by this catalog), skipped", file=sys.stderr)
+                    continue
+                packages.append((asset, meta, uid, hashlib.sha256(tmp.read_bytes()).hexdigest()))
+        if not packages or packages[-1][0] is not zips[-1]:
+            print(f"  {tag}: the newest package is invalid, skipped", file=sys.stderr)
+            continue
+        for asset, meta, uid, _ in packages:
+            stamp = (asset.created, asset.name)
+            if uid not in latest_by_uid or stamp > latest_by_uid[uid][0]:
+                latest_by_uid[uid] = (stamp, meta["author"])
+        asset, meta, _, sha = packages[-1]
+        cover_url = None
+        image = meta.get("image")
+        if image is not None:
+            _, cname = cover_name(meta["guid"], image)
+            if any(a.name == cname for a in rel.assets):
+                cover_url = asset_url(owner, repo, tag, cname)
+            else:
+                print(f"  {tag}: cover {cname} missing from the release, omitted")
+        candidates.append((meta, asset, sha, cover_url, packages[0][2], tag))
+
+    entries = []
+    for meta, asset, sha, cover_url, owner_uid, tag in candidates:
+        entries.append(entry_from_meta(
+            {**meta, "author": latest_by_uid[owner_uid][1]},
+            file_url=asset_url(owner, repo, tag, asset.name), size=asset.size, sha256=sha,
+            uploader=owner_uid, updated=_iso(asset.created), cover_url=cover_url))
     write_catalog(catalog_path, entries)
     print(f"\n{catalog_path.name}: {len(entries)} mod(s) rebuilt")
     return {"ok": len(entries)}
@@ -855,7 +1115,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("process", help="drain inbox items and merge into the catalog")
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--from-inbox", action="store_true")
-    src.add_argument("--from-dir", metavar="DIR")
+    src.add_argument("--from-dir", metavar="DIR",
+                     help="seed the dir's zips as uploads by --as-uid/--as-username (both required)")
+    p.add_argument("--as-uid", metavar="ID", help="Discord user id the seeded packages belong to")
+    p.add_argument("--as-username", metavar="NAME", help="Discord username published as their author")
     common(p)
 
     p = sub.add_parser("rebuild", help="regenerate the whole catalog from mod-* releases")
@@ -878,13 +1141,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.from_dir:
+        if not args.as_uid or not args.as_username:
+            raise SystemExit("error: --from-dir needs --as-uid and --as-username: every package in the "
+                             "catalog belongs to a verified Discord account")
+        if not re.fullmatch(r"\d+", args.as_uid):
+            raise SystemExit("error: --as-uid must be a Discord user id (digits)")
         d = pathlib.Path(args.from_dir).resolve()
         if not d.is_dir():
             raise SystemExit(f"error: {d} is not a directory")
-        sources = inbox_items_from_dir(d)
+        sources = inbox_items_from_dir(d, Uploader(args.as_uid, args.as_username))
         if not sources:
             raise SystemExit(f"error: no .zip packages found in {d}")
     else:
+        if args.as_uid or args.as_username:
+            raise SystemExit("error: --as-uid/--as-username only apply to --from-dir")
         if client.get_release(INBOX_TAG) is None:
             client.create_release(INBOX_TAG, "Inbox")
         sources = inbox_items_from_release(client)

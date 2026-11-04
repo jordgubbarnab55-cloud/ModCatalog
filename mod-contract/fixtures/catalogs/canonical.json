@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "name": "Canonical Catalog",
   "description": "Every canonical field, absolute URLs (the ModCatalog shape).",
+  "verifiedAuthors": true,
   "mods": [
     {
       "id": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",

@@ -69,7 +69,7 @@ async function mintToken(env, kv, fetchImpl, id = "42") {
   const res = await handle(await discordRequest({
     type: 2,
     data: { name: "token" },
-    member: { id },
+    member: { id, user: { id, username: "alice" } },
   }), env, fetchImpl);
   assert.equal(res.status, 202, "ACK with no body");
   const cb = fetchImpl.calls.filter((c) => c.url.includes("/interactions/") && c.url.includes("/callback")).at(-1);
@@ -129,7 +129,7 @@ test("wrong public key is rejected 401", async () => {
 test("/token mints a token; only the hash is stored; reply is ephemeral", async () => {
   const kv = new FakeKV();
   const fetchImpl = makeFetch();
-  const res = await handle(await discordRequest({ type: 2, data: { name: "token" }, member: { id: "42" } }),
+  const res = await handle(await discordRequest({ type: 2, data: { name: "token" }, member: { id: "42", user: { id: "42", username: "alice" } } }),
     makeEnv(kv, await publicKeyB64()), fetchImpl);
   assert.equal(res.status, 202);
   assert.equal(await res.text(), "", "ACK has no body");
@@ -146,6 +146,7 @@ test("/token mints a token; only the hash is stored; reply is ephemeral", async 
   const tokKey = vals.find(([k]) => k === `tok:${userKey[1]}`);
   assert.ok(tokKey, "tok key stored");
   assert.equal(JSON.parse(tokKey[1]).discordId, "42");
+  assert.equal(JSON.parse(tokKey[1]).username, "alice");
   for (const [, v] of vals) assert.ok(!v.includes(token), "plaintext token never in KV");
   assert.equal(fetchImpl.calls.length, 1, "only the Discord callback call (no GitHub)");
 });
@@ -173,7 +174,7 @@ test("/token revoke deletes both keys", async () => {
   const res = await handle(await discordRequest({
     type: 2,
     data: { name: "token", options: [{ type: 2, name: "revoke" }] },
-    member: { id: "42" },
+    member: { id: "42", user: { id: "42", username: "alice" } },
   }), env, makeFetch());
   assert.equal(res.status, 202);
   assert.equal(await kv.get("user:42"), null);
@@ -184,7 +185,7 @@ test("guild identity: a member object without a top-level id (nested user.id) is
   const res = await handle(await discordRequest({
     type: 2,
     data: { name: "token" },
-    member: { user: { id: "77" }, nick: null, roles: [] }, // no top-level `id`
+    member: { user: { id: "77", username: "bob" }, nick: null, roles: [] }, // no top-level `id`
   }), makeEnv(kv, await publicKeyB64()), makeFetch());
   assert.equal(res.status, 202);
   assert.ok(await kv.get("user:77"), "keyed by the nested user id");
@@ -287,7 +288,7 @@ test("raw file part: name encodes upload id, file idx and part count", async () 
   const res = await handle(req, makeEnv(kv, pub), f);
   assert.equal(res.status, 202);
   const up = f.calls.find((c) => c.url.includes("uploads.github.com"));
-  assert.match(up.url, /42__abc-123__f2__p1of3__My-Mod\.utoc$/);
+  assert.match(up.url, /42-616c696365__abc-123__f2__p1of3__My-Mod\.utoc$/);
 });
 
 test("raw manifest upload: fixed name, strict headers", async () => {
@@ -308,7 +309,7 @@ test("raw manifest upload: fixed name, strict headers", async () => {
   const res = await handle(req, makeEnv(kv, pub), f);
   assert.equal(res.status, 202);
   const up = f.calls.find((c) => c.url.includes("uploads.github.com"));
-  assert.match(up.url, /42__abc-123__manifest\.json$/);
+  assert.match(up.url, /42-616c696365__abc-123__manifest\.json$/);
 
   // a manifest with the wrong part headers is rejected
   const bad = uploadRequest({
@@ -380,6 +381,62 @@ test("raw mode: zip mode still requires .zip and raw mode ignores it", async () 
   assert.equal((await handle(r2, makeEnv(kv, pub), f)).status, 202);
 });
 
+// ---------------------------------------- upload sets: .zip + metadata.json
+
+async function setPart({ filename, headers, bytes = 10 }) {
+  const kv = new FakeKV();
+  const pub = await publicKeyB64();
+  const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
+  const f = makeFetch((url) =>
+    url.includes("releases/tags/inbox") ? new Response(JSON.stringify({ id: 7 }), { status: 200 })
+    : new Response(null, { status: 201 }));
+  const req = uploadRequest({
+    token, contentLength: bytes, filename,
+    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(bytes)); c.close(); } }),
+  });
+  for (const [k, v] of Object.entries(headers)) req.headers.set(k, v);
+  const res = await handle(req, makeEnv(kv, pub), f);
+  return { res, f, up: f.calls.find((c) => c.url.includes("uploads.github.com")) };
+}
+
+const SET = { "X-Upload-Id": "abc-123", "X-File-Idx": "0", "X-Part-Idx": "0", "X-Part-Count": "1" };
+
+test("upload set: a .zip is a set file (name encodes idx and parts)", async () => {
+  const { res, up } = await setPart({ filename: "My Pack.zip", headers: SET });
+  assert.equal(res.status, 202);
+  assert.match(up.url, /42-616c696365__abc-123__f0__p0of1__My-Pack\.zip$/);
+});
+
+test("upload set: metadata.json has a fixed name and strict headers", async () => {
+  const ok = { ...SET, "X-File-Idx": "-2" };
+  const { res, up } = await setPart({ filename: "metadata.json", headers: ok });
+  assert.equal(res.status, 202);
+  assert.match(up.url, /42-616c696365__abc-123__metadata\.json$/);
+
+  for (const [filename, headers] of [
+    ["metadata.json", { ...ok, "X-Part-Idx": "1", "X-Part-Count": "2" }],   // not a single part
+    ["metadata.json", { ...ok, "X-Part-Count": "2" }],
+    ["other.json", ok],                                                      // wrong name for idx -2
+    ["mod.pak", ok],
+    ["metadata.json", SET],                                                  // a file index, .json is not a set file
+    ["metadata.json", { "X-Upload-Id": "abc-123", "X-File-Idx": "-2" }],     // missing part headers
+  ]) {
+    const r = await setPart({ filename, headers });
+    assert.equal(r.res.status, 400, `${filename} ${JSON.stringify(headers)}`);
+    assert.equal(r.up, undefined, "rejected before any GitHub call");
+  }
+});
+
+test("zip mode (no upload id) still needs a .zip name and is unaffected by set files", async () => {
+  const { res } = await setPart({ filename: "mod.pak", headers: {} });
+  assert.equal(res.status, 400);
+});
+
+test("file names never carry the __ field separator", async () => {
+  const { up } = await setPart({ filename: "my__mod___v2.pak", headers: SET });
+  assert.match(up.url, /42-616c696365__abc-123__f0__p0of1__my_mod_v2\.pak$/);
+});
+
 test("missing inbox release is 503 with a helpful message", async () => {
   const kv = new FakeKV();
   const pub = await publicKeyB64();
@@ -418,7 +475,7 @@ test("happy path: streams the same body, right headers, dispatch after, 202", as
   const [rel, up, disp] = f.calls;
   assert.match(rel.url, /releases\/tags\/inbox$/);
   assert.match(up.url, /uploads\.github\.com\/repos\/octo\/repo\/releases\/7\/assets\?name=/);
-  assert.match(up.url, /42__\d+__My-Mod-v1-.zip$/);
+  assert.match(up.url, /42-616c696365__\d+__My-Mod-v1-.zip$/);
   assert.equal(up.init.body, body, "the body is the SAME stream object (not a buffered copy)");
   assert.equal(up.init.headers["Authorization"], "Bearer gh_test_token");
   assert.equal(up.init.headers["Content-Type"], "application/zip");
@@ -458,4 +515,160 @@ test("CORS preflight answers with the allowed origin and headers", async () => {
   assert.equal(res.headers.get("Access-Control-Allow-Methods"), "POST, OPTIONS");
   assert.equal(res.headers.get("Access-Control-Allow-Headers"),
     "Authorization, Content-Type, X-Filename, X-Upload-Id, X-File-Idx, X-Part-Idx, X-Part-Count");
+});
+
+// ----------------------------------------------- verified author names
+
+test("/token stores the account username, not the display name or nickname", async () => {
+  const kv = new FakeKV();
+  const res = await handle(await discordRequest({
+    type: 2,
+    data: { name: "token" },
+    member: { nick: "Server Nick", user: { id: "77", username: "carol", global_name: "Carol The Great" } },
+  }), makeEnv(kv, await publicKeyB64()), makeFetch());
+  assert.equal(res.status, 202);
+  const hash = await kv.get("user:77");
+  assert.deepEqual(
+    (({ discordId, username }) => ({ discordId, username }))(JSON.parse(await kv.get(`tok:${hash}`))),
+    { discordId: "77", username: "carol" });
+});
+
+test("/token in a DM: the username comes from the top-level user object", async () => {
+  const kv = new FakeKV();
+  const res = await handle(await discordRequest({
+    type: 2, data: { name: "token" }, user: { id: "88", username: "dave" },
+  }), makeEnv(kv, await publicKeyB64()), makeFetch());
+  assert.equal(res.status, 202);
+  const hash = await kv.get("user:88");
+  assert.equal(JSON.parse(await kv.get(`tok:${hash}`)).username, "dave");
+});
+
+test("/token without a username is refused and mints nothing", async () => {
+  const kv = new FakeKV();
+  const res = await handle(await discordRequest({
+    type: 2, data: { name: "token" }, member: { user: { id: "99" } },
+  }), makeEnv(kv, await publicKeyB64()), makeFetch());
+  assert.equal(res.status, 400);
+  assert.equal(kv.all().length, 0);
+});
+
+function whoamiRequest(token, method = "GET") {
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  return new Request("https://worker.local/whoami", { method, headers });
+}
+
+test("GET /whoami: a live token answers its id and username, with CORS", async () => {
+  const kv = new FakeKV();
+  const pub = await publicKeyB64();
+  const f = makeFetch();
+  const token = await mintToken(makeEnv(kv, pub), kv, f);
+  const res = await handle(whoamiRequest(token), makeEnv(kv, pub), f);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { discordId: "42", username: "alice" });
+  assert.equal(res.headers.get("Access-Control-Allow-Origin"), "https://pages.example.com");
+});
+
+test("GET /whoami: no, unknown or revoked token is 401", async () => {
+  const kv = new FakeKV();
+  const pub = await publicKeyB64();
+  const f = makeFetch();
+  const env = makeEnv(kv, pub);
+  assert.equal((await handle(whoamiRequest(null), env, f)).status, 401);
+  assert.equal((await handle(whoamiRequest("mm_nope"), env, f)).status, 401);
+  const old = await mintToken(env, kv, f);
+  await mintToken(env, kv, f); // a new mint revokes the old token
+  const res = await handle(whoamiRequest(old), env, f);
+  assert.equal(res.status, 401);
+  assert.equal(res.headers.get("Access-Control-Allow-Origin"), "https://pages.example.com");
+  assert.equal(f.calls.filter((c) => !c.url.includes("/callback")).length, 0, "no GitHub calls");
+});
+
+async function legacyToken(kv) {
+  const token = "mm_legacytoken";
+  await kv.put(`tok:${await sha256Hex(token)}`, JSON.stringify({ discordId: "42", createdAt: "2026-01-01T00:00:00Z" }));
+  return token;
+}
+async function sha256Hex(s) {
+  return Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))).toString("hex");
+}
+
+test("a token minted before usernames were recorded is 401 on whoami and upload", async () => {
+  const kv = new FakeKV();
+  const pub = await publicKeyB64();
+  const token = await legacyToken(kv);
+  const who = await handle(whoamiRequest(token), makeEnv(kv, pub), makeFetch());
+  assert.equal(who.status, 401);
+  assert.match((await who.json()).error, /mint a new one with \/token/);
+  const f = makeFetch();
+  const up = await handle(uploadRequest({ token, contentLength: 10, filename: "a.zip", body: "0123456789" }),
+    makeEnv(kv, pub), f);
+  assert.equal(up.status, 401);
+  assert.match((await up.json()).error, /mint a new one with \/token/);
+  assert.equal(f.calls.length, 0);
+});
+
+test("CORS preflight for /whoami allows GET and the Authorization header", async () => {
+  const res = await handle(whoamiRequest(null, "OPTIONS"), makeEnv(new FakeKV(), await publicKeyB64()), makeFetch());
+  assert.equal(res.status, 204);
+  assert.equal(res.headers.get("Access-Control-Allow-Origin"), "https://pages.example.com");
+  assert.match(res.headers.get("Access-Control-Allow-Methods"), /GET/);
+  assert.match(res.headers.get("Access-Control-Allow-Headers"), /Authorization/);
+  assert.equal((await handle(whoamiRequest("x", "POST"), makeEnv(new FakeKV(), await publicKeyB64()), makeFetch())).status, 405);
+});
+
+test("every inbox asset name is stamped with the hex of the UTF-8 username", async () => {
+  const kv = new FakeKV();
+  const pub = await publicKeyB64();
+  const f0 = makeFetch();
+  // an account name with characters sanitizeFilename would mangle and a "__"
+  const username = "Zoë__a b";
+  const hex = Buffer.from(username, "utf8").toString("hex");
+  const res0 = await handle(await discordRequest({
+    type: 2, data: { name: "token" }, member: { user: { id: "55", username } },
+  }), makeEnv(kv, pub), f0);
+  assert.equal(res0.status, 202);
+  const token = JSON.parse(f0.calls.find((c) => c.url.includes("/callback")).init.body)
+    .data.content.match(/`(mm_[A-Za-z0-9_-]+)`/)[1];
+
+  const names = [];
+  const f = makeFetch((url) => {
+    if (url.includes("/releases/tags/inbox")) return Response.json({ id: 7 });
+    if (url.includes("uploads.github.com")) names.push(new URL(url).searchParams.get("name"));
+    return new Response(null, { status: 204 });
+  });
+  const base = { Authorization: `Bearer ${token}`, "Content-Length": "2" };
+  const send = (headers) => handle(new Request("https://worker.local/upload", {
+    method: "POST", body: "{}", headers: { ...base, ...headers },
+  }), makeEnv(kv, pub), f);
+  assert.equal((await send({ "X-Filename": "pack.zip" })).status, 202);
+  assert.equal((await send({ "X-Upload-Id": "u1", "X-Filename": "manifest.json", "X-File-Idx": "-1", "X-Part-Idx": "0", "X-Part-Count": "1" })).status, 202);
+  assert.equal((await send({ "X-Upload-Id": "u1", "X-Filename": "metadata.json", "X-File-Idx": "-2", "X-Part-Idx": "0", "X-Part-Count": "1" })).status, 202);
+  assert.equal((await send({ "X-Upload-Id": "u1", "X-Filename": "a.pak", "X-File-Idx": "0", "X-Part-Idx": "0", "X-Part-Count": "1" })).status, 202);
+  assert.equal(names.length, 4);
+  for (const n of names) {
+    assert.ok(n.startsWith(`55-${hex}__`), n);
+    assert.equal(n.split("__").length >= 3, true);
+  }
+  assert.match(names[0], /^55-[0-9a-f]+__\d+__pack\.zip$/);
+  assert.match(names[1], /__u1__manifest\.json$/);
+  assert.match(names[2], /__u1__metadata\.json$/);
+  assert.match(names[3], /__u1__f0__p0of1__a\.pak$/);
+});
+
+test("the client cannot choose the stamped name: no header is read for it", async () => {
+  const kv = new FakeKV();
+  const pub = await publicKeyB64();
+  const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
+  let name = null;
+  const f = makeFetch((url) => {
+    if (url.includes("/releases/tags/inbox")) return Response.json({ id: 7 });
+    if (url.includes("uploads.github.com")) name = new URL(url).searchParams.get("name");
+    return new Response(null, { status: 204 });
+  });
+  await handle(new Request("https://worker.local/upload", {
+    method: "POST", body: "{}",
+    headers: { Authorization: `Bearer ${token}`, "Content-Length": "2", "X-Filename": "p.zip",
+      "X-Username": "mallory", "X-Discord-Id": "1" },
+  }), makeEnv(kv, pub), f);
+  assert.match(name, /^42-616c696365__/);
 });

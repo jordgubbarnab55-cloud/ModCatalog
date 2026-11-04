@@ -7,15 +7,21 @@
 // straight through to GitHub releases (no buffering, no cold storage).
 //
 // Two upload shapes:
-//   * zip packages: X-Filename <name>.zip, one upload per package
-//   * raw file sets (no client-side zipping): each .utoc/.ucas/.pak(/.sig) file
-//     (part-split when over 100 MB) plus a manifest.json upload, all tagged
-//     with the same X-Upload-Id; the workflow reassembles + zips on the
-//     runner (this Worker cannot — 10 ms CPU, stateless).
+//   * zip packages: X-Filename <name>.zip, one upload per package, no upload id
+//
+// Every inbox asset name starts with the uploader stamp (uploaderStamp).
+//   * upload sets: either the loose .utoc/.ucas/.pak(/.sig) files or exactly
+//     one .zip (part-split when over 100 MB), plus a manifest.json upload and
+//     an optional metadata.json upload, all tagged with the same X-Upload-Id;
+//     the workflow reassembles, applies the metadata and zips on the runner
+//     (this Worker cannot — 10 ms CPU, stateless).
 
 const MAX_BODY_BYTES = 100 * 1024 * 1024; // Cloudflare free-plan request-body limit
 const DEFAULT_DAILY_BYTES = 2147483648; // 2 GiB of uploads per user per UTC day
-const RAW_EXTENSIONS = [".pak", ".ucas", ".utoc", ".sig"];
+const RAW_EXTENSIONS = [".pak", ".ucas", ".utoc", ".sig", ".zip"];
+// Fixed X-File-Idx values of the two non-file parts of an upload set.
+const MANIFEST_IDX = "-1";
+const METADATA_IDX = "-2";
 const INBOX_CACHE_KEY = "cache:inbox_release_id";
 const INBOX_CACHE_MS = 3600 * 1000;
 const INBOX_TAG = "inbox";
@@ -51,8 +57,11 @@ function newToken() {
   return "mm_" + base64url(bytes);
 }
 
+// "__" separates the fields of an inbox asset name, so a file name never
+// carries one.
 function sanitizeFilename(name) {
-  return name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
+  return name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/_{2,}/g, "_")
+    .replace(/^-+|-+$/g, "");
 }
 
 async function verifyDiscordSignature(publicKeyB64, timestamp, rawBody, signatureHex) {
@@ -68,6 +77,30 @@ async function verifyDiscordSignature(publicKeyB64, timestamp, rawBody, signatur
   } catch {
     return false;
   }
+}
+
+// The uploader as the pipeline learns it: an inbox asset name starts with
+// `<discordId>-<hex of the UTF-8 username>`, so the username survives
+// sanitizeFilename and the "__" field split and never comes from the client.
+function uploaderStamp(discordId, username) {
+  const hex = [...new TextEncoder().encode(username)]
+    .map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${discordId}-${hex}`;
+}
+
+const STALE_TOKEN_MESSAGE =
+  "this token predates verified author names; mint a new one with /token in Discord";
+
+// Looks the bearer token up: { rec: { discordId, username } } or { response }.
+async function authenticate(request, env, cors) {
+  const auth = request.headers.get("Authorization") || "";
+  if (!auth.startsWith("Bearer ")) return { response: json({ error: "missing bearer token" }, 401, cors) };
+  const tokenHash = await sha256Hex(auth.slice("Bearer ".length));
+  const raw = await env.TOKENS.get(`tok:${tokenHash}`);
+  if (!raw) return { response: json({ error: "unknown or revoked token" }, 401, cors) };
+  const rec = JSON.parse(raw);
+  if (!rec.username) return { response: json({ error: STALE_TOKEN_MESSAGE }, 401, cors) };
+  return { rec };
 }
 
 // ----------------------------------------------------------------- handler
@@ -92,6 +125,7 @@ export async function handle(request, env, fetchImpl) {
   const url = new URL(request.url);
   if (url.pathname === "/discord") return handleDiscord(request, env, fetchImpl);
   if (url.pathname === "/upload") return handleUpload(request, env, fetchImpl);
+  if (url.pathname === "/whoami") return handleWhoami(request, env);
   return json({ error: "not found" }, 404);
 }
 
@@ -129,6 +163,11 @@ async function handleDiscord(request, env, fetchImpl) {
     (body.user && body.user.id);
   if (!discordId) return json({ error: "missing user id" }, 400);
 
+  // The Discord account name (`username`): not the display name, not the
+  // server nickname. It is what the catalog publishes as the mods' author.
+  const user = (body.member && body.member.user) || body.user;
+  const username = user && typeof user.username === "string" ? user.username : "";
+
   const sub = (body.data && body.data.options || [])
     .find((o) => o.type === 2); // Subcommand
   const command = (body.data && body.data.name) || "";
@@ -145,6 +184,7 @@ async function handleDiscord(request, env, fetchImpl) {
   }
 
   if (command === "token") {
+    if (!username) return json({ error: "missing username" }, 400);
     // One active token per user: invalidate the previous one.
     const oldHash = await env.TOKENS.get(`user:${discordId}`);
     if (oldHash) await env.TOKENS.delete(`tok:${oldHash}`);
@@ -152,14 +192,15 @@ async function handleDiscord(request, env, fetchImpl) {
     const token = newToken();
     const hash = await sha256Hex(token); // only the hash is stored, ever
     await env.TOKENS.put(`tok:${hash}`,
-      JSON.stringify({ discordId, createdAt: new Date().toISOString() }));
+      JSON.stringify({ discordId, username, createdAt: new Date().toISOString() }));
     await env.TOKENS.put(`user:${discordId}`, hash);
     const ack = await sendCallback(body, {
       type: 4,
       data: {
         content:
           `Your upload token (shown once, treat it like a password):\n` +
-          `\`${token}\`\n\nKeep it secret: it can upload mods as you (10 per day, 100 MB each). ` +
+          `\`${token}\`\n\nMods you upload with it are published under the author name ` +
+          `\`${username}\` (your Discord username).\n\nKeep it secret: it can upload mods as you (10 per day, 100 MB each). ` +
           `Re-issue with \`/token\` — a new mint invalidates this one (that is the revoke).`,
         flags: 64, // ephemeral: only this user sees it
       },
@@ -186,8 +227,8 @@ async function sendCallback(body, responseObj, fetchImpl) {
 
 // -------------------------------------------------------- POST /upload
 // Authorization: Bearer <token>
-// X-Filename: <name>.zip
-// body: raw zip, streamed straight through to GitHub (never buffered here).
+// X-Filename: <name>.zip      (zip mode; set mode: see mod-contract/upload.md)
+// body: the raw bytes, streamed straight through to GitHub (never buffered here).
 
 async function handleUpload(request, env, fetchImpl) {
   const cors = { "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN };
@@ -205,12 +246,10 @@ async function handleUpload(request, env, fetchImpl) {
   if (request.method !== "POST") return json({ error: "POST only" }, 405, cors);
 
   // 1. token
-  const auth = request.headers.get("Authorization") || "";
-  if (!auth.startsWith("Bearer ")) return json({ error: "missing bearer token" }, 401, cors);
-  const tokenHash = await sha256Hex(auth.slice("Bearer ".length));
-  const rec = await env.TOKENS.get(`tok:${tokenHash}`);
-  if (!rec) return json({ error: "unknown or revoked token" }, 401, cors);
-  const discordId = JSON.parse(rec).discordId;
+  const auth = await authenticate(request, env, cors);
+  if (auth.response) return auth.response;
+  const { discordId, username } = auth.rec;
+  const stamp = uploaderStamp(discordId, username);
 
   // 2. size checks (before any GitHub call)
   const clHeader = request.headers.get("Content-Length");
@@ -237,27 +276,34 @@ async function handleUpload(request, env, fetchImpl) {
     if (fileIdx == null || partIdx == null || partCount == null) {
       return json({ error: "raw uploads need X-File-Idx, X-Part-Idx, X-Part-Count" }, 400, cors);
     }
-    const isManifest = fileIdx === "-1";
-    if (!isManifest && (!/^\d+$/.test(fileIdx) || !/^\d+$/.test(partIdx) || !/^\d+$/.test(partCount) || Number(partIdx) >= Number(partCount))) {
+    const isManifest = fileIdx === MANIFEST_IDX;
+    const isMetadata = fileIdx === METADATA_IDX;
+    if (!isManifest && !isMetadata && (!/^\d+$/.test(fileIdx) || !/^\d+$/.test(partIdx) || !/^\d+$/.test(partCount) || Number(partIdx) >= Number(partCount))) {
       return json({ error: "bad part headers" }, 400, cors);
     }
     if (isManifest) {
       if (filename !== "manifest.json" || partIdx !== "0" || partCount !== "1") {
         return json({ error: "bad manifest headers" }, 400, cors);
       }
-      assetName = `${discordId}__${uploadId}__manifest.json`;
+      assetName = `${stamp}__${uploadId}__manifest.json`;
+    } else if (isMetadata) {
+      if (filename !== "metadata.json" || partIdx !== "0" || partCount !== "1") {
+        return json({ error: "bad metadata headers" }, 400, cors);
+      }
+      assetName = `${stamp}__${uploadId}__metadata.json`;
     } else {
       const lower = filename.toLowerCase();
       if (!RAW_EXTENSIONS.some((e) => lower.endsWith(e))) {
-        return json({ error: "raw files must be .pak/.ucas/.utoc/.sig (plus the manifest.json upload)" }, 400, cors);
+        return json({ error: "set files must be .pak/.ucas/.utoc/.sig or one .zip " +
+          "(plus the manifest.json and metadata.json uploads)" }, 400, cors);
       }
-      assetName = `${discordId}__${uploadId}__f${fileIdx}__p${partIdx}of${partCount}__${sanitizeFilename(filename)}`;
+      assetName = `${stamp}__${uploadId}__f${fileIdx}__p${partIdx}of${partCount}__${sanitizeFilename(filename)}`;
     }
   } else {
     if (!filename.toLowerCase().endsWith(".zip")) {
       return json({ error: "X-Filename must end in .zip" }, 400, cors);
     }
-    assetName = `${discordId}__${Math.floor(Date.now() / 1000)}__${sanitizeFilename(filename)}`;
+    assetName = `${stamp}__${Math.floor(Date.now() / 1000)}__${sanitizeFilename(filename)}`;
   }
 
   // 4. daily quota, by BYTES (a raw set costs N part uploads; KV is
@@ -329,6 +375,27 @@ async function handleUpload(request, env, fetchImpl) {
     return json({ error: `github dispatch failed: HTTP ${dispatch.status}` }, 502, cors);
   }
   return json({ status: "queued" }, 202, cors);
+}
+
+// -------------------------------------------------------- GET /whoami
+// Bearer token -> the Discord account the catalog will publish uploads as.
+
+async function handleWhoami(request, env) {
+  const cors = { "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN };
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        ...cors,
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Authorization",
+      },
+    });
+  }
+  if (request.method !== "GET") return json({ error: "GET only" }, 405, cors);
+  const auth = await authenticate(request, env, cors);
+  if (auth.response) return auth.response;
+  return json({ discordId: auth.rec.discordId, username: auth.rec.username }, 200, cors);
 }
 
 async function getInboxReleaseId(env, fetchImpl) {

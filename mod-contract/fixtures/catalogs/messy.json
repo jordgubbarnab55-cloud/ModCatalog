@@ -1,5 +1,6 @@
 {
   "schemaVersion": 99,
+  "verifiedAuthors": "yes",
   "mods": [
     "not an object",
     { "id": "no-file", "name": "No File" },

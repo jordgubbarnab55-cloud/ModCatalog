@@ -12,6 +12,7 @@ follow the lenient rules below; the fixtures in `fixtures/catalogs/` pin both.
   "schemaVersion": 1,
   "name": "My Catalog",
   "description": "…",
+  "verifiedAuthors": true,           // optional; see below
   "mods": [
     {
       "id": "3f2b8c1e-…",            // stable per server; the trailer GUID is ideal
@@ -31,6 +32,12 @@ follow the lenient rules below; the fixtures in `fixtures/catalogs/` pin both.
 }
 ```
 
+`verifiedAuthors` (optional boolean, default false): the catalog sets every
+entry's `author` to the name of the account that uploaded it (ModCatalog: the
+uploader's Discord username), rather than to text the package declared.
+Readers may surface it (a "verified" mark next to the author); they must not
+rely on it for security decisions, since any catalog can claim it.
+
 Only `mods[].id`, `name` and `file` are required. Extra fields (ModCatalog's
 `uploader`, `updated`) are allowed and ignored by readers. URLs should be
 stable (ModCatalog's GitHub release URLs redirect to signed ones; readers
@@ -40,6 +47,8 @@ follow redirects).
 
 - **Root**: an object with a `mods` array, **or** a bare array of entries.
   Anything else fails the whole catalog. Comments and trailing commas are tolerated.
+- `verifiedAuthors` is read only when it is the JSON boolean `true`; anything
+  else (absent, a string, `false`, a bare-array root) means false.
 - `schemaVersion` above the reader's version → warning, read anyway.
 - **Per entry** — a problem drops that entry (or only that value) with a
   warning, never the catalog:

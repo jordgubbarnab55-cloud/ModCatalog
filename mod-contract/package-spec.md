@@ -19,7 +19,7 @@ Fixtures: `fixtures/packages.json`.
   **multiple-sets**. None → **incomplete**. Incomplete groups next to one
   complete group are ignored.
 
-## Loose files (a drop or a raw upload)
+## Loose files (a drop or an upload set)
 
 Checked in this order:
 

@@ -28,7 +28,8 @@ repos sit side by side) and runs the shared fixtures against `trailer.py`,
   whose `.utoc` carries a **metadata trailer** (`"UEMODMET"` magic +
   compact UTF-8 JSON payload: `schema`/`title`/`author`/`description`/
   `version`/`game_version`/`guid`/`identifier` + optional `tags` and base64
-  `image` PNG/JPEG ≤ 4 MiB — `mod-contract/trailer-spec.md`).
+  `image` PNG/JPEG ≤ 4 MiB — `mod-contract/trailer-spec.md`). In this
+  catalog `author` and `identifier` are **verified** (see "Ownership").
 - `site/catalog.json` is a **generated artifact — never edit it by hand**.
   All mod data (including the `id`, the trailer GUID) is derived from the
   packages. Top-level catalog `name`/`description` are constants in
@@ -50,24 +51,48 @@ on the free plan, and it must not trust client-supplied IDs), so:
 
 1. The Worker streams each upload into one fixed release tagged
    `inbox` (it is a stateless pass-through: no parsing, no zipping).
-   Asset names encode the uploader:
-   - zip packages: `<discordId>__<unixts>__<safe-filename>.zip`
-   - **raw file sets** (no client-side zipping; part-split into <= 90 MB
-     slices when a file is over 100 MB):
-     `<discordId>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>` (`.utoc`,
-     `.ucas`, `.pak`, optional `.sig`) plus
-     `<discordId>__<uploadId>__manifest.json` (per-file sha256 of the full
-     file + part counts).
+   Asset names encode the verified uploader as a **stamp**
+   `<discordId>-<hex of the UTF-8 username>` that the Worker builds from the
+   token record (never from a request header; hex survives `sanitizeFilename`
+   and the `__` split; `build.parse_uploader` / `parse_inbox_name` read it).
+   A name without a valid stamp is left alone as unrecognized.
+   - zip packages (the old zip mode, ModManager's `UploadClient`):
+     `<stamp>__<unixts>__<safe-filename>.zip`
+   - **upload sets** (the web page's only mode; no client-side zipping or
+     trailer writing; part-split into <= 90 MB slices when a file is over
+     100 MB): `<stamp>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>`
+     (the loose `.utoc`/`.ucas`/`.pak` + optional `.sig`, **or exactly one
+     `.zip`**) plus `<stamp>__<uploadId>__manifest.json` (per-file
+     sha256 of the full file + part counts, and `"metadata": {"sha256"}`
+     when a metadata part follows) and the optional
+     `<stamp>__<uploadId>__metadata.json` (the trailer metadata the
+     runner writes; `mod-contract/upload.md`). `__` never occurs inside a
+     safe file name (the Worker collapses it).
    It then dispatches `process-inbox.yml` — a **wake-up only, no payload**.
 2. **Each run drains the WHOLE inbox.** GitHub `concurrency` groups keep
    only one pending run (a newer queued run cancels the older pending
    one), so processing "the asset named in the dispatch payload" would
    silently strand uploads. Hence `concurrency: {group: catalog,
    cancel-in-progress: false}` — index merges never race.
-3. For raw file sets the workflow first **reassembles the parts, verifies
-   the per-file sha256 against the manifest, and zips the set on the
-   runner** (`make_package_zip`, deterministic member order — this is where
-   "no client-side zipping" is paid for; the Worker cannot, 10 ms CPU).
+3. For upload sets the workflow first **reassembles the parts, verifies
+   the per-file sha256 against the manifest, writes the trailer, and zips
+   the set on the runner** (`build_set_package` → `apply_metadata` →
+   `make_package_zip`, deterministic member order — the Worker cannot, 10 ms
+   CPU). **Every accepted package gets its trailer rewritten** —
+   `apply_metadata` is **the one function that writes a stored trailer**:
+   the metadata is the `metadata.json` when there is one, else the package's
+   own trailer fields (which must exist); **`author` = the stamped username
+   and `identifier` = `{discordId}.{Title, whitespace removed}` are forced**
+   on top of either; GUID = the package's existing one, else new; a metadata
+   `guid` that differs is a rejection; `image` absent keeps the cover, `null`
+   removes it, an object replaces it. The package zip is built from the set
+   members + that `.utoc` (a `.zip` set is re-zipped from its set members,
+   unrelated entries dropped). The old zip mode goes through the same
+   rewrite (`stamp_zip_file`), so a package edited in the app is corrected
+   too. An invalid
+   `metadata.json` (schema, bad base64/image, sha mismatch) rejects the
+   whole set and deletes its inbox assets. A manifest that declares
+   metadata makes the group wait until `metadata.json` arrives.
    Incomplete groups are left for the next run; groups stalled for over
    7 days are swept.
 4. The workflow then **re-homes** the package: ensures release
@@ -84,20 +109,39 @@ on the free plan, and it must not trust client-supplied IDs), so:
    2 GiB per-asset limit (the 100 MB number is only the Worker's request
    body).
 
-## Ownership (the GUID is self-declared inside the file)
+## Ownership and verified authors (the GUID is self-declared inside the file)
 
 - The **first** uploader of a GUID becomes its owner (`uploader` catalog
   field, the Discord user id). Later uploads of an existing GUID from a
   different Discord id are rejected and their inbox asset deleted.
 - Discord ids in the `ADMIN_DISCORD_IDS` repo variable (comma-separated,
-  read from the environment) bypass the check. Uploads with no uploader
-  (seeding, `--from-dir`) count as admin but never *become* the owner.
-- The trailer's `author` is self-declared display text; the verified
-  identity is `uploader`. Do not present `author` as verified.
-- Note: `rebuild` inherits `uploader` from the existing catalog (the
-  re-homed asset names don't carry the id); a fully lost catalog yields
-  `uploader: null` entries, and the first subsequent uploader claims the
-  GUID.
+  read from the environment) bypass the **ownership** check only: an admin's
+  package is forced like everyone's, and the entry stays under its owner
+  (its `author` is not changed to the admin's name). Every package has an
+  uploader — there are no `uploader: null` entries.
+- **The author is verified in this catalog** (catalog `"verifiedAuthors":
+  true`): every stored package's trailer has `author` = the uploader's
+  Discord **`username`** (not the display name or nickname) at upload time and
+  `identifier` = `{discordUid}.{Title without whitespace}` (cosmetic, the GUID
+  stays the identity), forced in `apply_metadata` whatever the package or
+  `metadata.json` says. Elsewhere (ModManager's editor, `io-trailer`) the
+  trailer author stays cosmetic text — nothing there changed.
+- **Renames propagate only through the owner's own uploads**: after any
+  successful upload by `uid`, `author` of **every** catalog entry whose
+  `uploader == uid` is set to the current username. Someone who leaves keeps
+  their old name. Stored packages of earlier versions are immutable release
+  assets and keep the name they were uploaded with; only catalog entries
+  change.
+- **`rebuild` reproduces all of it from the releases alone** (only the
+  runner writes into `mod-*` releases, so a trailer `identifier`'s id prefix
+  is trusted): a release's owner = the uploader of its earliest valid
+  package; an entry's `author` = the author of the most recently uploaded
+  package (any release) by that owner id. Packages whose identifier carries
+  no id prefix (not written by this catalog) are skipped with a log line.
+  This reads every version zip of every release, not just the newest.
+- Seeding: `process --from-dir DIR --as-uid ID --as-username NAME` (both
+  required, the command refuses without them) treats the dir's zips as
+  uploads by that account; it then owns them.
 
 ## Trailer format (and who else speaks it)
 
@@ -127,11 +171,13 @@ to 64 KiB.
 - `python build.py process --from-inbox` — drain the `inbox` release
   (list/download/upload/delete through the client interface), validate,
   re-home, merge into `site/catalog.json`.
-- `python build.py process --from-dir <dir>` — treat the dir's zips as
-  **admin** inbox items (no uploader); used for one-off seeding.
+- `python build.py process --from-dir <dir> --as-uid <id> --as-username
+  <name>` — treat the dir's zips as uploads by that Discord account; used
+  for one-off seeding (the `seed-legacy` workflow's inputs).
 - `python build.py rebuild` — enumerate all `mod-*` releases, read each
   newest version zip's trailer, regenerate the whole catalog from scratch
-  (releases are the source of truth, so a lost/corrupt catalog recovers).
+  (releases are the source of truth, so a lost/corrupt catalog recovers,
+  `uploader` and the verified `author`s included — see Ownership).
 - **`--client local --root <dir>`** selects the directory-backed fake
   (releases = folders, assets = files, mtime = created-at) so the whole
   pipeline runs offline; the default `gh` client shells out to the
@@ -151,10 +197,10 @@ to 64 KiB.
   (`sanitize_tags`: vocabulary casing, unknowns dropped and logged). The
   catalog carries `schemaVersion: 1` and must validate against
   `mod-contract/catalog.schema.json` (`mod-contract/tools/schema_check.py`).
-- **Raw file sets** are accepted in the inbox alongside zips
-  (`parse_inbox_name` / `raw_group_source` in `build.py`): manifest +
-  part-split files, reassembled and zipped on the runner (see the inbox
-  flow above).
+- **Upload sets** are accepted in the inbox alongside zips
+  (`parse_inbox_name` / `raw_group_source` / `build_set_package` in
+  `build.py`): manifest + part-split files (+ metadata), reassembled,
+  given their trailer and zipped on the runner (see the inbox flow above).
 - Output is **deterministic** (sorted entries, stable JSON, `updated` from
   asset creation time on rebuild) so no-op runs produce byte-identical
   output and no churn commits.
@@ -169,12 +215,13 @@ to 64 KiB.
   `commit-and-deploy` composite action.
 - `rebuild.yml` — `workflow_dispatch`; `python build.py rebuild`, commit,
   deploy. Same concurrency group.
-- `seed-legacy.yml` — one-off `workflow_dispatch`; `python build.py process
-  --from-dir legacy-assets` (admin seeding of the example mods), commit,
-  deploy. Run once after cutover, then delete `legacy-assets/` (SETUP.md
-  step 8).
+- `seed-legacy.yml` — one-off `workflow_dispatch` with required inputs `uid`
+  and `username` (a Discord account); `python build.py process --from-dir
+  legacy-assets --as-uid … --as-username …` (seeding the example mods as that
+  account), commit, deploy. Run once after cutover, then delete
+  `legacy-assets/` (SETUP.md step 8).
 - `deploy-site.yml` — push to `site/**` (a human editing `index.html` /
-  `upload.html` / `config.json`): upload `site/` as the Pages artifact and
+  `config.json`): upload `site/` as the Pages artifact and
   deploy. Bot pushes with `GITHUB_TOKEN` do not trigger it → no loops.
 - `.github/actions/commit-and-deploy/action.yml` — commit
   `site/catalog.json` **only if changed** (scoped `git status --porcelain`
@@ -193,7 +240,10 @@ injected: `handle(request, env, fetch)`.
 - **`POST /discord`** — Interactions endpoint (slash commands over HTTPS;
   **no gateway/WebSocket bot**). Ed25519 signature check required (401
   without). PING→PONG. `/token` mints `mm_` + base64url(32 random bytes);
-  only `sha256(token)` is stored (KV `tok:<hash>`, `user:<discordId>`);
+  only `sha256(token)` is stored (KV `tok:<hash>` → `{discordId, username,
+  createdAt}`, `user:<discordId>`); `username` is the interaction user's
+  account name (`member.user.username`, or `user.username` in a DM — not
+  `global_name`, not the nick);
   one active token per user (a new one invalidates the old); reply is
   ephemeral (flags 64). `/token revoke` deletes both keys (the Worker
   still accepts that subcommand, but the registered command is a bare,
@@ -209,14 +259,22 @@ injected: `handle(request, env, fetch)`.
   411; over 100 MB per part → 413 **before any GitHub call** (the
   free-plan request-body limit); per-user daily **byte** quota (default
   2 GiB) → 429; missing `inbox` release → 503. Two shapes: zip mode
-  (`X-Filename` must end in `.zip`) and raw mode (same `X-Upload-Id` on
-  every upload plus `manifest.json`; filenames `.pak/.ucas/.utoc`), both
+  (`X-Filename` must end in `.zip`) and set mode (same `X-Upload-Id` on
+  every upload plus `manifest.json` (`X-File-Idx: -1`) and the optional
+  `metadata.json` (`X-File-Idx: -2`, single part); filenames
+  `.pak/.ucas/.utoc/.sig` or one `.zip`), both
   **streaming `request.body` straight through** to `uploads.github.com`
   (no buffering, no storage on the Worker), dispatching
   `process-inbox.yml` (`ref: main`) and answering `202 {"status":"queued"}`.
   GitHub failure → 502 without dispatch. CORS: `Access-Control-Allow-Origin`
   = `ALLOWED_ORIGIN` only; allowed headers `Authorization, Content-Type,
   X-Filename, X-Upload-Id, X-File-Idx, X-Part-Idx, X-Part-Count`.
+- **`GET /whoami`** — bearer token → `200 {discordId, username}`, else 401; CORS
+  as for `/upload` (`GET`, `Authorization` in the preflight). A token record
+  **without** `username` (minted before verified authors) gets 401 with a
+  "mint a new one with /token" message on `/whoami` **and** `/upload`.
+  `/upload` stamps every inbox asset name with `<discordId>-<hex username>`
+  (see the inbox flow).
 - KV is eventually consistent — a slightly late quota count is acceptable.
 - Fine-grained `GITHUB_TOKEN` **expires** (max 1 year); expired token →
   502s. Calendar-reminder at creation.
@@ -227,8 +285,10 @@ injected: `handle(request, env, fetch)`.
 
 ## The web page
 
-`site/index.html` is one self-contained page plus one local ES module,
-`site/catalog-lib.js`: no build step, no framework, no CDN, no external JS.
+`site/index.html` is one self-contained page plus local ES modules
+(`catalog-lib.js` for the cards, `upload-*.js`/`modal.js`/`zip-lib.js`/
+`trailer.js` for the upload flow): no build step, no framework, no CDN, no
+external JS.
 It `fetch('catalog.json', {cache:'no-store'})` same-origin at load, reads it
 with `parseCatalog` and renders cards dynamically — **zero mod data in the
 HTML**. ModManager's Browse tab is the reference; the page mirrors it:
@@ -275,33 +335,77 @@ the letter placeholder shows. `file`/`cover` are absolute release URLs;
 cross-origin, but GitHub serves release assets as attachments so downloads
 still start.
 
-`site/upload.html` (same style, no deps) reads `site/config.json`
-(`{"uploadUrl": ...}`) — one value the owner edits after deploying the
-Worker — and shows "upload is not configured yet" while it is a
-placeholder. It accepts a `.zip` **or raw container files**: in raw mode it
-checks the `.utoc` for a metadata trailer with `site/trailer.js` (the
-browser/Node twin of `trailer.py`, plus `appendTrailer` for the "add
-metadata" form the page shows when the trailer is missing — title, author,
-version, game version, description and tag checkboxes; the page is the
-only place a trailer gets written in this flow), checks the loose-file set
-with `classifyRawSet` (the shared package-shape rule), part-splits files
-over 90 MB, uploads the manifest + parts
-through the raw Worker contract, and polls `catalog.json` after a 202.
-Uploads go via `XMLHttpRequest` (progress events). The tag checkboxes come
-from `site/tags.json`, which the deploy steps copy from
-`mod-contract/tags.json` (gitignored; the tag section hides when it is
-missing, e.g. a local preview). Its pure helpers live in
-`site/upload-lib.js` and `site/trailer.js` (loaded as ES modules;
-exercised by `worker/test/*.test.js`).
-**Do not weaken the "no package bytes at render time" rule** for either
-page.
+**Uploading** is a chain of modals on `index.html` (the header's "Upload a
+mod" button; `upload.html` is only a redirect to `index.html#upload`, which
+opens the flow, so old links work). `config.json` (`{"uploadUrl": ...}`, the
+one value the owner edits after deploying the Worker) feeds it; while it is a
+placeholder the button shows "upload is not configured yet". The steps, each
+its own modal in the details lightbox's style (`modal.js`: scrim, panel,
+floating ✕, Esc/scrim close, focus trap; closing any step cancels the whole
+flow; nothing is uploaded before the confirm):
+
+1. **Token** — only when `localStorage` `modcatalog.uploadToken` is empty
+   (from Discord `/token`); later steps have "Use a different token". The
+   token is **validated with `GET /whoami`** (derived from `uploadUrl`,
+   `checkToken` in `upload-lib.js`): on Continue, and for a stored token when
+   the flow starts. A 401 clears the stored token and shows the server's
+   message on the token step; a network/server failure offers "Try again". The
+   result (`{discordId, username}`) lives in the session.
+2. **Package** — drop/pick one `.zip` or the loose `.utoc/.ucas/.pak(+.sig)`
+   (`classifySelection` in `upload-lib.js`). A zip is read **only at its
+   `.utoc`**: `zip-lib.js` slices the End Of Central Directory (ZIP64
+   aware), the central directory and that one member out of the `File`
+   and inflates it with `DecompressionStream('deflate-raw')` — the whole zip
+   is never read; the zip package-shape rule is `classifyMembers`.
+   Loose files: the `.utoc` is read directly. The `.utoc` must be a UE 5.6
+   (v8), non-OnDemand TOC (what the server can write to).
+3. **Metadata editor** (`upload-editor.js`) — ModManager's
+   `DevelopmentEditor` on the web: Title \*, Author \*, Version, Game
+   version, the 160×160 image picker (PNG/JPEG by magic bytes, hard limit
+   4 MiB, over 512 KiB warns and downscales to ≤ 512 px PNG through a
+   canvas; a small ✕ removes the cover, which the app lacks), Description,
+   the read-only Identifier (`Author.Title`, whitespace removed),
+   Tags as toggle chips from `site/tags.json`, and a live preview card (the
+   page's own `renderCard(mod, {preview: true})`). Prefilled from the
+   package's trailer (`trailer.js readTrailer`; no trailer → empty form
+   with the title from the file name; an unreadable one → empty form + a
+   note). **Each field's enabled/forced state is data-driven:**
+   `createEditor({ forced: { author?: string, identifier?: string | (form)
+   => string } })` greys the field and shows/uploads the forced value. The
+   flow passes `forcedFields(identity)`: author = the Discord username,
+   identifier = `{discordId}.{Title, whitespace removed}` updating live with
+   the title; the preview card shows them. **Iff** the package's trailer
+   author differs from the username, a warning line (`authorMismatchNote`)
+   says the catalog will publish it as `<username>` instead. The server
+   enforces the same values regardless of what the page sends. No version-format rules are enforced (the app's
+   `{0-999}.{1-999}` / game-version ranges are app-side), only the trailer's
+   lengths.
+4. **Confirm** — "Upload ‹title› v‹version›?" over the editor (Cancel
+   returns to the editor with the values kept), then the upload: manifest,
+   `metadata.json`, the files part-split at 90 MB, through
+   `XMLHttpRequest` with a progress bar; then it polls `catalog.json`
+   (`findPublishedMod`, new id or changed file/version) for up to ~3
+   minutes. Statuses come from `statusMessage`.
+
+The browser sends the package bytes **unchanged** and never writes a
+trailer; the metadata travels as `metadata.json` (`buildMetadataJson`;
+`image` omitted = keep the package's cover, `null` = remove). The tag chips
+come from `site/tags.json`, which the deploy steps copy from
+`mod-contract/tags.json` (gitignored; the tags section hides when it is
+missing, e.g. a local preview). Pure helpers: `upload-lib.js`, `zip-lib.js`,
+`trailer.js` (exercised by `worker/test/*.test.js`); DOM code:
+`upload-flow.js`, `upload-editor.js`, `modal.js`.
+**Do not weaken the "no package bytes at render time" rule** for the
+page (the upload flow reads only the user's own picked file, never a
+release URL).
 
 ## Adding a mod (the whole flow)
 
 1. Discord: `/token` → copy the token.
-2. Upload the `.zip` (ModManager app against `worker/README.md`'s contract,
-   or `upload.html`). Or, for maintainers: `python build.py process
-   --from-dir <dir>` (admin), or the `seed-legacy` workflow.
+2. Upload the `.zip` or the loose files (ModManager app against
+   `worker/README.md`'s contract, or the page's "Upload a mod" button). Or, for maintainers: `python build.py process
+   --from-dir <dir> --as-uid <id> --as-username <name>`, or the `seed-legacy`
+   workflow.
 3. The `Process inbox` workflow does the rest; the mod appears in the
    catalog within a couple of minutes.
 

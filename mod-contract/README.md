@@ -24,9 +24,9 @@ sync the copy, and make every implementation's conformance tests pass.
 | trailer read/write | C# `io-trailer/` (reference), Python `ModCatalog/trailer.py`, JS `ModCatalog/site/trailer.js` | `io-trailer.Tests/ConformanceTests.cs`, `ModCatalog/tests/test_contract.py`, `ModCatalog/worker/test/contract.test.js` |
 | catalog reading | C# `ModManager/Net/CatalogParser.cs` | `ModManager.Tests/ContractTests.cs` |
 | catalog writing | `ModCatalog/build.py`, `example_server/` | schema checks in `ModCatalog/tests/test_contract.py` |
-| package shape | C# `ModManager/Install/PackageRules.cs`, Python `ModCatalog/build.py`, JS `ModCatalog/site/upload-lib.js` (raw sets) | the same three test files |
-| tags | `ModManager/Models/TagCatalog.cs`, `ModCatalog/build.py`, `ModCatalog/site/upload.html` | `ContractTests.cs`, `test_contract.py` |
-| upload | ModCatalog `worker/`, C# `ModManager/Net/UploadClient.cs`, `site/upload.html` | worker tests, `NetClientTests.cs` |
+| package shape | C# `ModManager/Install/PackageRules.cs`, Python `ModCatalog/build.py`, JS `ModCatalog/site/upload-lib.js` (loose sets), `ModCatalog/site/zip-lib.js` (zips) | the same three test files |
+| tags | `ModManager/Models/TagCatalog.cs`, `ModCatalog/build.py`, `ModCatalog/site/index.html` (upload editor) | `ContractTests.cs`, `test_contract.py` |
+| upload | ModCatalog `worker/`, C# `ModManager/Net/UploadClient.cs`, `site/index.html` (upload modals) | worker tests, `NetClientTests.cs` |
 
 **The C# reference is the arbiter** for the trailer: if it disagrees with a
 fixture, the fixture is wrong.

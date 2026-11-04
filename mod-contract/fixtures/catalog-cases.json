@@ -8,6 +8,7 @@
         "schemaVersion": 1,
         "name": "Canonical Catalog",
         "skipped": 0,
+        "verifiedAuthors": true,
         "mods": [
           {
             "id": "3f2b8c1e-5a4d-4e6f-9b0a-1c2d3e4f5a6b",
@@ -47,6 +48,7 @@
         "schemaVersion": null,
         "name": null,
         "skipped": 0,
+        "verifiedAuthors": false,
         "mods": [
           {
             "id": "AAAA-1",
@@ -86,6 +88,7 @@
         "schemaVersion": 99,
         "name": null,
         "skipped": 4,
+        "verifiedAuthors": false,
         "mods": [
           {
             "id": "keeper",

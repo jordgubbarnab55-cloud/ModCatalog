@@ -21,6 +21,9 @@
         --accent-hover: #3C81E2;
         --accent-active: #1C5EBA;
         --danger: #C22B2B;
+        --danger-text: #F0807A;
+        --warn-text: #E6B450;
+        --ok-text: #4CC38A;
         --scrim: rgba(0, 0, 0, 0.55);
     }
     * { box-sizing: border-box; }
@@ -105,13 +108,13 @@
         text-overflow: ellipsis;
     }
     .meta {
-        display: flex;
-        gap: 6px;
         font-size: 12px;
         color: var(--fg2);
         white-space: nowrap;
         overflow: hidden;
+        text-overflow: ellipsis;
     }
+    .meta > span + span { margin-left: 6px; }
     .desc {
         font-size: 12px;
         color: var(--fg2);
@@ -273,7 +276,7 @@
         border-radius: 12px;
     }
     @media (max-width: 720px) { .filter { width: calc(100% - 32px); } }
-    .chips { overflow-x: auto; }
+    .chips { overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--layer2-hl-border) transparent; }
     .chiprow { display: flex; width: max-content; margin: 0 auto; }
     .chip {
         flex: none;
@@ -324,8 +327,172 @@
         border-radius: 8px;
         padding: 16px;
     }
-    .uploadLink { color: var(--accent); font-size: 12px; text-decoration: none; }
-    .uploadLink:hover { color: var(--accent-hover); }
+
+    .uploadBtn {
+        padding: 7px 14px;
+        border: 0;
+        border-radius: 4px;
+        background: var(--accent);
+        color: #fff;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+    .uploadBtn:hover { background: var(--accent-hover); }
+    .uploadBtn:active { background: var(--accent-active); }
+    .uploadBtn:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 2px; }
+
+    /* Upload modals: the details lightbox's scrim and panel, as a chain of steps */
+    .modal {
+        position: relative;
+        flex: none;
+        width: min(var(--modal-w, 480px), 100%);
+        margin: auto;
+        padding: 20px;
+        background: var(--layer2);
+        border: 1px solid var(--layer2-border);
+        border-radius: 8px;
+    }
+    .modal.wide { --modal-w: 760px; padding: 16px; }
+    .modal.small { --modal-w: 420px; }
+    .modal h2 { margin: 0 36px 8px 0; font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+    .modal p { margin: 0 0 12px; font-size: 12px; line-height: 1.5; color: var(--fg2); }
+    .modal .lbx-close { z-index: 2; }
+    .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .field > label { font-size: 12px; color: var(--fg2); }
+    .input {
+        width: 100%;
+        min-width: 0;
+        padding: 7px 10px;
+        border: 1px solid var(--layer2-border);
+        border-radius: 4px;
+        background: var(--layer3);
+        color: var(--fg);
+        font: inherit;
+        font-size: 13px;
+    }
+    .input:hover { background: var(--layer3-hl); }
+    .input:focus { border-color: var(--accent); outline: none; }
+    .input::placeholder { color: var(--fg3); }
+    .input:disabled, .input[readonly] { opacity: 0.65; }
+    .input:disabled:hover, .input[readonly]:hover { background: var(--layer3); }
+    textarea.input { min-height: 64px; resize: vertical; }
+    .btn {
+        padding: 7px 16px;
+        border: 1px solid var(--layer2-border);
+        border-radius: 4px;
+        background: var(--layer2-hl);
+        color: var(--fg);
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+    }
+    .btn:hover:not(:disabled) { background: var(--layer2-hl-border); }
+    .btn.primary { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 600; }
+    .btn.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+    .btn:disabled { opacity: 0.5; cursor: default; }
+    .btn:focus-visible, .linkbtn:focus-visible, .dropzone:focus-visible, .ed-image:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 2px; }
+    .linkbtn { padding: 0; border: 0; background: none; color: var(--accent-hover); font: inherit; font-size: 12px; cursor: pointer; text-decoration: underline; }
+    .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px 12px; margin-top: 16px; }
+    .actions .spacer { margin-right: auto; }
+    .dropzone {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        padding: 28px 16px;
+        border: 1px dashed var(--layer2-hl-border);
+        border-radius: 8px;
+        background: var(--layer3);
+        color: var(--fg2);
+        font-size: 13px;
+        text-align: center;
+        cursor: pointer;
+    }
+    .dropzone strong { color: var(--fg); font-weight: 600; }
+    .dropzone:hover, .dropzone.over { border-color: var(--accent); background: var(--layer3-hl); }
+    .pkg-info { min-height: 18px; margin-top: 10px; font-size: 12px; color: var(--fg2); overflow-wrap: anywhere; }
+    .pkg-info.err, .upload-status.err, .ed-msg.err { color: var(--danger-text); }
+    .pkg-info.ok, .upload-status.ok { color: var(--ok-text); }
+    .progress { height: 6px; margin: 12px 0 8px; border-radius: 3px; background: var(--layer3); overflow: hidden; }
+    .progress > div { width: 0; height: 100%; background: var(--accent); transition: width 120ms; }
+    .upload-status { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+
+    /* Metadata editor: mirrors ModManager's DevelopmentEditor */
+    .ed { display: flex; flex-direction: column; gap: 12px; }
+    .ed-preview {
+        display: flex;
+        justify-content: center;
+        padding: 12px;
+        border: 1px solid var(--layer2-border);
+        border-radius: 8px;
+        background-color: var(--layer2-hl);
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='170' height='90'%3E%3Ctext x='85' y='50' text-anchor='middle' transform='rotate(-18 85 45)' font-family='sans-serif' font-size='15' font-weight='700' fill='%23ffffff' fill-opacity='0.07'%3EPREVIEW%3C/text%3E%3C/svg%3E");
+    }
+    .ed-preview .card { width: 420px; max-width: 100%; }
+    .card.preview { cursor: default; pointer-events: none; }
+    .card.preview:hover { background: var(--layer2); border-color: var(--layer2-border); }
+    .ed-note { margin: 0; padding: 8px 10px; border-radius: 4px; background: var(--layer3); font-size: 12px; color: var(--fg2); }
+    .ed-note.warn { color: var(--warn-text); }
+    .ed-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) 160px; gap: 8px 12px; }
+    .ed-grid > .field:nth-child(1) { grid-column: 1; grid-row: 1; }
+    .ed-grid > .field:nth-child(2) { grid-column: 2; grid-row: 1; }
+    .ed-versions { grid-column: 3; grid-row: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-width: 0; }
+    .ed-desc { grid-column: 1 / span 3; grid-row: 2 / span 2; }
+    .ed-desc textarea { height: 64px; }
+    .ed-image {
+        position: relative;
+        grid-column: 4;
+        grid-row: 1 / span 3;
+        align-self: center;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: space-between;
+        width: 160px;
+        height: 160px;
+        padding: 8px;
+        overflow: hidden;
+        border: 1px dashed var(--layer2-hl-border);
+        border-radius: 8px;
+        background: var(--layer3);
+        color: var(--fg2);
+        font-size: 12px;
+        cursor: pointer;
+    }
+    .ed-image:hover, .ed-image.over { border-color: var(--accent); background: var(--layer3-hl); }
+    .ed-image .icon { color: var(--accent-hover); }
+    .ed-image .icon svg { display: block; width: 48px; height: 48px; }
+    .ed-image img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+    .ed-image .label, .ed-image .info { position: relative; }
+    .ed-image .info { margin-top: auto; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, 0.55); color: var(--fg); }
+    .ed-image-clear {
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        z-index: 1;
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: 0;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.55);
+        color: var(--fg);
+        font-size: 12px;
+        cursor: pointer;
+    }
+    .ed-image-clear:hover { background: var(--danger); }
+    .ed-msg { margin: -4px 0 0; min-height: 0; font-size: 12px; }
+    .ed-msg.warn { color: var(--warn-text); }
+    .ed-chips { display: flex; flex-wrap: wrap; gap: 6px 0; }
+    .ed-chips .chip:disabled { opacity: 0.6; cursor: default; }
+    @media (max-width: 760px) {
+        .modal, .modal.wide { padding: 16px; }
+        .ed-grid { grid-template-columns: minmax(0, 1fr); }
+        .ed-grid > .field:nth-child(1), .ed-grid > .field:nth-child(2), .ed-versions, .ed-desc { grid-column: 1; grid-row: auto; }
+        .ed-image { grid-column: 1; grid-row: auto; justify-self: center; }
+    }
 </style>
 </head>
 <body>
@@ -334,7 +501,7 @@
         <h1 id="catName">Mod Catalog</h1>
         <p class="sub" id="catDesc"></p>
         <p class="count" id="catCount"></p>
-        <p><a class="uploadLink" href="upload.html">Upload a mod</a></p>
+        <p><button type="button" class="uploadBtn" id="uploadBtn">Upload a mod</button></p>
     </header>
     <div class="grid" id="grid"></div>
 </div>
@@ -353,6 +520,8 @@
         parseCatalog, sanitizeTags, formatBytes, singleLine, metaParts,
         fileNameOf, placeholder, matches,
     } from './catalog-lib.js';
+    import { createUploadFlow } from './upload-flow.js';
+    import { configOk } from './upload-lib.js';
 
     const INBOX_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -396,11 +565,13 @@
         return box;
     }
 
-    function renderCard(mod) {
-        const card = h('div', 'card');
-        card.tabIndex = 0;
-        card.setAttribute('role', 'button');
-        card.setAttribute('aria-label', 'Details for ' + mod.name);
+    function renderCard(mod, { preview = false } = {}) {
+        const card = h('div', preview ? 'card preview' : 'card');
+        if (!preview) {
+            card.tabIndex = 0;
+            card.setAttribute('role', 'button');
+            card.setAttribute('aria-label', 'Details for ' + mod.name);
+        }
 
         const info = h('div', 'info');
         info.append(h('div', 'title', mod.name), metaLine('meta', mod), h('div', 'desc', singleLine(mod.description)));
@@ -417,6 +588,12 @@
         right.appendChild(stack);
 
         card.append(coverBox('cover', mod), info, right);
+        if (preview) {
+            dl.removeAttribute('href');
+            dl.removeAttribute('download');
+            dl.setAttribute('aria-hidden', 'true');
+            return card;
+        }
         card.addEventListener('click', (e) => {
             if (!e.target.closest('.dlbtn')) openDetails(mod, card);
         });
@@ -549,12 +726,43 @@
         }
     }
 
+    const vocabularyPromise = loadVocabulary();
+
+    // config.json holds the upload Worker's URL; null while it is a placeholder
+    let uploadUrl = null;
+    const configPromise = fetch('config.json', { cache: 'no-store' })
+        .then((res) => res.json())
+        .then((cfg) => { uploadUrl = configOk(cfg && cfg.uploadUrl) ? cfg.uploadUrl : null; })
+        .catch(() => {});
+
+    const flow = createUploadFlow({
+        uploadUrl: () => uploadUrl,
+        vocabulary: () => vocabularyPromise,
+        renderCard,
+        fetchMods: async () => {
+            const res = await fetch('catalog.json', { cache: 'no-store' });
+            if (!res.ok) throw new Error('catalog.json: HTTP ' + res.status);
+            const data = await res.json();
+            return Array.isArray(data) ? data : data.mods || [];
+        },
+    });
+    const uploadBtn = document.getElementById('uploadBtn');
+    uploadBtn.addEventListener('click', async () => {
+        await configPromise;
+        flow.start(uploadBtn);
+    });
+    // upload.html redirects here (#upload) so old links open the flow
+    if (location.hash === '#upload') {
+        history.replaceState(null, '', location.pathname + location.search);
+        configPromise.then(() => flow.start(uploadBtn));
+    }
+
     (async function main() {
         try {
             const catalogUrl = new URL('catalog.json', location.href);
             const [res, vocabulary] = await Promise.all([
                 fetch(catalogUrl, { cache: 'no-store' }),
-                loadVocabulary(),
+                vocabularyPromise,
             ]);
             if (!res.ok) throw new Error('catalog.json: HTTP ' + res.status);
             const doc = parseCatalog(await res.json(), catalogUrl.href);

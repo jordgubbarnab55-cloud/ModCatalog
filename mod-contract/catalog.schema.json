@@ -9,6 +9,7 @@
     "schemaVersion": { "type": "integer", "const": 1 },
     "name": { "type": "string" },
     "description": { "type": "string" },
+    "verifiedAuthors": { "type": "boolean" },
     "mods": { "type": "array", "items": { "$ref": "#/$defs/mod" } }
   },
   "additionalProperties": true,

@@ -9,11 +9,13 @@ A public mod catalog and upload system, running entirely on free tiers:
 2. **Manifest** — `catalog.json` (served from Pages at the same base URL),
    the same catalog schema ModManager's Browse tab speaks.
 3. **Uploads** — Discord `/token` mints a personal token; the ModManager app
-   or the static page (`upload.html`) then POSTs the package to the Worker,
+   or the web page's upload dialog (`index.html`) then POSTs the package to the Worker,
    which streams it into a GitHub **release** (the storage), and a workflow
    validates, publishes, and redeploys the catalog. You can upload a ready-made
    `.zip` **or the raw container files** (`.utoc`/`.ucas`/`.pak`, part-split
-   when a file is over 100 MB) — the workflow zips the set on the runner. The
+   when a file is over 100 MB) plus optional metadata — the browser sends the
+   package unchanged and the workflow writes the metadata trailer and zips the
+   set on the runner. The
    web page even writes the `.utoc` metadata trailer for you if it's missing.
 
 ## The release assets are the source of truth
@@ -47,14 +49,17 @@ Pages.
 ## Adding a mod
 
 1. In Discord, run **`/token`** and copy the token it shows (treat it like
-   a password; `/token` again replaces it, `/token revoke` kills it).
+   a password; `/token` again replaces it, `/token revoke` kills it). The
+   token carries your Discord username, which becomes the mods' author; a
+   token minted before that was recorded is rejected — mint a new one.
 2. Upload it — either as a `.zip` or as the raw container files
    (`.utoc`/`.ucas`/`.pak`), from ModManager's upload flow (against the
    Worker API documented in `worker/README.md`) or from the web page at
-   `<catalog URL>/upload.html` (paste the token, pick the file(s)). Raw
-   files over 100 MB are automatically part-split by the client. If your
-   `.utoc` has no metadata trailer, the web page offers a form and writes
-   the trailer for you before upload.
+   `<catalog URL>` ("Upload a mod": paste the token once, pick the package,
+   edit the metadata, confirm). Files over 100 MB are automatically
+   part-split by the client. The page's editor prefills from the package's
+   metadata trailer (or starts empty) and the catalog writes your edited
+   metadata into the stored package.
 3. That's it — the `Process inbox` workflow runs within a minute and the
    mod appears in the catalog.
 
@@ -64,6 +69,8 @@ per-asset limit, and the daily quota is **2 GiB per user**;
 **versions are immutable** (re-uploading a `name-version` you already
 published is rejected; publish a new version instead). The first uploader of a mod's GUID becomes its owner; uploads by
 anyone else are rejected (admins from `ADMIN_DISCORD_IDS` bypass this).
+The author shown is always your Discord **username**, whatever the package
+says: the catalog rewrites the stored trailer's `author` and `identifier`.
 
 ## Files
 
@@ -73,8 +80,11 @@ trailer.py                stdlib read/write/validate for the .utoc trailer forma
 make_examples.py          dev tool: builds sample packages from a real UE pair
 site/
     index.html            the GitHub Pages site (renders catalog.json)
-    upload.html           the static upload page (no deps)
-    upload-lib.js         pure helpers behind upload.html (node --test-able)
+    upload.html           redirect to index.html#upload (old links)
+    upload-flow.js        the upload modals (token, package, editor, confirm)
+    upload-editor.js      the metadata editor (ModManager's, on the web)
+    modal.js              modal helper; zip-lib.js: reads a zip's .utoc only
+    upload-lib.js         pure helpers behind the flow (node --test-able)
     config.json           {"uploadUrl": "<worker url>"} — set once after deploy
     catalog.json          generated manifest — do not edit
 worker/                   Cloudflare Worker: Discord /token + streaming /upload
@@ -93,14 +103,14 @@ Top level: `{ "name", "description", "mods": [ ... ] }`. Each mod entry
 |---------------|---------------------------------------------------------------|
 | `id`          | The trailer GUID (stable identity across versions)            |
 | `name`        | Trailer title                                                 |
-| `author`      | Trailer author (self-declared display text, **not** verified) |
+| `author`      | The uploader's Discord username, **verified** (the catalog sets `"verifiedAuthors": true`); follows renames on the owner's uploads |
 | `version`     | Trailer version (shown as `v{version}`)                       |
 | `description` | Trailer description                                           |
 | `file`        | Stable release-asset URL of the package (a `.zip`)           |
 | `size`        | Package size in bytes                                         |
 | `cover`       | Stable release-asset URL of the cover image (if the trailer has one) |
 | `sha256`      | SHA-256 of the package zip                                    |
-| `uploader`    | The Discord user id of the owner (or null for admin-seeded)   |
+| `uploader`    | The Discord user id of the owner                              |
 | `updated`     | ISO-8601 UTC timestamp of the newest upload                   |
 
 `file`/`cover` are absolute GitHub release URLs; they 302-redirect to

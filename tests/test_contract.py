@@ -27,7 +27,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import schema_check  # noqa: E402
 import sync  # noqa: E402
 
-from test_build import Base, fake_toc, make_package  # noqa: E402
+from test_build import Base, S, fake_toc, make_package  # noqa: E402
 
 
 def load(name: str):
@@ -124,7 +124,7 @@ class TestCatalogContract(Base):
     def test_generated_catalog_carries_tags_and_game_version(self):
         guid = str(uuid.uuid4())
         make_package(self.root / "a.zip", guid=guid, tags=["skin", "Bogus", "VFX"], game_version="5.6.1")
-        self.to_inbox(self.root / "a.zip", "12345", "12345__1__a.zip")
+        self.to_inbox(self.root / "a.zip", "12345", f"{S('12345')}__1__a.zip")
         self.assertEqual(self.run_process()["ok"], 1)
         data = json.loads(self.catalog.read_text(encoding="utf-8"))
         self.assertEqual(schema_check.validate_catalog(data), [])
@@ -136,7 +136,7 @@ class TestCatalogContract(Base):
     def test_empty_tags_and_game_version_are_omitted(self):
         guid = str(uuid.uuid4())
         make_package(self.root / "a.zip", guid=guid)
-        self.to_inbox(self.root / "a.zip", "12345", "12345__1__a.zip")
+        self.to_inbox(self.root / "a.zip", "12345", f"{S('12345')}__1__a.zip")
         self.run_process()
         entry = self.catalog_mods()[guid]
         self.assertNotIn("tags", entry)

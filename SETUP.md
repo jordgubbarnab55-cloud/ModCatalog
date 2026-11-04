@@ -36,10 +36,14 @@ because moving `index.html` into `site/` breaks the old Pages build.
    - Settings → Secrets and variables → Actions → *Variables* → add
      `ADMIN_DISCORD_IDS` = your Discord user id (step 1; comma-separated
      for several admins).
-6. **Actions tab → run `Seed legacy mods` once.** It treats the zips in
-   `legacy-assets/` as admin uploads: creates the `inbox` release, the
-   three `mod-<guid>` releases (with covers), writes `site/catalog.json`
-   and deploys Pages.
+6. **Actions tab → run `Seed legacy mods` once.** It asks for a Discord
+   **user id** and **username** (yours: they own the seeded mods, and the
+   username is published as their author — every package in the catalog
+   belongs to a verified account). It treats the zips in `legacy-assets/` as
+   uploads by that account: creates the `inbox` release, the three
+   `mod-<guid>` releases (with covers), writes `site/catalog.json` and
+   deploys Pages. (Locally: `python build.py process --from-dir legacy-assets
+   --as-uid <id> --as-username <name>`; it refuses to run without both.)
 7. **Verify.**
    - Open `https://jordgubbarnab55-cloud.github.io/ModCatalog/` — the three
      cards and covers show; a download starts (the `download` attribute is
@@ -102,7 +106,7 @@ because moving `index.html` into `site/` breaks the old Pages build.
     minutes. Also try:
     - a file **over 100 MB** → should get `413`;
     - a **wrong token** → should get `401`;
-    - an upload from `<catalog URL>/upload.html` (the page should report
+    - an upload through "Upload a mod" on `<catalog URL>` (the dialog should report
       it in the catalog within ~3 minutes of the 202).
     - If a ~90 MB upload fails with a CPU-time error, report it to the
       maintainers before changing anything (free-plan CPU limit, 10 ms).

@@ -14,18 +14,26 @@ Cloudflare Worker (free plan) that does two things:
    interaction, then a `POST /interactions/{id}/{token}/callback`
    with `{type: 4, data: {content, flags}}` (the 3 s budget covers the
    ACK only; the callback token is valid 15 min). Only the SHA-256 of
-   the token is stored (in Workers KV).
+   the token is stored (in Workers KV), next to the account's Discord id and
+   **`username`** (the account name — not the display name or the server
+   nickname — read from the interaction's `member.user`, or `user` in a DM).
+   The catalog publishes mods under that username (verified authors, below).
 2. **Upload API** — `POST /upload` takes a bearer token + raw zip body and
    **streams it straight through** to the `inbox` release on GitHub
    (no buffering, no storage — the Worker holds no file bytes), then
    dispatches the `process-inbox` workflow as a wake-up.
+3. **`GET /whoami`** — bearer token → `200 {"discordId", "username"}`; the web
+   page uses it to validate a token and to show the author name the upload
+   will carry. `401 {"error"}` for a missing / unknown / revoked token **and**
+   for a token minted before usernames were recorded (message: mint a new one
+   with `/token`); such a token is also rejected on `/upload`.
 
 Plain JavaScript ES modules, **zero runtime dependencies**. Tests run with
 bare Node (no install needed):
 
 ```
 cd worker
-node --test        # 47 offline tests: fake KV, injected fetch, Ed25519 keypair
+node --test        # offline tests: fake KV, injected fetch, Ed25519 keypair
 ```
 
 ## Deploy (owner, brief)
@@ -75,20 +83,22 @@ X-Filename: <name>.zip          # required, must end in .zip
 <body: the raw zip bytes>
 ```
 
-### Shape 2 — raw container files (no client-side zipping)
+### Shape 2 — an upload set (no client-side zipping or trailer writing)
 
-Send the `.utoc` / `.ucas` / `.pak` (+ optional `.sig`) files directly (the workflow zips them
-on the runner). Each file goes through the same endpoint, **part-split into
-≤ 90 MB slices when a file is over 100 MB** (7z-style contiguous slices —
-plain byte chunks, concatenated = the original file). Every upload of the
-set carries the same `X-Upload-Id`, plus the set's `manifest.json` upload:
+Send the `.utoc` / `.ucas` / `.pak` (+ optional `.sig`) files **or exactly one
+`.zip`** directly, plus optional metadata (the workflow writes the trailer
+and zips the set on the runner). Each file goes through the same endpoint,
+**part-split into ≤ 90 MB slices when a file is over 100 MB** (7z-style
+contiguous slices — plain byte chunks, concatenated = the original file).
+Every upload of the set carries the same `X-Upload-Id`, plus the set's
+`manifest.json` upload (and the optional `metadata.json`):
 
 ```
 POST <worker-url>/upload
 Authorization: Bearer <token from /token>
 X-Upload-Id: <uuid>            # one per set; switches the Worker into raw mode
-X-Filename: <file name>        # .pak/.ucas/.utoc/.sig, or "manifest.json"
-X-File-Idx:  <i>               # 0-based file index ("-1" = the manifest)
+X-Filename: <file name>        # .pak/.ucas/.utoc/.sig or .zip, "manifest.json", "metadata.json"
+X-File-Idx:  <i>               # 0-based file index ("-1" = the manifest, "-2" = metadata.json)
 X-Part-Idx:  <j>
 X-Part-Count: <n>
 Content-Length: (required)
@@ -99,20 +109,32 @@ Content-Length: (required)
 `X-Part-Count: 1`):
 
 ```json
-{ "files": [ { "name": "mod.utoc", "sha256": "<hex of the FULL file>", "parts": 2 } ] }
+{
+  "files": [ { "name": "mod.utoc", "sha256": "<hex of the FULL file>", "parts": 2 } ],
+  "metadata": { "sha256": "<hex of metadata.json>" }
+}
 ```
 
 The `sha256` is of the full, reassembled file (the workflow verifies it).
 Order the `files` entries the way you want them inside the package zip.
+`metadata` is present only when a `metadata.json` upload follows
+(`X-File-Idx: -2`, `X-Part-Idx: 0`, `X-Part-Count: 1`, one request); its body
+is the trailer metadata (`title`, `author`, `description`, `version`,
+`game_version`, `tags`, optional `guid`, optional `image`; schema and
+semantics in `mod-contract/upload.md`). The workflow validates it with the
+trailer's limits, writes it into the `.utoc` and rejects the set when it is
+invalid or its `guid` is not the package's. A set without metadata keeps its
+package's own fields, except that `author` and `identifier` are always forced
+to the uploader's verified values.
 
 | Status | Meaning |
 |--------|---------|
 | `202`  | Queued. Body was streamed to the `inbox` release and the processing workflow was woken. The mod appears in `catalog.json` within a few minutes (raw sets: after all parts arrive). |
-| `401`  | Missing / unknown / revoked token. |
+| `401`  | Missing / unknown / revoked token, or one minted before usernames were recorded (mint a new one). |
 | `411`  | `Content-Length` header missing (required). |
 | `413`  | A single upload over 100 MB (Cloudflare free-plan request-body limit) — split the file into parts. |
 | `429`  | Daily per-user byte quota exceeded (default 2 GiB/day, UTC). |
-| `400`  | Bad name/headers (zip mode: not a .zip; raw mode: not .pak/.ucas/.utoc/.sig, or bad part/manifest headers). |
+| `400`  | Bad name/headers (zip mode: not a .zip; set mode: not .pak/.ucas/.utoc/.sig/.zip, or bad part/manifest/metadata headers). |
 | `502`  | GitHub failed (token wrong/expired, or upload/dispatch error). Nothing was stored; do not retry blindly — check the token. |
 | `503`  | The `inbox` release does not exist yet; run the Seed legacy mods (or Process inbox) workflow once. |
 
@@ -123,19 +145,30 @@ Notes:
 - **The 100 MB limit is per upload (one part); the final package may be up
   to GitHub's per-asset limit (2 GiB)** — that is the whole point of raw
   file sets. Zip mode keeps the 100 MB per-package cap.
-- Raw sets: the `process-inbox` workflow waits for the complete set
-  (manifest + every part), reassembles on the runner, verifies the
-  per-file sha256, zips the set, then validates and re-homes as usual.
+- Sets: the `process-inbox` workflow waits for the complete set
+  (manifest + every part + the declared metadata), reassembles on the
+  runner, verifies the per-file sha256, writes the metadata trailer, zips
+  the set, then validates and re-homes as usual.
   Stalled sets are swept after 7 days.
 - The response and CORS headers are safe for both the native app (no
   `Origin` sent) and a web page: `Access-Control-Allow-Origin` is the
   `ALLOWED_ORIGIN` var only; allowed headers are
   `Authorization, Content-Type, X-Filename, X-Upload-Id, X-File-Idx,
   X-Part-Idx, X-Part-Count` (extra headers are accepted by the Worker).
-- Asset names in the inbox are `<discordId>__<ts>__<safe-filename>.zip`
-  (zip mode) or `<discordId>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>`
-  + `<discordId>__<uploadId>__manifest.json` (raw mode); the workflow reads
-  the real GUID out of the package and re-homes it.
+- Asset names in the inbox start with the **uploader stamp**
+  `<discordId>-<hex>`, where `<hex>` is the lowercase hex of the UTF-8 bytes of
+  the token's username (hex survives `sanitizeFilename` and the `__` split for
+  any account name). The Worker builds it from the token record — no request
+  header can set it. So: `<stamp>__<ts>__<safe-filename>.zip` (zip mode) or
+  `<stamp>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>` +
+  `<stamp>__<uploadId>__manifest.json` (+ `…__metadata.json`) (set mode); the
+  workflow reads the real GUID out of the package and re-homes it. A `__`
+  inside a file name is collapsed to `_` (it separates the fields). Names
+  without a valid stamp are ignored by the workflow.
+- **Verified authors**: the workflow rewrites every accepted package's trailer
+  with `author` = that username and `identifier` = `<discordId>.<Title without
+  whitespace>`, whatever the package or `metadata.json` says (see
+  `mod-contract/upload.md`).
 
 ### Minimum GitHub token permissions (for `GITHUB_TOKEN`)
 
@@ -148,10 +181,10 @@ Notes:
 
 ## Test status
 
-`node --test` (47 tests) is fully green offline: Discord signature
+`node --test` is fully green offline: Discord signature
 verification (valid/invalid/missing/wrong key), PING/PONG, token minting /
 replacement / revocation (only hashes stored), the upload path
-(401/411/413/400/429/503, happy path with the **same stream object**
+(401/411/413/400/429/503, upload sets incl. `.zip` and `metadata.json`, happy path with the **same stream object**
 forwarded to GitHub, 502-without-dispatch on GitHub failure, CORS
 preflight), and the command-registration script (bulk-PUT payload shape,
 per-guild 403 isolation, `--retire-global` ordering, delete-404

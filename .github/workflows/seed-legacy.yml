@@ -1,14 +1,22 @@
 name: Seed legacy mods
 
-# One-off: treats the packages in legacy-assets/ as ADMIN uploads (no
-# uploader id), which creates the `inbox` release convention, the three
-# `mod-<guid>` releases and the first site/catalog.json, then deploys Pages.
-# Run it once by hand after the cutover; the legacy-assets/ directory is
-# deleted in a follow-up commit (see SETUP.md). Shares the `catalog`
+# One-off: treats the packages in legacy-assets/ as uploads by the Discord
+# account given in the inputs (that account becomes their owner and its
+# username their author), which creates the `inbox` release convention, the
+# three `mod-<guid>` releases and the first site/catalog.json, then deploys
+# Pages. Run it once by hand after the cutover; the legacy-assets/ directory
+# is deleted in a follow-up commit (see SETUP.md). Shares the `catalog`
 # concurrency group.
 
 on:
   workflow_dispatch:
+    inputs:
+      uid:
+        description: "Discord user id (digits) that owns the seeded mods"
+        required: true
+      username:
+        description: "That account's Discord username (published as the author)"
+        required: true
 
 permissions:
   contents: write
@@ -24,6 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+      AS_UID: ${{ inputs.uid }}
+      AS_USERNAME: ${{ inputs.username }}
     steps:
       - uses: actions/checkout@v4
 
@@ -32,7 +42,7 @@ jobs:
           python-version: "3.12"
 
       - name: Seed the example mods
-        run: python build.py process --from-dir legacy-assets
+        run: python build.py process --from-dir legacy-assets --as-uid "$AS_UID" --as-username "$AS_USERNAME"
 
       - name: Commit catalog + deploy Pages
         uses: ./.github/actions/commit-and-deploy
