@@ -28,6 +28,21 @@
     }
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
+    /* Themed scrollbars everywhere (Adonis palette), replacing the native ones */
+    * {
+        scrollbar-width: thin;
+        scrollbar-color: var(--layer2-hl-border) transparent;
+    }
+    *::-webkit-scrollbar { width: 8px; height: 8px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    *::-webkit-scrollbar-corner { background: transparent; }
+    *::-webkit-scrollbar-thumb {
+        background: var(--layer2-hl-border);
+        border-radius: 4px;
+        transition: background-color 120ms ease;
+    }
+    *::-webkit-scrollbar-thumb:hover { background: var(--fg3); }
+    @media (prefers-reduced-motion: reduce) { *::-webkit-scrollbar-thumb { transition: none; } }
     body {
         margin: 0;
         background: var(--layer0);
@@ -293,7 +308,7 @@
         border-radius: 12px;
     }
     @media (max-width: 720px) { .filter { width: calc(100% - 32px); } }
-    .chips { overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--layer2-hl-border) transparent; }
+    .chips { overflow-x: auto; }
     .chiprow { display: flex; width: max-content; margin: 0 auto; }
     .chip {
         flex: none;
@@ -394,7 +409,7 @@
     .input::placeholder { color: var(--fg3); }
     .input:disabled, .input[readonly] { opacity: 0.65; }
     .input:disabled:hover, .input[readonly]:hover { background: var(--layer3); }
-    textarea.input { min-height: 64px; resize: none; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--layer2-hl-border) transparent; }
+    textarea.input { min-height: 64px; resize: none; overflow-y: auto; }
     .btn {
         padding: 7px 16px;
         border: 1px solid var(--layer2-border);
