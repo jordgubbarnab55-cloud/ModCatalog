@@ -205,6 +205,7 @@
         border-radius: 7px 7px 4px 4px;
         overflow: hidden;
         background: var(--layer3);
+        container-type: inline-size;
     }
     .card.grid .gmedia img, .card.grid .gmedia .letter {
         position: absolute;
@@ -213,7 +214,17 @@
         height: 100%;
         object-fit: cover;
     }
-    .card.grid .gmedia .letter { font-size: 44px; }
+    .card.grid .gmedia .letter {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 34cqw;
+        line-height: 1;
+        font-weight: 700;
+        color: #fff;
+    }
+    .card.grid .gbody { position: relative; }
+    .card.grid .title { font-size: 15px; }
     .card.grid .tm { display: flex; flex-direction: column; gap: 2px; }
     .card.grid .gfoot { display: flex; align-items: center; gap: 8px; }
     .card.grid .gtags { flex: 1; display: flex; flex-wrap: nowrap; overflow: hidden; }
@@ -250,6 +261,7 @@
         color: #fff;
         font-size: 13px;
         font-weight: 600;
+        text-decoration: none;
         opacity: 0;
         transition: opacity 160ms ease, background 80ms;
         pointer-events: none;
@@ -775,7 +787,9 @@
             const tm = h('div', 'tm');
             tm.append(h('div', 'title', mod.name), metaLine('meta', mod));
             const twrap = h('div', 'gtags');
-            for (const tag of mod.tags) twrap.appendChild(h('span', 'tag', tag));
+            const shown = mod.tags.slice(0, 2);
+            for (const tag of shown) twrap.appendChild(h('span', 'tag', tag));
+            if (mod.tags.length > shown.length) twrap.appendChild(h('span', 'tag', '+' + (mod.tags.length - shown.length)));
             const foot = h('div', 'gfoot');
             foot.appendChild(twrap);
             const cap = h('div', 'gcap');
