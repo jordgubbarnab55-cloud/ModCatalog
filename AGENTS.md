@@ -329,7 +329,10 @@ HTML**. ModManager's Browse tab is the reference; the page mirrors it:
 - **Filter panel** (`FilterBar` + `SearchBox`): floating, bottom-centred,
   50% of the window; chips `All` + one per tag of `site/tags.json`
   (OR-combined; hidden when `tags.json` is missing), a search box matching
-  name/author/description/tags. The header count reads `N of M shown`
+  name/author/description/tags — the query splits on whitespace and
+  **every word** must appear in one of those (case-insensitive), so e.g.
+  `uncool galaxy` finds `Galaxy Lockers` by `uncool_1234`. The header
+  count reads `N of M shown`
   while a filter is active. Catalog tags are cleaned with `sanitizeTags`
   against the same vocabulary (unknown tags dropped, as the app does).
 - **`catalog-lib.js`** holds every pure helper (`parseCatalog` — the

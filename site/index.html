@@ -401,11 +401,11 @@
         border: 1px solid var(--layer2-border);
         border-radius: 12px;
     }
-    @media (max-width: 720px) { .filter { width: calc(100% - 32px); } .search { width: 100%; } }
+    @media (max-width: 720px) { .filter { width: calc(100% - 32px); } }
     .mode { display: flex; flex: none; }
     .modebtn {
-        width: 34px;
-        height: 34px;
+        width: 40px;
+        height: 40px;
         padding: 0;
         display: flex;
         align-items: center;
@@ -423,6 +423,25 @@
     .modebtn[aria-pressed="true"]:hover { background: var(--accent-hover); }
     .modebtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
     .modebtn svg { width: 18px; height: 18px; }
+    .filterbtn {
+        width: 80px;
+        height: 40px;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        border: 1px solid var(--layer2-border);
+        border-radius: 8px;
+        background: var(--layer2-hl);
+        color: var(--fg2);
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+    }
+    .filterbtn:hover { background: var(--layer2-hl-border); color: var(--fg); }
+    .filterbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .filterbtn svg { width: 18px; height: 18px; flex: none; }
     .chips { flex: 1 1 auto; min-width: 0; overflow-x: auto; }
     .chiprow { display: flex; width: max-content; margin: 0 auto; }
     .chip {
@@ -441,7 +460,7 @@
     .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
     .chip[aria-pressed="true"]:hover { background: var(--accent-hover); }
     .chip:focus-visible, .search input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-    .search { position: relative; flex: none; width: 240px; }
+    .search { position: relative; flex: 1 1 auto; min-width: 0; }
     .search svg {
         position: absolute;
         left: 14px;
@@ -673,6 +692,7 @@
     <div class="grid" id="grid"></div>
 </div>
 <div class="filter" id="filter" hidden>
+    <div class="chips" id="chips" hidden><div class="chiprow" id="chiprow"></div></div>
     <div class="mode" role="group" aria-label="Card layout">
         <button type="button" class="modebtn" data-mode="list" title="List" aria-label="List view" aria-pressed="true">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -689,14 +709,20 @@
             </svg>
         </button>
     </div>
-    <div class="chips" id="chips" hidden><div class="chiprow" id="chiprow"></div></div>
     <div class="search">
-        <input id="search" type="search" placeholder="Search mods and tags…" aria-label="Search mods and tags" autocomplete="off">
+        <input id="search" type="search" placeholder="Search by name, author or description…" aria-label="Search by name, author or description" autocomplete="off">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/>
         </svg>
     </div>
+    <button type="button" class="filterbtn" title="Filter">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/>
+        </svg>
+        <span>Filter</span>
+    </button>
 </div>
 <script type="module">
     import {

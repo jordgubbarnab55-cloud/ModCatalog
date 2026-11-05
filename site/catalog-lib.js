@@ -298,19 +298,19 @@ export function placeholder(mod) {
 }
 
 /**
- * FilterViewModel.Matches: any selected tag (OR; none = all), then the trimmed
- * query as a case-insensitive substring of name, author, description or a tag.
+ * Any selected tag (OR; none = all), then the query as whitespace-separated
+ * words (case-insensitive): every word must appear as a substring of the name,
+ * author, description or one of the tags (e.g. "uncool galaxy" finds a mod
+ * named "Galaxy Lockers" by author "uncool_1234").
  */
 export function matches(mod, query, selectedTags) {
   const tags = mod.tags ?? [];
   const selected = (selectedTags ?? []).map((t) => t.toLowerCase());
   if (selected.length > 0 && !tags.some((t) => selected.includes(t.toLowerCase()))) return false;
-  const q = (query ?? "").trim().toLowerCase();
-  return q.length === 0
-    || (mod.name ?? "").toLowerCase().includes(q)
-    || (mod.author ?? "").toLowerCase().includes(q)
-    || (mod.description ?? "").toLowerCase().includes(q)
-    || tags.some((t) => t.toLowerCase().includes(q));
+  const words = (query ?? "").trim().toLowerCase().split(/\s+/).filter((w) => w.length > 0);
+  if (words.length === 0) return true;
+  const haystacks = [mod.name ?? "", mod.author ?? "", mod.description ?? "", ...tags].map((h) => h.toLowerCase());
+  return words.every((w) => haystacks.some((h) => h.includes(w)));
 }
 
 // index.html loads this as <script type="module">; expose the helpers

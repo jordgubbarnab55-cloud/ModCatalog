@@ -140,7 +140,7 @@ test("parseAccent", () => {
   assert.equal(parseAccent(null), null);
 });
 
-test("matches: tag filter is OR-ed, query hits name/author/description/tags", () => {
+test("matches: tag filter is OR-ed, every query word hits name/author/description/tags", () => {
   const mod = { name: "Lava Skin", author: "Ann", description: "Hot stuff", tags: ["Skin", "VFX"] };
   assert.equal(matches(mod, "", []), true);
   assert.equal(matches(mod, "", ["sound"]), false);
@@ -152,4 +152,16 @@ test("matches: tag filter is OR-ed, query hits name/author/description/tags", ()
   assert.equal(matches(mod, "zzz", []), false);
   assert.equal(matches(mod, "lava", ["Sound"]), false);
   assert.equal(matches({ name: "x", author: "", description: "", tags: [] }, "x", ["Skin"]), false);
+  assert.equal(matches(mod, "ann hot", []), true);
+  assert.equal(matches(mod, "hot ann", []), true);
+  assert.equal(matches(mod, "lava zzz", []), false);
+  assert.equal(matches(mod, "  ", []), true);
+  assert.equal(matches(mod, "ann vfx", []), true);
+});
+
+test("matches: words may span fields (author word + name word)", () => {
+  const mod = { name: "Galaxy Lockers", author: "uncool_1234", description: "Storage anywhere", tags: [] };
+  assert.equal(matches(mod, "uncool galaxy", []), true);
+  assert.equal(matches(mod, "galaxy uncool", []), true);
+  assert.equal(matches(mod, "uncool zzz", []), false);
 });
