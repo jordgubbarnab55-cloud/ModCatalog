@@ -253,3 +253,53 @@
 127.0.0.1 - - [05/Nov/2026 23:07:16] "GET /tags.json HTTP/1.1" 404 -
 127.0.0.1 - - [05/Nov/2026 23:07:16] "GET /config.json HTTP/1.1" 200 -
 127.0.0.1 - - [05/Nov/2026 23:07:16] "GET /catalog.json HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:16:50] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:16:53] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:16:53] "GET /upload-flow.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:16:53] "GET /catalog-lib.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:16:53] "GET /upload-lib.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:16:53] "GET /modal.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:16:53] "GET /upload-editor.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:16:53] "GET /zip-lib.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:16:53] "GET /trailer.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:16:53] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 23:16:53] "GET /tags.json HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 23:16:53] "GET /config.json HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:16:53] "GET /catalog.json HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:16:53] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 23:16:53] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 23:18:38] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:18:38] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 23:18:38] "GET /tags.json HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 23:18:38] "GET /config.json HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:18:38] "GET /catalog.json HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:18:38] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 23:18:38] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 23:20:41] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:20:41] "GET /catalog-lib.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:20:41] "GET /upload-flow.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:20:41] "GET /upload-lib.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:20:41] "GET /modal.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:20:41] "GET /upload-editor.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:20:41] "GET /zip-lib.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:20:41] "GET /trailer.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:20:41] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 23:20:41] "GET /tags.json HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 23:20:41] "GET /config.json HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:20:41] "GET /catalog.json HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:20:41] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 23:20:41] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 23:21:03] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:21:03] "GET /catalog-lib.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:21:03] "GET /upload-flow.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:21:03] "GET /upload-lib.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:21:03] "GET /modal.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:21:03] "GET /upload-editor.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:21:03] "GET /zip-lib.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:21:03] "GET /trailer.js HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:21:03] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 23:21:03] "GET /tags.json HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 23:21:03] "GET /config.json HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:21:03] "GET /catalog.json HTTP/1.1" 200 -
+127.0.0.1 - - [05/Nov/2026 23:21:03] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 23:21:03] "GET /favicon.ico HTTP/1.1" 404 -

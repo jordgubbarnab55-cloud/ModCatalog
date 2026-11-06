@@ -241,6 +241,11 @@
         background-position: center;
         background-size: cover;
         border-radius: 7px 7px 4px 4px;   /* own radius: some Chromium builds skip the parent's radius clip for image layers while this overlay is visible, so the photo is also painted by the overlay's own background */
+        /* Stands in for the old `top: -10px`: an outer shadow is only painted outside the
+           border box, so this fills exactly the strip above the panel while it slides in
+           (at rest it sits above .gmedia and is clipped away) without growing the box,
+           which would change the background photo's cover crop. */
+        box-shadow: 0 -10px 0 rgba(38, 38, 48, 0.9);
         backdrop-filter: blur(6px);
         opacity: 0;
         transform: translateY(10px);
