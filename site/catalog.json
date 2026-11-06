@@ -143,6 +143,20 @@
       "uploader": "1509993694902878381",
       "updated": "2026-11-06T23:14:29Z",
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.redlegacynea-1a41ea7d/cover-17bceb40.png"
+    },
+    {
+      "id": "1509993694902878381.ResidentEvilCharactersSurviors",
+      "name": "Resident Evil Characters Surviors",
+      "author": "uncool_1234",
+      "version": "1",
+      "gameVersion": "11.3.1",
+      "description": "",
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.residentevilcharacterssurviors-c77c898f/Resident-Evil-Characters-Surviors-1.zip",
+      "size": 39753754,
+      "sha256": "42848f76909234af82351eaa89a56949255c218d233598eb85456b778ffb7827",
+      "uploader": "1509993694902878381",
+      "updated": "2026-11-06T23:35:52Z",
+      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.residentevilcharacterssurviors-c77c898f/cover-260fd23e.png"
     }
   ]
 }
