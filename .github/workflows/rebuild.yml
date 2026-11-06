@@ -5,10 +5,17 @@ name: Rebuild catalog
 # is recoverable. Manual only (workflow_dispatch); shares the `catalog`
 # concurrency group with the other catalog workflows so index merges never
 # race. The Pages deploy happens in the same run (GITHUB_TOKEN pushes do not
-# trigger other workflows).
+# trigger other workflows). By default the run reads only the newest +
+# oldest valid package per release (O(mods), not O(upload history));
+# `full: true` selects the exhaustive audit of every package.
 
 on:
   workflow_dispatch:
+    inputs:
+      full:
+        description: "Exhaustive audit: validate EVERY package of every release (slow; the default reads only the newest + oldest valid one per release)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -32,7 +39,7 @@ jobs:
           python-version: "3.12"
 
       - name: Rebuild catalog from mod-* releases
-        run: python build.py rebuild
+        run: python build.py rebuild ${{ inputs.full == true && '--full' || '' }}
 
       - name: Commit catalog + deploy Pages
         uses: ./.github/actions/commit-and-deploy

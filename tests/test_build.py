@@ -8,6 +8,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -870,6 +871,76 @@ class TestRebuild(Base):
             data = json.load(f)
         self.assertEqual(data["mods"], [])
         self.assertEqual(data["name"], build.load_catalog_identity()[0])
+
+
+class TestRebuildSelective(Base):
+    """The selective rebuild reads only the newest + oldest valid package per release."""
+
+    def setUp(self):
+        super().setUp()
+        self.downloads = 0
+        orig = self.client.download_asset
+
+        def counting(tag, name, dest):
+            self.downloads += 1
+            orig(tag, name, dest)
+
+        self.client.download_asset = counting
+
+    def _stamp_oldest_first(self, tag: str, names: list[str]) -> None:
+        """Give the release's assets distinct mtimes in `names` order (oldest first)."""
+        d = self.root / "releases" / tag
+        base = 1_700_000_000
+        for i, name in enumerate(names):
+            os.utime(d / name, (base + i, base + i))
+
+    @staticmethod
+    def _minus_updated(raw: bytes) -> dict:
+        data = json.loads(raw)
+        for m in data.get("mods", []):
+            m.pop("updated", None)
+        return data
+
+    def test_selective_reads_newest_plus_oldest_and_agrees_with_full(self):
+        guid, ident = str(uuid.uuid4()), "12345.SelMod"
+        for i, (ver, payload) in enumerate(
+                (("1.0", "A"), ("1.1", "B"), ("1.1", "C"), ("2.0", "D")), start=1):
+            make_package(self.root / f"p{i}.zip", title="Sel Mod", version=ver,
+                        payload=payload, guid=guid, identifier=ident)
+            self.to_inbox(self.root / f"p{i}.zip", "12345", f"{S('12345')}__{i}__p{i}.zip")
+            self.run_process()
+        tag = build.mod_tag(ident)
+        names = [a.name for a in self.client.list_assets(tag)]
+        self.assertEqual(len(names), 4)
+        self._stamp_oldest_first(tag, ["Sel-Mod-1.0.zip", "Sel-Mod-1.1-2.zip",
+                                       "Sel-Mod-1.1.zip", "Sel-Mod-2.0.zip"])
+
+        live = self._minus_updated(self.catalog.read_bytes())
+        self.catalog.unlink()
+        self.downloads = 0
+        build.rebuild(self.client, OWNER, REPO, self.catalog)
+        self.assertEqual(self._minus_updated(self.catalog.read_bytes()), live)
+        # one release: the newest + the oldest valid probe, not all four zips
+        self.assertEqual(self.downloads, 2)
+
+        # an invalid oldest asset: the probe falls back to the next one
+        (self.root / "bad.zip").write_bytes(b"not a zip " + uuid.uuid4().bytes * 4)
+        self.client.upload_asset(tag, self.root / "bad.zip", "Sel-Mod-0.9.9.zip")
+        self._stamp_oldest_first(tag, ["Sel-Mod-0.9.9.zip", "Sel-Mod-1.0.zip",
+                                       "Sel-Mod-1.1-2.zip", "Sel-Mod-1.1.zip",
+                                       "Sel-Mod-2.0.zip"])
+        self.catalog.unlink()
+        self.downloads = 0
+        build.rebuild(self.client, OWNER, REPO, self.catalog)
+        self.assertEqual(self._minus_updated(self.catalog.read_bytes()), live)
+        self.assertEqual(self.downloads, 3)  # the bad one + the oldest valid + the newest
+
+        # the --full audit reads every package, and still gets the same catalog
+        self.catalog.unlink()
+        self.downloads = 0
+        build.rebuild(self.client, OWNER, REPO, self.catalog, full=True)
+        self.assertEqual(self._minus_updated(self.catalog.read_bytes()), live)
+        self.assertEqual(self.downloads, 5)
 
 
 class TestCatalogConfig(Base):

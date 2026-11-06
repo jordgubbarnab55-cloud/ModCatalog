@@ -1281,14 +1281,45 @@ class Processor:
 # --------------------------------------------------------------- rebuild
 
 
+def _read_package(client: PackageClient, tag: str, asset: Asset):
+    """Downloads and validates one release asset, returning
+    `(asset, meta, uid, sha256, content_hash)` or None after logging why
+    (an invalid package, an identifier without a uid prefix, an identifier
+    belonging to another release)."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = pathlib.Path(td) / asset.name
+        client.download_asset(tag, asset.name, tmp)
+        try:
+            meta = validate_package(tmp)
+            content = zip_content_hash(tmp)
+        except PackageError as ex:
+            print(f"  {tag}: {asset.name} REJECTED {ex}", file=sys.stderr)
+            return None
+        uid = uploader_from_identifier(meta["identifier"])
+        if uid is None:
+            print(f"  {tag}: {asset.name}: identifier {meta['identifier']!r} carries no uploader id "
+                  "(not written by this catalog), skipped", file=sys.stderr)
+            return None
+        if mod_tag(meta["identifier"]) != tag:
+            print(f"  {tag}: {asset.name}: identifier {meta['identifier']!r} belongs to another "
+                  "release, skipped", file=sys.stderr)
+            return None
+        return (asset, meta, uid, hashlib.sha256(tmp.read_bytes()).hexdigest(), content)
+
+
 def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.Path,
-            config_path: pathlib.Path = CONFIG_DEFAULT) -> dict:
+            config_path: pathlib.Path = CONFIG_DEFAULT, full: bool = False) -> dict:
     """Regenerates the whole catalog from the mod-* releases alone.
 
     One release per mod identifier (`mod_tag`). Only the runner writes into
     `mod-*` releases, so every package's trailer carries its mod's locked
     `identifier` (`{ownerId}.…`) and its `author` is the verified name it was
-    stored with. Per release:
+    stored with. Per release, two packages are read: the newest (required —
+    the entry, its `content_hash`, the `author` rename rule) and the oldest
+    valid one, probed oldest-first with fallback (the locked `identifier`; in
+    practice one download), so the cost is O(mods), not O(upload history).
+    `full=True` (the `--full` audit mode) validates EVERY package of every
+    release instead. Per release:
 
       * the packages whose identifier maps to the release's tag count
         (others are skipped with a log line), ordered by `asset_order_key`;
@@ -1313,37 +1344,34 @@ def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.
         if not zips:
             print(f"  {tag}: no zip assets, skipped")
             continue
-        packages = []  # (asset, meta, uid, sha256, content_hash) of the valid packages, oldest first
-        for asset in zips:
-            with tempfile.TemporaryDirectory() as td:
-                tmp = pathlib.Path(td) / asset.name
-                client.download_asset(tag, asset.name, tmp)
-                try:
-                    meta = validate_package(tmp)
-                    content = zip_content_hash(tmp)
-                except PackageError as ex:
-                    print(f"  {tag}: {asset.name} REJECTED {ex}", file=sys.stderr)
-                    continue
-                uid = uploader_from_identifier(meta["identifier"])
-                if uid is None:
-                    print(f"  {tag}: {asset.name}: identifier {meta['identifier']!r} carries no uploader id "
-                          "(not written by this catalog), skipped", file=sys.stderr)
-                    continue
-                if mod_tag(meta["identifier"]) != tag:
-                    print(f"  {tag}: {asset.name}: identifier {meta['identifier']!r} belongs to another "
-                          "release, skipped", file=sys.stderr)
-                    continue
-                packages.append((asset, meta, uid, hashlib.sha256(tmp.read_bytes()).hexdigest(),
-                                 content))
-        if not packages or packages[-1][0] is not zips[-1]:
-            print(f"  {tag}: the newest package is invalid, skipped", file=sys.stderr)
-            continue
-        for asset, meta, uid, *_ in packages:
+        if full:
+            # the exhaustive audit: every package of every release
+            packages = [p for p in (_read_package(client, tag, a) for a in zips) if p is not None]
+            if not packages or packages[-1][0] is not zips[-1]:
+                print(f"  {tag}: the newest package is invalid, skipped", file=sys.stderr)
+                continue
+            first, newest_pkg, considered = packages[0], packages[-1], packages
+        else:
+            # the selective scan: the newest package (required), then the
+            # oldest valid one probed oldest-first (one download in practice)
+            newest_pkg = _read_package(client, tag, zips[-1])
+            if newest_pkg is None:
+                print(f"  {tag}: the newest package is invalid, skipped", file=sys.stderr)
+                continue
+            first = None
+            for a in zips[:-1]:
+                first = _read_package(client, tag, a)
+                if first is not None:
+                    break
+            if first is None:
+                first = newest_pkg
+            considered = [newest_pkg]  # the newest per release dominates `latest_by_uid`
+        for asset, meta, uid, *_ in considered:
             stamp = (asset.created, asset.name)
             if uid not in latest_by_uid or stamp > latest_by_uid[uid][0]:
                 latest_by_uid[uid] = (stamp, meta["author"])
-        identifier = packages[0][1]["identifier"]
-        asset, meta, _, sha, content = packages[-1]
+        identifier = first[1]["identifier"]
+        asset, meta, _, sha, content = newest_pkg
         cover_url = None
         image = meta.get("image")
         if image is not None:
@@ -1352,8 +1380,8 @@ def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.
                 cover_url = asset_url(owner, repo, tag, cname)
             else:
                 print(f"  {tag}: cover {cname} missing from the release, omitted")
-        candidates.append(({**meta, "identifier": identifier}, asset, sha, cover_url, packages[0][2], tag,
-                           content, asset_order_key(packages[0][0]) + (tag,)))
+        candidates.append(({**meta, "identifier": identifier}, asset, sha, cover_url, first[2], tag,
+                           content, asset_order_key(first[0]) + (tag,)))
 
     # the same content + title + version under several identifiers: the mod
     # whose first package is the earliest wins, the later ones are skipped
@@ -1426,6 +1454,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("rebuild", help="regenerate the whole catalog from mod-* releases")
     common(p)
+    p.add_argument("--full", action="store_true",
+                  help="audit mode: validate every package of every release instead of "
+                       "reading only the newest + oldest valid one per release")
 
     p = sub.add_parser("retitle", help="rewrite only the catalog's name/description from the site config")
     p.add_argument("--catalog", default=str(CATALOG_DEFAULT))
@@ -1448,7 +1479,7 @@ def main(argv: list[str] | None = None) -> int:
     client = make_client(args, owner, repo)
     catalog = pathlib.Path(args.catalog)
     if args.cmd == "rebuild":
-        rebuild(client, owner, repo, catalog, config)
+        rebuild(client, owner, repo, catalog, config, full=args.full)
         return 0
 
     if args.from_dir:

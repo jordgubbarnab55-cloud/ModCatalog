@@ -191,7 +191,9 @@ on the free plan, and it must not trust client-supplied IDs), so:
   the most recently uploaded package (any release) under that owner id.
   Packages whose identifier carries no id prefix (not written by this
   catalog) or maps to another release's tag are skipped with a log line.
-  This reads every version zip of every release, not just the newest.
+  By default it reads the newest + the oldest valid package per release
+  (`--full` reads every version zip of every release — the audit mode),
+  never the superseded ones in between.
 - Seeding: `process --from-dir DIR --as-uid ID --as-username NAME` (both
   required, the command refuses without them) treats the dir's zips as
   uploads by that account; it then owns them.
@@ -227,10 +229,15 @@ to 64 KiB.
 - `python build.py process --from-dir <dir> --as-uid <id> --as-username
   <name>` — treat the dir's zips as uploads by that Discord account; used
   for one-off seeding (the `seed-legacy` workflow's inputs).
-- `python build.py rebuild` — enumerate all `mod-*` releases, read every
-  version zip's trailer, regenerate the whole catalog from scratch
-  (releases are the source of truth, so a lost/corrupt catalog recovers,
-  `uploader` and the verified `author`s included — see Ownership).
+- `python build.py rebuild` — enumerate all `mod-*` releases and regenerate
+  the whole catalog from scratch (releases are the source of truth, so a
+  lost/corrupt catalog recovers, `uploader` and the verified `author`s
+  included — see Ownership). By default each release's **newest** package
+  is read (the entry, the `author` rename rule, the `content_hash`) plus
+  the **oldest valid** one, probed oldest-first with fallback (the locked
+  identifier; one download in practice) — cost is O(mods), not O(upload
+  history). `--full` (the `rebuild.yml` dispatch input `full`) is the
+  exhaustive audit: every package of every release, not just the newest.
 - **`--client local --root <dir>`** selects the directory-backed fake
   (releases = folders, assets = files, mtime = created-at) so the whole
   pipeline runs offline; the default `gh` client shells out to the
@@ -268,8 +275,9 @@ to 64 KiB.
   false}`. Steps: checkout, setup-python 3.12, `python build.py process
   --from-inbox` (with `GH_TOKEN: ${{ github.token }}`), then the shared
   `commit-and-deploy` composite action.
-- `rebuild.yml` — `workflow_dispatch`; `python build.py rebuild`, commit,
-  deploy. Same concurrency group.
+- `rebuild.yml` — `workflow_dispatch` (optional input `full` = the
+  exhaustive audit; the default run is the selective scan), `python build.py
+  rebuild`, commit, deploy. Same concurrency group.
 - `seed-legacy.yml` — one-off `workflow_dispatch` with required inputs `uid`
   and `username` (a Discord account); `python build.py process --from-dir
   legacy-assets --as-uid … --as-username …` (seeding the example mods as that
