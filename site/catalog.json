@@ -125,6 +125,23 @@
         "Sound",
         "VFX"
       ]
+    },
+    {
+      "id": "1509993694902878381.RedLegacyNea",
+      "name": "Red Legacy Nea",
+      "author": "uncool_1234",
+      "version": ".alpha-2",
+      "gameVersion": "10.2.1",
+      "description": "Glowing skulls",
+      "tags": [
+        "Skin"
+      ],
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.redlegacynea-1a41ea7d/Red-Legacy-Nea-.alpha-2.zip",
+      "size": 659465,
+      "sha256": "fba50cad14d4f6c77b2d80f21b17f561026c6bd07fe8d40a375fec20d3bad9f3",
+      "uploader": "1509993694902878381",
+      "updated": "2026-11-06T20:01:15Z",
+      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.redlegacynea-1a41ea7d/cover-17bceb40.png"
     }
   ]
 }
