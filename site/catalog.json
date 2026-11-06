@@ -128,19 +128,19 @@
     },
     {
       "id": "1509993694902878381.RedLegacyNea",
-      "name": "Red Legacy Nea",
+      "name": "Red Legacy Nea 2",
       "author": "uncool_1234",
       "version": ".alpha-2",
-      "gameVersion": "10.2.1",
+      "gameVersion": "11.2.1",
       "description": "Glowing skulls",
       "tags": [
         "Skin"
       ],
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.redlegacynea-1a41ea7d/Red-Legacy-Nea-.alpha-2.zip",
-      "size": 659465,
-      "sha256": "fba50cad14d4f6c77b2d80f21b17f561026c6bd07fe8d40a375fec20d3bad9f3",
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.redlegacynea-1a41ea7d/Red-Legacy-Nea-2-.alpha-2.zip",
+      "size": 19950009,
+      "sha256": "653548d0c6b1b824762fe928062f017373ee52cfd1996e0a35b88d192e1a3313",
       "uploader": "1509993694902878381",
-      "updated": "2026-11-06T20:01:15Z",
+      "updated": "2026-11-06T20:08:58Z",
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.redlegacynea-1a41ea7d/cover-17bceb40.png"
     }
   ]
