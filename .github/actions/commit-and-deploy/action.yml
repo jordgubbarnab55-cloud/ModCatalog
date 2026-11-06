@@ -5,6 +5,12 @@ name: Commit catalog and deploy Pages
 # never be committed) and deploy the site to Pages in the SAME run — a
 # commit pushed with GITHUB_TOKEN does not trigger other workflows, so the
 # deploy must not depend on a follow-up trigger.
+#
+# A no-change run may hold a checkout that predates a commit an earlier
+# (concurrent) run just pushed: instead of deploying that possibly-stale
+# site — which once clobbered a fresher deployment — it syncs site/ to the
+# latest origin/main first, so a re-dispatch also repairs a stale
+# deployment and a no-change run can never overwrite a newer one.
 
 inputs:
   commit_path:
@@ -28,7 +34,9 @@ runs:
           git push
           echo "Catalog committed and pushed."
         else
-          echo "Catalog already up to date; nothing to commit."
+          git fetch origin main
+          git checkout origin/main -- site
+          echo "Catalog already up to date; nothing to commit. Deploying the latest committed site."
         fi
 
     - name: Add the tag vocabulary to the site
