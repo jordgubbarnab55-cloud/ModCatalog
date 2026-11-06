@@ -15,7 +15,13 @@
       "size": 3388480,
       "sha256": "e2731ef3fc6613868478475ae9eef231301ea8f7e130364df99a0d9fd63b132c",
       "uploader": "1509993694902878381",
-      "updated": "2026-10-30T08:54:31Z"
+      "updated": "2026-10-30T08:54:31Z",
+      "tags": [
+        "Blueprint",
+        "Skin",
+        "Sound",
+        "VFX"
+      ]
     },
     {
       "id": "70397db8-f70a-4f85-a17a-d3e3ab1d5067",
@@ -40,7 +46,10 @@
       "size": 4822288,
       "sha256": "cf416c45ec68ae019e744432ae25ab7cb015531e89796c168c2956e3ec1dc2e1",
       "uploader": "1509993694902878381",
-      "updated": "2026-11-04T22:25:42Z"
+      "updated": "2026-11-04T22:25:42Z",
+      "tags": [
+        "Sound"
+      ]
     },
     {
       "id": "05dfce29-38db-4c42-b65c-e7d1196af540",
@@ -53,7 +62,13 @@
       "sha256": "59bd175c9f299205f8693ad5eb1d5901a179f29fd98147c310caf85ebe982092",
       "uploader": null,
       "updated": "2026-10-29T10:35:45Z",
-      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-05dfce29-38db-4c42-b65c-e7d1196af540/05dfce29-38db-4c42-b65c-e7d1196af540-cover-940db1af.png"
+      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-05dfce29-38db-4c42-b65c-e7d1196af540/05dfce29-38db-4c42-b65c-e7d1196af540-cover-940db1af.png",
+      "tags": [
+        "Blueprint",
+        "Skin",
+        "Environment",
+        "VFX"
+      ]
     },
     {
       "id": "0adb8d0f-a778-48f6-8750-1641430e113f",
@@ -65,7 +80,12 @@
       "size": 3386774,
       "sha256": "7c771a18ee1b7942c33302c78c975ab0e834085d3cd318d86e2f37bc9adb347d",
       "uploader": "1509993694902878381",
-      "updated": "2026-11-04T22:23:41Z"
+      "updated": "2026-11-04T22:23:41Z",
+      "tags": [
+        "Skin",
+        "Environment",
+        "VFX"
+      ]
     },
     {
       "id": "ceaddf7b-b079-4661-b36c-1e74feb091ca",
@@ -79,7 +99,14 @@
       "sha256": "a9124d0f11e205e8db8ea60abe482fc9dcb968328616deb7608ccc48f3f2967d",
       "uploader": "1509993694902878381",
       "updated": "2026-11-04T20:52:44Z",
-      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-ceaddf7b-b079-4661-b36c-1e74feb091ca/ceaddf7b-b079-4661-b36c-1e74feb091ca-cover-2e7e39b8.png"
+      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-ceaddf7b-b079-4661-b36c-1e74feb091ca/ceaddf7b-b079-4661-b36c-1e74feb091ca-cover-2e7e39b8.png",
+      "tags": [
+        "Blueprint",
+        "Skin",
+        "Environment",
+        "Sound",
+        "VFX"
+      ]
     },
     {
       "id": "742c2e78-a272-44dc-9ea4-969c36eca47f",
@@ -92,7 +119,13 @@
       "sha256": "168781e1f0389f46269b862982407909a705f62dea2d1c24935df2de1efa88bc",
       "uploader": null,
       "updated": "2026-10-29T10:35:49Z",
-      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-742c2e78-a272-44dc-9ea4-969c36eca47f/742c2e78-a272-44dc-9ea4-969c36eca47f-cover-64402791.png"
+      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-742c2e78-a272-44dc-9ea4-969c36eca47f/742c2e78-a272-44dc-9ea4-969c36eca47f-cover-64402791.png",
+      "tags": [
+        "Skin",
+        "Environment",
+        "Sound",
+        "VFX"
+      ]
     }
   ]
 }
