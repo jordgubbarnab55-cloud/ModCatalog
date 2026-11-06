@@ -2,10 +2,12 @@
 """Regenerate the inline icon sprite in site/index.html from site/icons/*.svg
 (vendored lucide-static files).
 
-External <use href="icons/x.svg"> does not render in Safari, so the icons are
-inlined into a hidden <svg> sprite in the same document; the icons/*.svg files
-stay committed as the source this script reads (re-copy a file from
-lucide-static, run this, commit both).
+External <use href="icons/x.svg"> does not render in Firefox or Safari, so
+the icons are inlined into a hidden <svg> sprite in the same document; the
+icons/*.svg files stay committed as the source this script reads (re-copy a
+file from lucide-static, run this, commit both). deploy-site.yml runs it
+before every Pages deploy, and tests/test_site_icons.py fails when the
+sprite in index.html is out of date with the icon files.
 
 Usage: python scripts/sync-icons.py
 """
@@ -23,8 +25,8 @@ def inner_paths(svg_text: str) -> str:
     return " ".join(inner.split())
 
 
-def main() -> None:
-    icons_dir = SITE / "icons"
+def build_sprite(icons_dir: Path) -> str:
+    """The sprite block (markers included) for the given icon directory."""
     files = sorted(icons_dir.glob("*.svg"))
     if not files:
         raise SystemExit(f"no *.svg files in {icons_dir}")
@@ -39,21 +41,31 @@ def main() -> None:
             f'  <symbol id="i-{f.stem}" {attrs}>'
             f"{inner_paths(f.read_text(encoding='utf-8'))}</symbol>"
         )
-    sprite = (
+    return (
         f"{START}\n"
         '<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">\n'
         + "\n".join(symbols)
         + "\n</svg>\n"
         f"{END}"
     )
-    html_path = SITE / "index.html"
+
+
+def apply_sprite(sprite: str, html_path: Path) -> str:
+    """Return the html with the marked sprite block replaced (or inserted)."""
     html = html_path.read_text(encoding="utf-8")
     if START in html:
-        new = re.sub(re.escape(START) + r".*?" + re.escape(END), lambda _m: sprite, html, flags=re.S)
-    else:
-        new = html.replace("</body>", sprite + "\n</body>")
-    html_path.write_text(new, encoding="utf-8")
-    print(f"wrote sprite with {len(files)} icons: {', '.join(f.stem for f in files)}")
+        return re.sub(re.escape(START) + r".*?" + re.escape(END), lambda _m: sprite, html, flags=re.S)
+    return html.replace("</body>", sprite + "\n</body>")
+
+
+def main() -> None:
+    sprite = build_sprite(SITE / "icons")
+    html_path = SITE / "index.html"
+    new = apply_sprite(sprite, html_path)
+    changed = new != html_path.read_text(encoding="utf-8")
+    if changed:
+        html_path.write_text(new, encoding="utf-8")
+    print(f"sprite in {html_path.name} {'updated' if changed else 'is up to date'}")
 
 
 if __name__ == "__main__":

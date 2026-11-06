@@ -30,6 +30,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Regenerate the inline icon sprite from site/icons/*.svg (idempotent;
+      # the deployed sprite is always fresh even if the committed one is stale).
+      - name: Sync the icon sprite
+        run: python scripts/sync-icons.py
+
       # The deployed catalog.json carries config.json's title/description at
       # once; the committed copy picks them up on the next catalog run.
       - name: Apply the catalog title from config.json
