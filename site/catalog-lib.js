@@ -316,11 +316,44 @@ export function matches(mod, query, selectedTags) {
   return words.every((w) => haystacks.some((h) => h.includes(w)));
 }
 
+/**
+ * The grid card's tag cutoff: `widths` are the tag chip widths, in order;
+ * `avail` is the row's available width; `gap` the width between chips;
+ * `plusWidth(n)` the `+n` chip's width. When not all chips fit, the largest
+ * number of leading chips that fit *together with the `+N` chip* (N = the
+ * cut-off count) is shown — the chip counts toward the budget. Falls back to
+ * the plain chips, no `+N`, when even the chip alone does not fit (a
+ * pathologically narrow row). Returns `{ tags, plus }`; `plus: 0` = every tag
+ * is shown.
+ */
+export function fitTagCutoff(widths, avail, gap, plusWidth) {
+  const n = widths.length;
+  if (n === 0) return { tags: 0, plus: 0 };
+  const prefix = [0];
+  for (const w of widths) prefix.push(prefix[prefix.length - 1] + w);
+  const rowW = (k, plus) => {
+    let w = k > 0 ? prefix[k] + gap * (k - 1) : 0;
+    if (plus > 0) w += (k > 0 ? gap : 0) + plusWidth(plus);
+    return w;
+  };
+  if (rowW(n, 0) <= avail) return { tags: n, plus: 0 };
+  for (let k = n - 1; k >= 0; k--) {
+    if (rowW(k, n - k) <= avail) return { tags: k, plus: n - k };
+  }
+  let k = 0;
+  for (let i = 0; i < n; i++) {
+    if (rowW(i + 1, 0) > avail) break;
+    k = i + 1;
+  }
+  return { tags: k, plus: 0 };
+}
+
 // index.html loads this as <script type="module">; expose the helpers
 // (module scope is not global). No-op under Node (tests import directly).
 if (typeof window !== "undefined") {
   Object.assign(window, {
     parseCatalog, sanitizeTags, formatBytes, singleLine, metaParts,
     fileNameOf, parseAccent, accentFor, placeholder, matches, catalogTitle,
+    fitTagCutoff,
   });
 }

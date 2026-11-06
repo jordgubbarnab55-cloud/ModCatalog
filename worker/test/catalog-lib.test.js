@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   parseCatalog, sanitizeTags, formatBytes, singleLine, metaParts, fileNameOf,
-  parseAccent, accentFor, placeholder, matches, catalogTitle,
+  parseAccent, accentFor, placeholder, matches, catalogTitle, fitTagCutoff,
 } from "../../site/catalog-lib.js";
 
 const FIXTURES = new URL("../../mod-contract/fixtures/", import.meta.url);
@@ -178,4 +178,31 @@ test("matches: words may span fields (author word + name word)", () => {
   assert.equal(matches(mod, "uncool galaxy", []), true);
   assert.equal(matches(mod, "galaxy uncool", []), true);
   assert.equal(matches(mod, "uncool zzz", []), false);
+});
+
+test("fitTagCutoff: all fit -> no +N chip (inclusive boundary)", () => {
+  const plus = (r) => 24 + r * 8;
+  assert.deepEqual(fitTagCutoff([], 100, 6, plus), { tags: 0, plus: 0 });
+  assert.deepEqual(fitTagCutoff([40, 40, 40], 132, 6, plus), { tags: 3, plus: 0 });
+  assert.deepEqual(fitTagCutoff([40, 40, 40], 131, 6, plus), { tags: 2, plus: 1 });
+});
+
+test("fitTagCutoff: cut rows include the +N chip in the budget", () => {
+  // two chips fit (206 <= 220) but two + the chip (232) do not -> one chip + +2
+  assert.deepEqual(fitTagCutoff([100, 100, 100], 220, 6, () => 20), { tags: 1, plus: 2 });
+  // exact fit of the cut row
+  assert.deepEqual(fitTagCutoff([100, 100, 100], 232, 6, () => 20), { tags: 2, plus: 1 });
+  // the +N chip's width tracks the remaining count
+  const plus = (r) => 24 + r * 8;
+  assert.deepEqual(fitTagCutoff([40, 40, 40], 100, 6, plus), { tags: 1, plus: 2 });
+  assert.deepEqual(fitTagCutoff([40, 40, 40], 124, 6, plus), { tags: 2, plus: 1 });
+});
+
+test("fitTagCutoff: no single chip fits -> just the +N chip", () => {
+  assert.deepEqual(fitTagCutoff([300], 100, 6, (r) => 30), { tags: 0, plus: 1 });
+});
+
+test("fitTagCutoff: the +N chip fits nowhere -> plain chips as far as they fit", () => {
+  assert.deepEqual(fitTagCutoff([40, 40, 40], 92, 6, () => 500), { tags: 2, plus: 0 });
+  assert.deepEqual(fitTagCutoff([40, 40, 40], 30, 6, () => 500), { tags: 0, plus: 0 });
 });

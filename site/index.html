@@ -819,7 +819,7 @@
 <script type="module">
     import {
         parseCatalog, sanitizeTags, formatBytes, singleLine, metaParts,
-        fileNameOf, placeholder, matches, catalogTitle,
+        fileNameOf, placeholder, matches, catalogTitle, fitTagCutoff,
     } from './catalog-lib.js';
     import { createUploadFlow } from './upload-flow.js';
     import { configOk } from './upload-lib.js';
@@ -842,6 +842,40 @@
     try { mode = localStorage.getItem('modcatalog.cardMode') === 'grid' ? 'grid' : 'list'; } catch { mode = 'list'; }
     const modeBtns = [...document.querySelectorAll('.modebtn')];
 
+    // Grid card tags: the whole row (chips + the `+N` chip) must fit the card —
+    // show all that fit; re-fit when a card's width changes (columns / resize)
+    const TAG_GAP = 6;   // the .tag chip's margin-right
+    let tagFitScheduled = false;
+    const tagFitObserved = [];
+    const tagFitObserver = new ResizeObserver(() => {
+        if (tagFitScheduled) return;
+        tagFitScheduled = true;
+        requestAnimationFrame(() => {
+            tagFitScheduled = false;
+            fitGridTags();
+        });
+    });
+
+    function fitGridTags() {
+        for (const { card } of entries) {
+            const twrap = card.querySelector('.gtags');
+            if (!twrap) continue;
+            const plus = twrap.querySelector('.plus');
+            const chips = [...twrap.querySelectorAll('span:not(.plus)')];
+            if (chips.length === 0) { plus.hidden = true; continue; }
+            chips.forEach((c) => { c.hidden = false; });
+            plus.hidden = false;   // measurable
+            const { tags: k, plus: rem } = fitTagCutoff(
+                chips.map((c) => c.offsetWidth),
+                card.clientWidth - 20,   // the 10px inset from each edge of the photo
+                TAG_GAP,
+                (r) => { plus.textContent = '+' + r; return plus.offsetWidth; });
+            chips.forEach((c, i) => { c.hidden = i >= k; });
+            if (rem > 0) { plus.textContent = '+' + rem; plus.hidden = false; }
+            else plus.hidden = true;
+        }
+    }
+
     function setMode(m) {
         mode = m;
         try { localStorage.setItem('modcatalog.cardMode', m); } catch { /* private mode */ }
@@ -854,6 +888,14 @@
             grid.appendChild(card);
             entries.push({ mod, card });
         }
+        for (const c of tagFitObserved) tagFitObserver.unobserve(c);
+        tagFitObserved.length = 0;
+        if (m === 'grid')
+            for (const { card } of entries) {
+                tagFitObserver.observe(card);
+                tagFitObserved.push(card);
+            }
+        fitGridTags();
         applyFilter();
     }
 
@@ -898,9 +940,10 @@
         if (grid) {
             const media = coverBox('gmedia', mod);
             const twrap = h('div', 'gtags');
-            const shown = mod.tags.slice(0, 2);
-            for (const tag of shown) twrap.appendChild(h('span', 'tag', tag));
-            if (mod.tags.length > shown.length) twrap.appendChild(h('span', 'tag', '+' + (mod.tags.length - shown.length)));
+            for (const tag of mod.tags) twrap.appendChild(h('span', 'tag', tag));
+            const plus = h('span', 'tag plus');
+            plus.hidden = true;
+            twrap.appendChild(plus);
             media.appendChild(twrap);
             const ov = h('div', 'gov');
             if (mod.cover) {
