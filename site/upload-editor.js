@@ -8,10 +8,10 @@ import {
   sniffImageMime, imageVerdict, scaledSize, imageInfoText, resolveForm, IMAGE_HARD_LIMIT,
 } from "./upload-lib.js";
 
-const IMAGE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-    stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>
-    <circle cx="10" cy="13" r="2"/><path d="m20 17-1.296-1.296a2.41 2.41 0 0 0-3.408 0L9 22"/></svg>`;
+// vendored from lucide-static (site/icons/file-image.svg); stroke attrs come from the file
+const IMAGE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">
+    <use href="icons/file-image.svg"></use>
+</svg>`;
 
 const kib = (n) => (n / 1024).toFixed(0);
 

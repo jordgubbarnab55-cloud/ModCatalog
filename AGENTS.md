@@ -358,7 +358,7 @@ HTML**. ModManager's Browse tab is the reference; the page mirrors it:
   [• [gameVersion]]` (each segment only when non-empty — the app's
   `VersionMetaConverter`; the details view too), single-line description,
   and a 116 px right column
-  with a 44×44 solid-accent button (Lucide inbox 20 px) + `formatBytes`
+  with a 44×44 solid-accent button (Lucide download 20 px) + `formatBytes`
   size hint. 2 cards/row, 1 on narrow screens, catalog order.
 - **Details lightbox** (`ModDetailsDialog`): a card click (not the download
   button) opens a 720×240 panel — 240 cover, wrapped description, Tags
