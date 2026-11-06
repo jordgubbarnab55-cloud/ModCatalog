@@ -89,24 +89,23 @@
     },
     {
       "id": "ceaddf7b-b079-4661-b36c-1e74feb091ca",
-      "name": "Horologium Core",
+      "name": "Horologium Core [2]",
       "author": "uncool_1234",
-      "version": "",
+      "version": "2.0.0",
       "gameVersion": "10.2.1",
       "description": "Blueprint mod loader",
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-ceaddf7b-b079-4661-b36c-1e74feb091ca/Horologium-Core-package.zip",
-      "size": 1268193,
-      "sha256": "a9124d0f11e205e8db8ea60abe482fc9dcb968328616deb7608ccc48f3f2967d",
-      "uploader": "1509993694902878381",
-      "updated": "2026-11-04T20:52:44Z",
-      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-ceaddf7b-b079-4661-b36c-1e74feb091ca/ceaddf7b-b079-4661-b36c-1e74feb091ca-cover-2e7e39b8.png",
       "tags": [
         "Blueprint",
         "Skin",
         "Environment",
         "Sound",
         "VFX"
-      ]
+      ],
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-ceaddf7b-b079-4661-b36c-1e74feb091ca-a8809c56/Horologium-Core-2-2.0.0.zip",
+      "size": 860217,
+      "sha256": "c3056f3530f71d6c1d59fc641b9909d6c0c732327771cb686fffd22e647697aa",
+      "uploader": "1509993694902878381",
+      "updated": "2026-11-06T16:57:42Z"
     },
     {
       "id": "742c2e78-a272-44dc-9ea4-969c36eca47f",
