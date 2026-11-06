@@ -1,5 +1,6 @@
 // The upload flow on index.html: a chain of modals — token (only when none is
-// stored), package, metadata editor, confirm — then the upload itself through
+// stored), Upload-or-Update choice, (Update: the mod picker), package, metadata
+// editor, confirm — then the upload itself through
 // the Worker's set mode (mod-contract/upload.md): the package is sent
 // unchanged plus a metadata.json, and the catalog's runner writes the trailer.
 // The token is checked with the Worker's /whoami: the catalog publishes the
@@ -11,11 +12,11 @@ import { createEditor } from "./upload-editor.js";
 import {
   classifySelection, buildManifest, buildMetadataJson, planRequests, sha256Hex, statusMessage,
   findPublishedMod, confirmText, doneText, uploadedText, titleFromBase, POLL_MAX_MS, forcedFields, authorMismatchNote, whoamiUrl,
-  checkToken, selectionLabel,
+  checkToken, selectionLabel, ownMods, filterPickerMods, updatePrefill, NO_OWN_MODS_TEXT,
 } from "./upload-lib.js";
 import { readUtocFromZip, shapeProblem, ZipError, MAX_UTOC_BYTES } from "./zip-lib.js";
 import { readTrailer, parseTocHeader, TrailerError, TOC_SUPPORTED_VERSION } from "./trailer.js";
-import { sanitizeTags, formatBytes } from "./catalog-lib.js";
+import { sanitizeTags, formatBytes, metaParts, placeholder } from "./catalog-lib.js";
 
 const TOKEN_KEY = "modcatalog.uploadToken";
 const FLAG_ONDEMAND = 0x10;
@@ -104,7 +105,7 @@ async function analyze(selection, files, vocabulary) {
     return {
       byName,
       notes,
-      prefill: { title: titleFromBase(selection.base), author: "", version: "", gameVersion: "", description: "", tags: [], guid: null, image: null },
+      prefill: { title: titleFromBase(selection.base), author: "", version: "", gameVersion: "", description: "", tags: [], image: null },
     };
   }
   const { kept, dropped } = sanitizeTags(meta.tags, vocabulary);
@@ -114,7 +115,7 @@ async function analyze(selection, files, vocabulary) {
     notes,
     prefill: {
       title: meta.title, author: meta.author, version: meta.version, gameVersion: meta.game_version,
-      description: meta.description, tags: kept, guid: meta.guid, image: meta.image,
+      description: meta.description, tags: kept, image: meta.image,
     },
   };
 }
@@ -123,7 +124,9 @@ async function analyze(selection, files, vocabulary) {
  * ctx: { uploadUrl: () => string | null   the Worker's /upload URL (null: not configured)
  *        vocabulary: () => Promise<string[] | null>
  *        renderCard: (mod, { preview }) => element
- *        fetchMods: () => Promise<object[]>   the raw catalog.json mods }
+ *        fetchMods: () => Promise<object[]>   the raw catalog.json mods
+ *        loadMods: () => Promise<object[]>    the parsed catalog (parseCatalog entries, tags
+ *                                              cleaned), refetched; never rejects }
  * Returns { start(opener) }.
  */
 export function createUploadFlow(ctx) {
@@ -163,6 +166,9 @@ export function createUploadFlow(ctx) {
       this.identity = null;
       this.lastForm = null;
       this.pkg = null;
+      this.mode = null;     // "upload" | "update", from the choice step
+      this.target = null;   // the catalog entry an update replaces
+      this.mods = null;     // Promise of the parsed catalog, fetched when the flow starts
       this.ended = false;
       this.uploaded = false;
       this.stop = new AbortController();
@@ -190,6 +196,8 @@ export function createUploadFlow(ctx) {
     }
 
     begin() {
+      // refetched so a mod uploaded minutes ago can be updated
+      this.mods = ctx.loadMods().catch(() => []);
       if (tokenStore.get()) this.stepCheck();
       else this.stepToken();
     }
@@ -226,8 +234,178 @@ export function createUploadFlow(ctx) {
     }
 
     stepNext() {
-      if (this.pkg) this.stepEditor();
+      // another token may not own the mod being updated: choose again
+      if (this.target && this.target.uploader !== this.identity.discordId) {
+        this.mode = null;
+        this.target = null;
+        this.lastForm = null;
+      }
+      if (!this.mode) this.stepChoice();
+      else if (this.mode === "update" && !this.target) this.stepPicker();
+      else if (this.pkg) this.stepEditor();
       else this.stepPackage();
+    }
+
+    // ------------------------------------------------------------ choice
+    /** Upload a new mod, or update one of the user's own (shown disabled, with
+     *  the reason as a tooltip, when they own none). */
+    async stepChoice() {
+      const mods = await this.mods;
+      if (this.ended) return;
+      const own = ownMods(mods, this.identity.discordId);
+      const m = this.open("Upload or update", "");
+      m.panel.append(
+        el("h2", "", "What would you like to do?"),
+        el("p", "", `Signed in as ${this.identity.username}.`));
+
+      const option = (title, detail) => {
+        const b = el("button", "choice-opt");
+        b.type = "button";
+        b.append(el("strong", "", title), el("span", "", detail));
+        return b;
+      };
+      const upload = option("Upload a new mod", "Publish a mod that is not in the catalog yet.");
+      upload.addEventListener("click", () => this.choose("upload"));
+      const update = option("Update a mod", own.length > 0
+        ? `Publish a new version of one of your ${own.length} mod${own.length === 1 ? "" : "s"}.`
+        : "Publish a new version of a mod you uploaded.");
+      const cell = el("div", "choice-cell");
+      cell.appendChild(update);
+      if (own.length === 0) {
+        // aria-disabled, not `disabled`: the button stays focusable and gets hover
+        // events, so the reason can show on hover and on keyboard focus
+        update.setAttribute("aria-disabled", "true");
+        const tip = el("div", "tip", NO_OWN_MODS_TEXT);
+        tip.id = "choice-update-tip";
+        tip.setAttribute("role", "tooltip");
+        update.setAttribute("aria-describedby", tip.id);
+        cell.appendChild(tip);
+      } else {
+        update.addEventListener("click", () => this.choose("update", own));
+      }
+      const row = el("div", "choice");
+      row.append(upload, cell);
+      const actions = el("div", "actions");
+      actions.append(this.differentToken());
+      m.panel.append(row, actions);
+      this.show(m);
+      upload.focus({ preventScroll: true });
+    }
+
+    choose(mode, own = null) {
+      if (this.mode !== mode) this.lastForm = null;
+      this.mode = mode;
+      this.target = null;
+      if (mode === "update") this.stepPicker(own);
+      else this.stepNext();
+    }
+
+    // ------------------------------------------------------------ picker
+    /** The user's own mods with a search box (the catalog's every-word search). */
+    async stepPicker(own = null) {
+      if (!own) own = ownMods(await this.mods, this.identity.discordId);
+      if (this.ended) return;
+      const m = this.open("Choose the mod to update", "");
+      m.panel.append(
+        el("h2", "", "Choose the mod to update"),
+        el("p", "", "Your package becomes the mod's next version; its identifier stays the same."));
+      const search = el("input", "input");
+      search.type = "search";
+      search.placeholder = "Search your mods…";
+      search.autocomplete = "off";
+      search.spellcheck = false;
+      search.setAttribute("aria-label", "Search your mods");
+      const list = el("div", "pick-list");
+      list.id = "pick-list";
+      list.setAttribute("role", "group");
+      list.setAttribute("aria-label", "Your mods");
+      search.setAttribute("aria-controls", list.id);
+      const empty = el("p", "pick-empty", "No mods match");
+      empty.hidden = true;
+      const count = el("p", "pick-count");
+      count.setAttribute("aria-live", "polite");
+
+      const rows = own.map((mod) => {
+        const row = el("button", "pick-row");
+        row.type = "button";
+        const thumb = el("span", "pick-thumb");
+        const { initial, color } = placeholder(mod);
+        const letter = el("span", "letter", initial);
+        letter.style.background = color;
+        thumb.appendChild(letter);
+        if (mod.cover) {
+          const img = el("img");
+          img.src = mod.cover; // a plain <img>: release URLs are never fetch()ed (CORS)
+          img.alt = "";
+          img.loading = "lazy";
+          img.addEventListener("error", () => img.remove());
+          thumb.appendChild(img);
+        }
+        const meta = metaParts({ ...mod, author: "" }).slice(1).join(" ").replace(/^• /, "");
+        const text = el("span", "pick-text");
+        text.append(el("span", "pick-name", mod.name), el("span", "pick-meta", meta || "no version"),
+          el("span", "pick-id", mod.id));
+        row.append(thumb, text);
+        row.setAttribute("aria-label", `${mod.name}${mod.version ? `, v${mod.version}` : ""}, ${mod.id}`);
+        row.addEventListener("click", () => this.pick(mod));
+        list.appendChild(row);
+        return { mod, row };
+      });
+      const visible = () => rows.filter((r) => !r.row.hidden).map((r) => r.row);
+      const filter = () => {
+        const shown = new Set(filterPickerMods(own, search.value));
+        for (const { mod, row } of rows) row.hidden = !shown.has(mod);
+        empty.hidden = shown.size > 0;
+        count.textContent = search.value.trim()
+          ? `${shown.size} of ${own.length} shown`
+          : `${own.length} mod${own.length === 1 ? "" : "s"}`;
+      };
+      search.addEventListener("input", filter);
+      search.addEventListener("keydown", (e) => {
+        const first = visible()[0];
+        if (e.key === "ArrowDown" && first) {
+          e.preventDefault();
+          first.focus();
+        } else if (e.key === "Enter" && first) {
+          e.preventDefault();
+          first.click();
+        }
+      });
+      list.addEventListener("keydown", (e) => {
+        const items = visible();
+        const i = items.indexOf(document.activeElement);
+        if (i < 0) return;
+        let next = null;
+        if (e.key === "ArrowDown") next = items[Math.min(i + 1, items.length - 1)];
+        else if (e.key === "ArrowUp") next = i === 0 ? search : items[i - 1];
+        else if (e.key === "Home") next = items[0];
+        else if (e.key === "End") next = items[items.length - 1];
+        if (next) {
+          e.preventDefault();
+          next.focus();
+          next.scrollIntoView?.({ block: "nearest" });
+        }
+      });
+      const back = el("button", "btn", "Back");
+      back.type = "button";
+      back.addEventListener("click", () => {
+        this.mode = null;
+        this.stepChoice();
+      });
+      const other = this.differentToken();
+      other.classList.add("spacer");
+      const actions = el("div", "actions");
+      actions.append(other, back);
+      m.panel.append(search, count, list, empty, actions);
+      filter();
+      this.show(m);
+      search.focus({ preventScroll: true });
+    }
+
+    pick(mod) {
+      this.target = mod;
+      this.lastForm = null;
+      this.stepNext();
     }
 
     differentToken() {
@@ -407,17 +585,24 @@ export function createUploadFlow(ctx) {
       const m = this.open("Mod metadata", "wide");
       this.editor?.dispose();
       const mismatch = authorMismatchNote(this.pkg.prefill.author, this.identity.username);
+      const target = this.target;
+      // an update starts from the chosen catalog entry, a new mod from the package's trailer
+      const base = target
+        ? updatePrefill(target, this.pkg.prefill, vocabulary)
+        : { prefill: this.pkg.prefill, notes: [...this.pkg.notes] };
+      if (target) base.notes.unshift({ kind: "info", text: `Updating “${target.name}” (${target.id}).` });
+      if (mismatch) base.notes.unshift(mismatch);
       const editor = createEditor({
         vocabulary,
-        prefill: this.editedPrefill(),
-        forced: forcedFields(this.identity),
-        notes: mismatch ? [mismatch, ...this.pkg.notes] : this.pkg.notes,
+        prefill: this.editedPrefill(base.prefill),
+        forced: forcedFields(this.identity, target ? target.id : null),
+        notes: base.notes,
         packageSize: this.pkg.size,
         renderCard: ctx.renderCard,
-        confirmLabel: "Upload",
+        confirmLabel: target ? "Update" : "Upload",
         extraAction: this.differentToken(),
         onCancel: () => this.end(),
-        onSubmit: (form) => this.stepConfirm(form),
+        onSubmit: (form) => this.stepConfirm(target ? { ...form, targetIdentifier: target.id } : form),
       });
       this.editor = editor;
       this.editorModal = m;
@@ -426,15 +611,17 @@ export function createUploadFlow(ctx) {
       editor.focus();
     }
 
-    /** The package's prefill, or the values last edited when the editor is rebuilt (after a token change). */
-    editedPrefill() {
+    /** `base` (the package's or the chosen mod's prefill), or the values last
+     *  edited when the editor is rebuilt (after a token change). */
+    editedPrefill(base) {
       const f = this.lastForm;
-      if (!f) return this.pkg.prefill;
+      if (!f) return base;
       return {
         title: f.title, author: f.author, version: f.version, gameVersion: f.gameVersion,
-        description: f.description, tags: f.tags, guid: f.guid,
-        image: f.image === undefined ? this.pkg.prefill.image : f.image,
+        description: f.description, tags: f.tags,
+        image: f.image === undefined ? base.image : f.image,
         imageTouched: f.image !== undefined,
+        cover: f.image === undefined ? base.cover : null,
       };
     }
 
@@ -446,15 +633,19 @@ export function createUploadFlow(ctx) {
         onDismiss: () => (this.uploaded ? this.end() : this.backToEditor()),
       });
       this.confirm = m;
-      const heading = el("h2", "", confirmText(form.title, form.version));
+      const update = !!form.targetIdentifier;
+      const heading = el("h2", "", confirmText(form.title, form.version, update));
       m.panel.appendChild(heading);
       const body = el("div", "confirm-body");
-      body.appendChild(el("p", "", "The package is uploaded as it is; the catalog then adds your metadata and publishes it " +
-        `under the author name “${this.identity.username}”.`));
+      body.appendChild(el("p", "", update
+        ? `The package is uploaded as it is; the catalog then publishes it as the new version of ${form.targetIdentifier} ` +
+          `under the author name “${this.identity.username}”.`
+        : "The package is uploaded as it is; the catalog then adds your metadata and publishes it " +
+          `under the author name “${this.identity.username}”.`));
       const actions = el("div", "actions");
       const cancel = el("button", "btn", "Cancel");
       cancel.type = "button";
-      const go = el("button", "btn primary", "Upload");
+      const go = el("button", "btn primary", update ? "Update" : "Upload");
       go.type = "button";
       actions.append(cancel, go);
       body.appendChild(actions);
@@ -536,7 +727,7 @@ export function createUploadFlow(ctx) {
       }
       this.uploaded = true;
       this.dismissEditor();
-      heading.textContent = uploadedText(form.title, form.version);
+      heading.textContent = uploadedText(form.title, form.version, !!form.targetIdentifier);
       bar.remove();
       setStatus(statusMessage(202), "wait");
       const hint = el("p", "upload-hint", "This window updates once the mod is in the catalog. " +
@@ -588,7 +779,8 @@ export function createUploadFlow(ctx) {
     }
 
     async waitForPublish(form, setStatus, settled, finish, button, close) {
-      const target = { id: form.guid, name: form.title.trim(), version: form.version.trim() };
+      // the mod's id is its identifier: the update's target, else the one minted from the title
+      const target = { id: form.targetIdentifier || form.identifier, name: form.title.trim(), version: form.version.trim() };
       const deadline = Date.now() + POLL_MAX_MS;
       const signal = this.stop.signal;
       for (;;) {

@@ -134,11 +134,10 @@ class TestCatalogContract(Base):
         self.assertEqual(entry["gameVersion"], "5.6.1")
 
     def test_empty_tags_and_game_version_are_omitted(self):
-        guid = str(uuid.uuid4())
-        make_package(self.root / "a.zip", guid=guid)
+        make_package(self.root / "a.zip")
         self.to_inbox(self.root / "a.zip", "12345", f"{S('12345')}__1__a.zip")
         self.run_process()
-        entry = self.catalog_mods()[guid]
+        entry = self.catalog_mods()["12345.TestMod"]
         self.assertNotIn("tags", entry)
         self.assertNotIn("gameVersion", entry)
 

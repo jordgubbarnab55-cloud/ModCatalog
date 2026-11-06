@@ -39,8 +39,10 @@ async function downscale(bytes, mime) {
 /**
  * options:
  *   vocabulary  string[] | null   the tag vocabulary (tags.json); null hides the tags
- *   prefill     { title, author, version, gameVersion, description, tags, guid, image,
- *                 imageTouched? }  (imageTouched: `image` is the user's choice, not the package's)
+ *   prefill     { title, author, version, gameVersion, description, tags, image,
+ *                 imageTouched?, cover? }  (imageTouched: `image` is the user's choice, not the package's;
+ *                 cover: { url, label } a published cover shown while `image` is null and untouched —
+ *                 a plain <img> of the release URL, never fetched)
  *   forced      { author?: string, identifier?: string | (form) => string }
  *               greyed fields that show (and upload) the forced value
  *   notes       [{ kind: "info" | "warn", text }] lines shown above the form
@@ -61,6 +63,8 @@ export function createEditor(options) {
   };
   const selectedTags = new Set(prefill.tags ?? []);
   const image = { touched: prefill.imageTouched === true, mime: prefill.image?.mime ?? null, data: prefill.image?.data ?? null, url: null };
+  // the mod's published cover (an update): shown until the user picks or removes an image
+  image.remote = !image.touched && !image.data && prefill.cover?.url ? { ...prefill.cover, failed: false } : null;
 
   const root = el("div", "ed");
 
@@ -80,7 +84,7 @@ export function createEditor(options) {
   function renderPreview() {
     const r = currentResolved();
     const mod = {
-      id: prefill.guid || "new-mod",
+      id: r.identifier || "new-mod",
       name: form.title.trim() || "Mod name",
       author: r.author.trim() || "Author",
       version: form.version.trim(),
@@ -90,7 +94,7 @@ export function createEditor(options) {
       file: "#",
       size: packageSize,
       sha256: null,
-      cover: image.url,
+      cover: image.url ?? image.remote?.url ?? null,
       accent: null,
     };
     previewBox.replaceChildren(renderCard(mod, { preview: true }));
@@ -154,6 +158,13 @@ export function createEditor(options) {
   pickerIcon.innerHTML = IMAGE_ICON;
   const pickerImg = el("img");
   pickerImg.alt = "";
+  // a cover URL that fails to load falls back to the empty picker look
+  pickerImg.addEventListener("error", () => {
+    if (image.remote && pickerImg.getAttribute("src") === image.remote.url) {
+      image.remote.failed = true;
+      refresh();
+    }
+  });
   const pickerInfo = el("span", "info");
   const pickerClear = el("button", "ed-image-clear", "✕");
   pickerClear.type = "button";
@@ -220,14 +231,20 @@ export function createEditor(options) {
       chip.setAttribute("aria-pressed", String(selectedTags.has(tag)));
       chip.disabled = busy;
     }
-    const has = image.data !== null;
-    pickerLabel.hidden = pickerIcon.hidden = has;
-    pickerImg.hidden = !has;
+    const remote = image.data === null ? image.remote : null;
+    const has = image.data !== null || remote !== null;
+    const shown = has && !(remote && remote.failed);
+    pickerLabel.hidden = pickerIcon.hidden = shown;
+    pickerImg.hidden = !shown;
     pickerClear.hidden = !has || busy;
-    pickerInfo.textContent = has ? imageInfoText(image.mime, image.data.length) : "";
+    pickerInfo.textContent = remote ? remote.label : has ? imageInfoText(image.mime, image.data.length) : "";
     pickerInfo.hidden = !has;
-    if (has) pickerImg.src = image.url;
-    else pickerImg.removeAttribute("src");
+    const src = remote ? remote.url : image.url;
+    if (has && pickerImg.getAttribute("src") !== src) pickerImg.src = src;
+    else if (!has) pickerImg.removeAttribute("src");
+    picker.setAttribute("aria-label", remote
+      ? `Mod image: ${remote.label.toLowerCase()} (kept unless you choose another PNG or JPEG)`
+      : "Mod image (PNG or JPEG)");
     submit.disabled = busy || form.title.trim().length === 0 || r.author.trim().length === 0;
     cancel.disabled = busy;
     renderPreview();
@@ -272,6 +289,7 @@ export function createEditor(options) {
       return;
     }
     image.touched = true;
+    image.remote = null;
     image.data = prepared.data;
     image.mime = prepared.mime;
     setImageUrl();
@@ -296,6 +314,7 @@ export function createEditor(options) {
   pickerClear.addEventListener("click", (e) => {
     e.stopPropagation();
     image.touched = true;
+    image.remote = null;
     image.data = null;
     image.mime = null;
     setImageUrl();
@@ -330,7 +349,8 @@ export function createEditor(options) {
       gameVersion: form.gameVersion,
       description: form.description,
       tags: vocabulary ? vocabulary.filter((t) => selectedTags.has(t)) : [...selectedTags],
-      guid: prefill.guid || null,
+      // the catalog id the upload will get (only when the server forces it)
+      identifier: r.identifierForced ? r.identifier : null,
       image: img,
     };
   }

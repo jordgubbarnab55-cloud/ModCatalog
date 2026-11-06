@@ -41,9 +41,14 @@ Two upload shapes are accepted in the inbox (both end in a release-asset zip):
     the manifest, applies the metadata and zips the set HERE on the runner
     (the Worker is a stateless pass-through and cannot do it).
 
+Identity: a mod IS its trailer `identifier` (catalog `id`, release tag
+`mod_tag(identifier)`), minted on its first upload as
+`{discordId}.{Title, whitespace removed}` and locked afterwards; compared
+case-insensitively. The trailer GUID is only a revision id (fresh per upload).
+
 Verified authors: every stored package goes through `apply_metadata`, the one
 place a stored trailer is written, which FORCES `author` = the uploader's
-Discord username and `identifier` = `{discordId}.{Title, whitespace removed}`.
+Discord username, the resolved `identifier` and a fresh `guid`.
 The uploader is stamped into the inbox asset name by the Worker
 (`<discordId>-<hex of the UTF-8 username>__…`); nothing the client sends is
 trusted for it.
@@ -62,6 +67,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from typing import NamedTuple
@@ -436,10 +442,12 @@ def parse_upload_metadata(raw: bytes) -> dict:
         if not isinstance(value, str):
             raise PackageError(f'metadata.json: "{key}" must be a string')
         meta[key] = value
-    guid = obj.get("guid")
-    if guid is not None and not isinstance(guid, str):
-        raise PackageError('metadata.json: "guid" must be a string')
-    meta["guid"] = guid
+    # "guid" is ignored (a revision id the runner writes fresh); "identifier"
+    # names the mod an UPDATE targets (absent / null / "" = a new mod)
+    target = obj.get("identifier")
+    if target is not None and not isinstance(target, str):
+        raise PackageError('metadata.json: "identifier" must be a string')
+    meta["target"] = target.strip() if target and target.strip() else None
     tags = obj.get("tags")
     if tags is None:
         tags = []
@@ -472,14 +480,39 @@ class Uploader(NamedTuple):
     username: str
 
 
-def forced_identifier(uid: str, title: str) -> str:
-    """`{discordId}.{title}` with all whitespace removed (the app's cosmetic
-    identifier shape, with the verified id in place of the author)."""
-    return trailer.build_identifier(uid, title)
+def mint_identifier(uid: str, title: str) -> str:
+    """A new mod's permanent identifier: `{discordId}.{title}` with all
+    whitespace removed. The trailer puts no charset rule on identifiers (only
+    <= 513 UTF-16 units, which a <= 256 title + an id always fits), so every
+    other character of the title is kept; `mod_tag` makes it git-safe."""
+    identifier = trailer.build_identifier(uid, title)
+    if identifier.endswith("."):
+        raise PackageError("the title has no non-whitespace character to build the mod's identifier from")
+    return identifier
+
+
+def ident_key(identifier: str) -> str:
+    """Identifiers compare case-insensitively: the lowercase form is the key."""
+    return (identifier or "").lower()
+
+
+def mod_tag(identifier: str) -> str:
+    """The release tag of the mod with this identifier:
+    `mod-<slug>-<first 8 hex of sha256(lowercased identifier)>`, the slug being
+    the lowercased identifier reduced to [a-z0-9._-] (other runs -> "-", no
+    "..", no leading/trailing "." or "-", at most 100 chars). The hash keeps
+    two identifiers with the same slug apart; equal-ignoring-case identifiers
+    share the tag on purpose. E.g. "123.CoolMod!" -> "mod-123.coolmod-<8 hex>"."""
+    key = ident_key(identifier)
+    slug = re.sub(r"[^a-z0-9._-]+", "-", key)
+    slug = re.sub(r"\.{2,}", ".", slug)
+    slug = slug.strip(".-")[:100].strip(".-")
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+    return f"{MOD_TAG_PREFIX}{slug}-{digest}" if slug else f"{MOD_TAG_PREFIX}{digest}"
 
 
 def uploader_from_identifier(identifier: str) -> str | None:
-    """The Discord id a catalog-written trailer identifier starts with."""
+    """The Discord id a catalog-minted identifier starts with: its owner."""
     m = re.match(r"^(\d+)\.", identifier or "")
     return m.group(1) if m else None
 
@@ -494,34 +527,47 @@ def existing_trailer(utoc: bytes) -> dict | None:
         raise PackageError(f"the package's .utoc trailer is unreadable ({ex.kind}): {ex}") from ex
 
 
-def apply_metadata(utoc: bytes, metadata: dict | None, existing: dict | None,
-                   uploader: Uploader) -> bytes:
+def package_fields(metadata: dict | None, existing: dict | None) -> dict:
+    """The fields an upload declares: its metadata.json, else the package's
+    own trailer (which must then exist)."""
+    if metadata is not None:
+        return metadata
+    if existing is None:
+        raise PackageError("invalid or missing trailer (NoTrailer): no metadata trailer")
+    return existing
+
+
+def apply_metadata(utoc: bytes, metadata: dict | None, existing: dict | None, *,
+                   author: str, identifier: str, fallback_cover=None) -> bytes:
     """The one place a stored trailer is written: returns the .utoc with the
     package's metadata as its trailer.
 
     `metadata` is from `parse_upload_metadata`; None keeps the package's own
-    trailer fields (which must exist). Whatever the source, `author` and
-    `identifier` are FORCED from `uploader` — that is what makes the catalog's
-    authors verified.
-
-    The GUID is the package's existing one (a new one when it has none); a
-    metadata GUID that differs is rejected — identity changes go through
-    ModManager, not the catalog. A missing `image` key keeps the existing
-    cover; None removes it."""
-    if metadata is None:
-        if existing is None:
-            raise PackageError("invalid or missing trailer (NoTrailer): no metadata trailer")
-        metadata = existing
-    guid = metadata.get("guid")
-    if metadata is not existing and guid is not None and (
-            existing is None or guid.lower() != existing["guid"]):
-        raise PackageError("metadata guid is not the package's GUID (changing a mod's identity "
-                           "is done in ModManager, not through the catalog)")
-    meta = {k: metadata[k] for k in ("title", "description", "version", "game_version", "tags")}
-    meta["author"] = uploader.username
-    meta["identifier"] = forced_identifier(uploader.uid, meta["title"])
-    meta["guid"] = existing["guid"] if existing else None
-    meta["image"] = metadata["image"] if "image" in metadata else (existing or {}).get("image")
+    trailer fields (`package_fields`). Whatever the source, `author` (the
+    verified name), `identifier` (the mod's minted or locked one) and a FRESH
+    guid (a revision id) are forced. The cover: metadata `image` None removes
+    it, an object replaces it. Absent: for an explicit update (metadata.json
+    with an `identifier`, parsed as `target`) the mod's current cover
+    (`fallback_cover()`) comes first and the package's own cover is used only
+    when the mod has none; otherwise (a new mod, or no metadata.json, where the
+    package's trailer is the uploader's intent) the package's own cover is kept
+    and `fallback_cover()` supplies one only when the package has none."""
+    fields = package_fields(metadata, existing)
+    meta = {k: fields[k] for k in ("title", "description", "version", "game_version", "tags")}
+    meta["author"] = author
+    meta["identifier"] = identifier
+    meta["guid"] = str(uuid.uuid4())
+    if metadata is not None and "image" in metadata:
+        meta["image"] = metadata["image"]
+    else:
+        own = (existing or {}).get("image")
+        explicit_update = metadata is not None and bool(metadata.get("target"))
+        if explicit_update and fallback_cover is not None:
+            meta["image"] = fallback_cover() or own
+        else:
+            meta["image"] = own
+            if own is None and fallback_cover is not None:
+                meta["image"] = fallback_cover()
     try:
         return trailer.write_trailer(utoc, meta)[0]
     except trailer.TrailerError as ex:
@@ -534,17 +580,100 @@ def sanitize_name(s: str) -> str:
     return s or "package"
 
 
-def cover_name(guid: str, image: dict) -> tuple[str, str]:
-    """(mime, release-asset-name) for a trailer cover image."""
+def cover_name(image: dict) -> tuple[str, str]:
+    """(mime, release-asset-name) for a trailer cover image (in the mod's own
+    release, so the name only needs the content hash)."""
     ext = IMAGE_EXT.get(image["mime"])
     if ext is None:
         raise PackageError(f"unsupported cover mime {image['mime']!r}")
-    name = f"{guid}-cover-{hashlib.sha256(image['data']).hexdigest()[:8]}{ext}"
+    name = f"cover-{hashlib.sha256(image['data']).hexdigest()[:8]}{ext}"
     return image["mime"], name
 
 
 def mod_asset_name(meta: dict) -> str:
     return f"{sanitize_name(meta['title'])}-{sanitize_name(meta['version'])}.zip"
+
+
+def free_asset_name(base: str, taken: set[str]) -> str:
+    """`base` (a `<SafeName>-<version>.zip`) when no asset has it yet, else the
+    first free `<SafeName>-<version>-<n>.zip`, n = 2, 3, ... (a re-upload of a
+    version with different bytes; existing assets are never overwritten)."""
+    if base not in taken:
+        return base
+    stem = base[:-len(".zip")]
+    n = 2
+    while f"{stem}-{n}.zip" in taken:
+        n += 1
+    return f"{stem}-{n}.zip"
+
+
+def same_version_names(base: str, names) -> list[str]:
+    """The assets that may hold an earlier upload of `base`'s version: `base`
+    itself and its `-<n>` suffixed names (see `free_asset_name`)."""
+    stem = re.escape(base[:-len(".zip")])
+    return sorted(n for n in names if re.fullmatch(stem + r"(-\d+)?\.zip", n))
+
+
+def asset_order_key(asset: "Asset") -> tuple:
+    """Upload order of a release's assets: created-at, then (for a tie in
+    GitHub's 1 s resolution) the longer name -- a suffixed re-upload
+    `<base>-<n>.zip` is longer than the name it collided with -- then name."""
+    return (asset.created, len(asset.name), asset.name)
+
+
+_CONTENT_ORDER = (".utoc", ".ucas", ".pak", ".sig")
+
+
+def content_hash(members: dict) -> str:
+    """sha256 of a package set's content (members name -> bytes, the
+    .utoc/.ucas/.pak(+.sig) of one set), independent of the zip container
+    (timestamps, compression) and of member names: each member as extension
+    + length + bytes, in the fixed order .utoc, .ucas, .pak, .sig.
+
+    The .utoc is cut at TocEnd, so the trailer -- which the catalog rewrites
+    on every stored package -- does not count: "the same mod content"."""
+    by_ext = {_split(n)[1]: data for n, data in members.items()}
+    h = hashlib.sha256()
+    for ext in _CONTENT_ORDER:
+        data = by_ext.get(ext)
+        if data is None:
+            continue
+        if ext == ".utoc":
+            try:
+                end = trailer.toc_end(trailer.parse_toc_header(data), data)
+            except trailer.TrailerError as ex:
+                raise PackageError(f"cannot locate TocEnd in the .utoc ({ex.kind}): {ex}") from ex
+            data = data[:end]
+        h.update(ext.encode("ascii") + len(data).to_bytes(8, "little"))
+        h.update(data)
+    return h.hexdigest()
+
+
+def package_fingerprint(members: dict) -> str:
+    """"The same stored package": `content_hash` plus every trailer field
+    except the guid (a fresh revision id on every upload, so it never counts)."""
+    utoc = next((d for n, d in members.items() if _split(n)[1] == ".utoc"), b"")
+    meta = existing_trailer(utoc) or {}
+    fields = {k: v for k, v in meta.items() if k != "guid"}
+    if fields.get("image"):
+        fields["image"] = {"mime": fields["image"]["mime"], "data": fields["image"]["data"].hex()}
+    blob = json.dumps(fields, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(content_hash(members).encode("ascii") + b"\0" + blob).hexdigest()
+
+
+def zip_content_hash(path: pathlib.Path) -> str:
+    """`content_hash` of a package zip's set members."""
+    return content_hash(zip_members(path.read_bytes()))
+
+
+def zip_fingerprint(path: pathlib.Path) -> str:
+    """`package_fingerprint` of a package zip's set members."""
+    return package_fingerprint(zip_members(path.read_bytes()))
+
+
+def norm_title(title: str | None) -> str:
+    """A title for duplicate comparison: trimmed, case-insensitive."""
+    return (title or "").strip().casefold()
 
 
 def asset_url(owner: str, repo: str, tag: str, name: str) -> str:
@@ -561,12 +690,12 @@ def _iso(dt: datetime) -> str:
 
 
 def load_catalog(path: pathlib.Path) -> tuple[dict, dict]:
-    """Returns (catalog dict with mods list, guid -> entry map)."""
+    """Returns (catalog dict with mods list, `ident_key(id)` -> entry map)."""
     if path.is_file():
         with path.open(encoding="utf-8") as f:
             data = json.load(f)
         mods = data.get("mods", [])
-        return data, {m["id"]: m for m in mods if m.get("id")}
+        return data, {ident_key(m["id"]): m for m in mods if m.get("id")}
     return {"mods": []}, {}
 
 
@@ -576,9 +705,9 @@ def entry_from_meta(meta: dict, *, file_url: str, size: int, sha256: str,
     Tags outside the vocabulary are dropped with a log line."""
     tags, dropped = sanitize_tags(meta.get("tags"))
     if dropped:
-        print(f"  {meta['guid']}: unknown tag(s) dropped: {', '.join(dropped)}")
+        print(f"  {meta['identifier']}: unknown tag(s) dropped: {', '.join(dropped)}")
     entry = {
-        "id": meta["guid"],
+        "id": meta["identifier"],
         "name": meta["title"],
         "author": meta["author"],
         "version": meta["version"],
@@ -636,31 +765,43 @@ def dump_catalog(path: pathlib.Path, catalog: dict) -> None:
 # ------------------------------------------------------------ processing
 
 
-class PackageSource:
-    """One inbox item: how to materialize it into a file and how to delete it."""
+class Staged(NamedTuple):
+    """An upload as received, before its trailer is written: the set's
+    members (name -> bytes: .utoc/.ucas/.pak(+.sig) of one set) and its
+    parsed metadata.json (None = zip mode / a set without one)."""
+    members: dict
+    metadata: dict | None
 
-    def __init__(self, uploader: Uploader, materialize, delete, label: str):
+
+class PackageSource:
+    """One inbox item: how to load it (-> Staged) and how to delete it."""
+
+    def __init__(self, uploader: Uploader, load, delete, label: str):
         self.uploader = uploader
-        self._materialize = materialize  # (dest) -> path
+        self._load = load  # () -> Staged
         self._delete = delete
         self.label = label
 
-    def materialize(self, dest: pathlib.Path) -> pathlib.Path:
-        return self._materialize(dest)
+    def load(self) -> Staged:
+        return self._load()
 
     def delete(self) -> None:
         self._delete()
 
 
+def read_zip_package(path: pathlib.Path) -> dict:
+    """The set members of a zip-mode package (size-checked)."""
+    size = path.stat().st_size
+    if size > MAX_RELEASE_ASSET_BYTES:
+        raise PackageError(f"package is {size} bytes; the release asset limit is {MAX_RELEASE_ASSET_BYTES}")
+    return zip_members(path.read_bytes())
+
+
 def inbox_items_from_dir(d: pathlib.Path, uploader: Uploader) -> list[PackageSource]:
     """The dir's zips as uploads by `uploader` (seeding)."""
-    out = []
-    for p in sorted(d.glob("*.zip")):
-        def materialize(dest: pathlib.Path, p: pathlib.Path = p) -> pathlib.Path:
-            shutil.copyfile(p, dest)
-            return stamp_zip_file(dest, uploader)
-        out.append(PackageSource(uploader, materialize, (lambda: None), p.name))
-    return out
+    return [PackageSource(uploader, (lambda p=p: Staged(read_zip_package(p), None)),
+                          (lambda: None), p.name)
+            for p in sorted(d.glob("*.zip"))]
 
 
 def inbox_items_from_release(client: PackageClient) -> list[PackageSource]:
@@ -673,8 +814,9 @@ def inbox_items_from_release(client: PackageClient) -> list[PackageSource]:
                      <uploader>__<uploadId>__metadata.json   (optional)
                      <uploader>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>
     A set is reassembled (parts concatenated, per-file sha256 checked
-    against the manifest), its metadata applied and zipped HERE on the
-    runner — the Worker is a stateless pass-through and cannot do it. Incomplete groups are left
+    against the manifest) HERE on the runner — the Worker is a stateless
+    pass-through and cannot do it; the Processor then writes its trailer
+    and zips it. Incomplete groups are left
     alone (their parts are still arriving); groups stalled for over
     STALE_AFTER are deleted and logged.
     """
@@ -692,11 +834,13 @@ def inbox_items_from_release(client: PackageClient) -> list[PackageSource]:
                 client.delete_asset(INBOX_TAG, a.name)
                 print(f"  stale inbox zip {a.name} (>{STALE_AFTER // 86400} days), removed")
                 continue
-            def materialize(d: pathlib.Path, n: str = a.name, u: Uploader = info["uploader"]) -> pathlib.Path:
-                client.download_asset(INBOX_TAG, n, d)
-                return stamp_zip_file(d, u)
+            def load(n: str = a.name) -> Staged:
+                with tempfile.TemporaryDirectory() as td:
+                    p = pathlib.Path(td) / "upload.zip"
+                    client.download_asset(INBOX_TAG, n, p)
+                    return Staged(read_zip_package(p), None)
             sources.append(PackageSource(
-                info["uploader"], materialize,
+                info["uploader"], load,
                 (lambda n=a.name: client.delete_asset(INBOX_TAG, n)), a.name))
         else:
             key = (info["uploader"].uid, info["upload_id"])
@@ -779,54 +923,34 @@ def zip_members(blob: bytes) -> dict:
         return {name: zf.read(name) for name in chosen.values()}
 
 
-def stamp_members(members: dict, metadata: dict | None, uploader: Uploader) -> None:
-    """Rewrites the set's .utoc trailer in place (see `apply_metadata`)."""
-    utoc_name = next(n for n in members if _split(n)[1] == ".utoc")
-    members[utoc_name] = apply_metadata(members[utoc_name], metadata,
-                                        existing_trailer(members[utoc_name]), uploader)
+def utoc_member(members: dict) -> str:
+    """The name of the set's .utoc member."""
+    return next(n for n in members if _split(n)[1] == ".utoc")
 
 
-def stamp_zip_file(path: pathlib.Path, uploader: Uploader) -> pathlib.Path:
-    """The zip mode: re-zips the package at `path` around its .utoc with the
-    forced author/identifier (its other trailer fields are kept)."""
-    size = path.stat().st_size
-    if size > MAX_RELEASE_ASSET_BYTES:
-        raise PackageError(f"package is {size} bytes; the release asset limit is {MAX_RELEASE_ASSET_BYTES}")
-    members = zip_members(path.read_bytes())
-    stamp_members(members, None, uploader)
-    make_package_zip(members, path)
-    return path
-
-
-def build_set_package(data: dict, metadata: dict | None, uploader: Uploader,
-                      dest: pathlib.Path) -> None:
-    """Builds the package zip of a reassembled upload set at `dest`.
-
-    The set is the loose .utoc/.ucas/.pak(/.sig) files or exactly one .zip;
-    its members (and only those) are zipped around the .utoc that
-    `apply_metadata` rewrote, with or without a metadata.json."""
+def set_members(data: dict) -> dict:
+    """The package members of a reassembled upload set: the loose
+    .utoc/.ucas/.pak(/.sig) files, or the set members of exactly one .zip
+    (anything else in it is dropped)."""
     check_member_names(list(data))
     zips = [n for n in data if n.lower().endswith(".zip")]
     if zips:
         if len(data) != 1:
             raise PackageError("a .zip upload must be the only file in the set")
-        members = zip_members(data[zips[0]])
-    else:
-        verdict, _ = classify_raw(list(data))
-        if verdict != "ok":
-            raise PackageError(f"not one complete .utoc/.ucas/.pak (+.sig) set: {verdict}")
-        members = dict(data)
-    stamp_members(members, metadata, uploader)
-    make_package_zip(members, dest)
+        return zip_members(data[zips[0]])
+    verdict, _ = classify_raw(list(data))
+    if verdict != "ok":
+        raise PackageError(f"not one complete .utoc/.ucas/.pak (+.sig) set: {verdict}")
+    return dict(data)
 
 
 def rejecting_source(client: PackageClient, uploader: Uploader, label: str,
                      items: list, reason: str) -> PackageSource:
-    """A source whose materialization fails with `reason` (the normal
+    """A source whose loading fails with `reason` (the normal
     rejection path then deletes the whole group and logs it)."""
-    def materialize(dest: pathlib.Path) -> pathlib.Path:
+    def load() -> Staged:
         raise PackageError(reason)
-    return PackageSource(uploader, materialize,
+    return PackageSource(uploader, load,
                          (lambda: [client.delete_asset(INBOX_TAG, a.name) for _, a in items]),
                          label)
 
@@ -880,7 +1004,7 @@ def raw_group_source(client: PackageClient, uploader: Uploader, uid: str,
             print(f"  {label}: {f.get('name')}: parts incomplete ({len(have)}/{need}), waiting")
             return None
 
-    def materialize(dest: pathlib.Path) -> pathlib.Path:
+    def load() -> Staged:
         data: dict = {}
         for idx, f in enumerate(files):
             parts = sorted(parts_by_file[idx], key=lambda x: x[0]["part_idx"])
@@ -906,17 +1030,21 @@ def raw_group_source(client: PackageClient, uploader: Uploader, uid: str,
             if want and hashlib.sha256(raw).hexdigest() != want:
                 raise PackageError("metadata.json: sha256 mismatch")
             metadata = parse_upload_metadata(raw)
-        build_set_package(data, metadata, uploader, dest)
-        if dest.stat().st_size > MAX_RELEASE_ASSET_BYTES:
-            raise PackageError(f"package zip is {dest.stat().st_size} bytes; "
-                              f"the release asset limit is {MAX_RELEASE_ASSET_BYTES}")
-        return dest
+        return Staged(set_members(data), metadata)
 
     def delete() -> None:
         for _, a in items:
             client.delete_asset(INBOX_TAG, a.name)
 
-    return PackageSource(uploader, materialize, delete, label)
+    return PackageSource(uploader, load, delete, label)
+
+
+class Target(NamedTuple):
+    """Which mod an upload goes to: its identifier (minted or locked), the
+    existing catalog entry (None = a new mod) and its owner's Discord id."""
+    identifier: str
+    entry: dict | None
+    owner: str
 
 
 class Processor:
@@ -931,64 +1059,143 @@ class Processor:
         self.admins = admins
         self.catalog_path = catalog_path
         self.config_path = config_path
+        self._content: dict[str, str | None] = {}  # entry file URL -> content_hash
 
-    # -- ownership -----------------------------------------------------
     def _is_admin(self, uid: str) -> bool:
         return uid in self.admins
 
-    def _owner_of(self, guid: str, old_entries: dict) -> str | None:
-        entry = old_entries.get(guid)
-        return entry.get("uploader") if entry else None
+    # -- new mod or update ---------------------------------------------
+    def _target(self, staged: Staged, fields: dict, existing: dict | None,
+                uid: str, entries: dict) -> Target:
+        """Resolves new mod vs update (mod-contract/upload.md):
+
+          * metadata.json `identifier` -> an update of that mod: it must exist
+            (case-insensitive) and be the uploader's (admins bypass);
+          * metadata.json without it -> a new mod, identifier minted;
+          * no metadata.json -> an update when the package's trailer
+            identifier starts with `{uid}.` and that mod exists, else new.
+
+        A new mod whose minted identifier already exists is rejected. Raises
+        PackageError with the reason."""
+        if staged.metadata is not None and staged.metadata.get("target"):
+            wanted = staged.metadata["target"]
+            entry = entries.get(ident_key(wanted))
+            if entry is None:
+                raise PackageError(f"update of {wanted!r}: no mod with that identifier in the catalog")
+            owner = entry.get("uploader")
+            if owner != uid and not self._is_admin(uid):
+                raise PackageError(f"update of {entry['id']!r}: the mod belongs to {owner}; uploader {uid} rejected")
+            return Target(entry["id"], entry, owner)
+        if staged.metadata is None and existing is not None \
+                and uploader_from_identifier(existing["identifier"]) == uid:
+            entry = entries.get(ident_key(existing["identifier"]))
+            if entry is not None and entry.get("uploader") == uid:
+                return Target(entry["id"], entry, uid)
+        identifier = mint_identifier(uid, fields["title"])
+        taken = entries.get(ident_key(identifier))
+        if taken is not None:
+            raise PackageError(f"you already have a mod with the identifier {taken['id']!r}; "
+                               "choose Update to upload a new version of it")
+        return Target(identifier, None, uid)
+
+    def _current_cover(self, entry: dict) -> dict | None:
+        """The mod's current cover image (downloaded from its release), for
+        an update that brings none; None when it has none or it cannot be read."""
+        url = entry.get("cover")
+        if not url:
+            return None
+        name = url.rsplit("/", 1)[-1]
+        mime = next((m for m, ext in IMAGE_EXT.items() if name.lower().endswith(ext)), None)
+        if mime is None:
+            return None
+        try:
+            return {"mime": mime, "data": self.client.asset_bytes(mod_tag(entry["id"]), name)}
+        except Exception as ex:
+            print(f"  note: cannot reuse {entry['id']}'s cover {name} ({ex})")
+            return None
 
     # -- one item -------------------------------------------------------
     def _process_item(self, src: PackageSource, entries: dict,
                       now: datetime) -> tuple[bool, str]:
+        uploader = src.uploader
+        try:
+            staged = src.load()
+            utoc_name = utoc_member(staged.members)
+            existing = existing_trailer(staged.members[utoc_name])
+            fields = package_fields(staged.metadata, existing)
+            # `entries` is live: an earlier item of this same run counts too
+            target = self._target(staged, fields, existing, uploader.uid, entries)
+        except PackageError as ex:
+            src.delete()
+            return False, f"invalid package: {ex}"
+
+        # an admin updating someone else's mod: the entry stays under its
+        # owner, and the stored package carries the owner's (catalog) name
+        author = uploader.username if target.owner == uploader.uid else target.entry["author"]
+        members = dict(staged.members)
         with tempfile.TemporaryDirectory() as td:
             tmp = pathlib.Path(td) / "package.zip"
-            src.materialize(tmp)
             try:
+                members[utoc_name] = apply_metadata(
+                    members[utoc_name], staged.metadata, existing, author=author,
+                    identifier=target.identifier,
+                    fallback_cover=(lambda: self._current_cover(target.entry)) if target.entry else None)
+                make_package_zip(members, tmp)
                 meta = validate_package(tmp)
             except PackageError as ex:
                 src.delete()
                 return False, f"invalid package: {ex}"
 
-            guid = meta["guid"]
-            uploader = src.uploader.uid
-            admin = self._is_admin(uploader)
-            # `entries` is live: an earlier item in this same run can set the owner
-            owner = self._owner_of(guid, entries)
-            if owner and uploader != owner and not admin:
-                src._delete()
-                return False, f"GUID {guid} is owned by {owner}; uploader {uploader} rejected"
+            # the same content + title + version under ANOTHER identifier is a
+            # duplicate of that mod, whoever uploads it
+            content = content_hash(members)
+            dup = self._duplicate_of(meta, content, entries)
+            if dup is not None:
+                src.delete()
+                return False, (f"duplicate of the existing mod {dup['name']!r} v{dup['version']} "
+                               f"(id {dup['id']}): same content, title and version under another identifier")
 
-            zip_name = mod_asset_name(meta)
-            tag = f"{MOD_TAG_PREFIX}{guid}"
-            existing = self.client.get_release(tag)
-            if existing and any(a.name == zip_name for a in existing.assets):
-                src._delete()
-                return False, f"version already uploaded: {zip_name} (versions are immutable)"
+            tag = mod_tag(target.identifier)
+            existing_rel = self.client.get_release(tag)
+            taken = {a.name for a in existing_rel.assets} if existing_rel else set()
+            base_name = mod_asset_name(meta)
+            if base_name in taken:
+                # a re-upload of this version: accepted unless nothing changed
+                stored = package_fingerprint(members)
+                for other in same_version_names(base_name, taken):
+                    other_path = pathlib.Path(td) / f"existing-{other}"
+                    self.client.download_asset(tag, other, other_path)
+                    try:
+                        same = zip_fingerprint(other_path) == stored
+                    except PackageError:
+                        same = False
+                    other_path.unlink()
+                    if same:
+                        src.delete()
+                        return False, f"already uploaded as {other}, nothing changed"
+            zip_name = free_asset_name(base_name, taken)
 
-            if existing is None:
+            if existing_rel is None:
                 self.client.create_release(tag, meta["title"])
 
-            # upload the zip (under its own name)
-            staged = pathlib.Path(td) / zip_name
-            shutil.copyfile(tmp, staged)
+            # upload the zip (under a name no asset has: never overwrite)
+            staged_zip = pathlib.Path(td) / zip_name
+            shutil.copyfile(tmp, staged_zip)
             try:
-                self.client.upload_asset(tag, staged, zip_name)
+                self.client.upload_asset(tag, staged_zip, zip_name)
             except AssetExists:
-                src._delete()
-                return False, f"version already uploaded: {zip_name} (versions are immutable)"
+                src.delete()
+                return False, f"asset name {zip_name} was taken meanwhile; upload again"
 
             # cover (dedup: skip an identical one, never overwrite a different one)
             image = meta.get("image")
             if image is not None:
-                _, cname = cover_name(guid, image)
+                _, cname = cover_name(image)
                 rel = self.client.get_release(tag)
                 names = {a.name for a in rel.assets} if rel else set()
                 if cname in names:
                     if self.client.asset_bytes(tag, cname) != image["data"]:
-                        src._delete()
+                        src.delete()
                         return False, f"cover name collision with different content: {cname}"
                 else:
                     cover_path = pathlib.Path(td) / cname
@@ -996,19 +1203,46 @@ class Processor:
                     self.client.upload_asset(tag, cover_path, cname)
 
             sha = hashlib.sha256(tmp.read_bytes()).hexdigest()
-            src._delete()  # always: success or failure
-
-            new_owner = owner or uploader
-            if new_owner != uploader:
-                # an admin updating someone else's mod: the package carries the
-                # admin's stamp, but the entry stays under its owner's name
-                meta = {**meta, "author": entries[guid]["author"]}
+            src.delete()  # always: success or failure
 
             entry = entry_from_meta(
                 meta, file_url=asset_url(self.owner, self.repo, tag, zip_name),
-                size=tmp.stat().st_size, sha256=sha, uploader=new_owner, updated=_iso(now),
+                size=tmp.stat().st_size, sha256=sha, uploader=target.owner, updated=_iso(now),
                 cover_url=asset_url(self.owner, self.repo, tag, cname) if image is not None else None)
+            self._content[entry["file"]] = content
             return True, entry
+
+    # -- duplicates under another identifier ---------------------------
+    def _entry_content(self, entry: dict) -> str | None:
+        """`content_hash` of a catalog entry's current zip (downloaded through
+        the client at most once per run; None when it cannot be read)."""
+        url = entry.get("file") or ""
+        if url not in self._content:
+            name = url.rsplit("/", 1)[-1]
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    path = pathlib.Path(td) / "existing.zip"
+                    self.client.download_asset(mod_tag(entry["id"]), name, path)
+                    self._content[url] = zip_content_hash(path)
+            except Exception as ex:
+                print(f"  note: cannot read {entry['id']}'s {name} for the duplicate check ({ex})")
+                self._content[url] = None
+        return self._content[url]
+
+    def _duplicate_of(self, meta: dict, content: str, entries: dict) -> dict | None:
+        """The catalog entry under another identifier whose current package
+        has the same title (trimmed, case-insensitive), version (trimmed) and
+        content (`content_hash`, trailer ignored) as `meta`'s package, else
+        None. Only entries matching title + version are downloaded. `entries`
+        is live, so an earlier upload of this same run counts too."""
+        title, version = norm_title(meta["title"]), meta["version"].strip()
+        mine = ident_key(meta["identifier"])
+        for key, e in sorted(entries.items()):
+            if (key != mine and norm_title(e.get("name")) == title
+                    and (e.get("version") or "").strip() == version
+                    and self._entry_content(e) == content):
+                return e
+        return None
 
     def run(self, sources: list[PackageSource]) -> dict:
         # Make sure the inbox release exists so the Worker never 503s after
@@ -1016,17 +1250,17 @@ class Processor:
         if self.client.get_release(INBOX_TAG) is None:
             self.client.create_release(INBOX_TAG, "Inbox")
         _, old_entries = load_catalog(self.catalog_path)
-        entries = {m["id"]: dict(m) for m in old_entries.values()}
+        entries = {k: dict(m) for k, m in old_entries.items()}
         ok = rejected = 0
         for src in sources:
             try:
                 success, result = self._process_item(src, entries,
                                                    datetime.now(timezone.utc))
             except Exception as ex:  # a client hiccup must not strand the rest
-                src._delete()
+                src.delete()
                 success, result = False, f"error: {ex}"
             if success:
-                entries[result["id"]] = result
+                entries[ident_key(result["id"])] = result
                 for entry in entries.values():
                     if entry.get("uploader") == src.uploader.uid:
                         entry["author"] = src.uploader.username  # a rename follows the owner's uploads
@@ -1051,68 +1285,87 @@ def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.
             config_path: pathlib.Path = CONFIG_DEFAULT) -> dict:
     """Regenerates the whole catalog from the mod-* releases alone.
 
-    Each entry points at the most recently uploaded version zip of that
-    release (by asset created-at). Only the runner writes into `mod-*`
-    releases, so every package's trailer `identifier` starts with its
-    uploader's Discord id and its `author` is that uploader's username at
-    upload time. From that:
+    One release per mod identifier (`mod_tag`). Only the runner writes into
+    `mod-*` releases, so every package's trailer carries its mod's locked
+    `identifier` (`{ownerId}.…`) and its `author` is the verified name it was
+    stored with. Per release:
 
-      * `uploader` (the owner) = the uploader of the release's earliest
-        package (the first uploader of a GUID owns it);
+      * the packages whose identifier maps to the release's tag count
+        (others are skipped with a log line), ordered by `asset_order_key`;
+      * identifier = the earliest package's (locked), owner (`uploader`) =
+        the uploader of that earliest package = its identifier's id prefix;
+      * the entry points at the newest package (skipped when that is invalid);
       * `author` = the author of the most recent package, in any release,
-        uploaded by the owner's id (a rename follows the owner's uploads).
+        under the owner's id (a rename follows the owner's uploads; an
+        admin's update of the mod carries the owner's name);
+      * duplicates: mods whose newest packages share title + version +
+        `content_hash` keep only the one whose first package was uploaded
+        earliest -- `process`'s duplicate rule.
     """
-    candidates = []  # (meta, asset, sha256, cover_url, owner uid) of each release's newest package
+    candidates = []  # (meta, asset, sha256, cover_url, owner uid, tag, content_hash, first-upload key)
     latest_by_uid: dict[str, tuple] = {}  # uid -> ((created, name), author)
     for tag in client.list_tags(MOD_TAG_PREFIX):
         rel = client.get_release(tag)
         if rel is None:
             continue
         zips = sorted((a for a in rel.assets if a.name.lower().endswith(".zip")),
-                      key=lambda a: (a.created, a.name))
+                      key=asset_order_key)
         if not zips:
             print(f"  {tag}: no zip assets, skipped")
             continue
-        packages = []  # (asset, meta, uid, sha256) of the valid packages, oldest first
+        packages = []  # (asset, meta, uid, sha256, content_hash) of the valid packages, oldest first
         for asset in zips:
             with tempfile.TemporaryDirectory() as td:
                 tmp = pathlib.Path(td) / asset.name
                 client.download_asset(tag, asset.name, tmp)
                 try:
                     meta = validate_package(tmp)
+                    content = zip_content_hash(tmp)
                 except PackageError as ex:
                     print(f"  {tag}: {asset.name} REJECTED {ex}", file=sys.stderr)
-                    continue
-                if meta["guid"] != tag[len(MOD_TAG_PREFIX):]:
-                    print(f"  {tag}: {asset.name}: trailer guid {meta['guid']} does not match the tag, skipped",
-                          file=sys.stderr)
                     continue
                 uid = uploader_from_identifier(meta["identifier"])
                 if uid is None:
                     print(f"  {tag}: {asset.name}: identifier {meta['identifier']!r} carries no uploader id "
                           "(not written by this catalog), skipped", file=sys.stderr)
                     continue
-                packages.append((asset, meta, uid, hashlib.sha256(tmp.read_bytes()).hexdigest()))
+                if mod_tag(meta["identifier"]) != tag:
+                    print(f"  {tag}: {asset.name}: identifier {meta['identifier']!r} belongs to another "
+                          "release, skipped", file=sys.stderr)
+                    continue
+                packages.append((asset, meta, uid, hashlib.sha256(tmp.read_bytes()).hexdigest(),
+                                 content))
         if not packages or packages[-1][0] is not zips[-1]:
             print(f"  {tag}: the newest package is invalid, skipped", file=sys.stderr)
             continue
-        for asset, meta, uid, _ in packages:
+        for asset, meta, uid, *_ in packages:
             stamp = (asset.created, asset.name)
             if uid not in latest_by_uid or stamp > latest_by_uid[uid][0]:
                 latest_by_uid[uid] = (stamp, meta["author"])
-        asset, meta, _, sha = packages[-1]
+        identifier = packages[0][1]["identifier"]
+        asset, meta, _, sha, content = packages[-1]
         cover_url = None
         image = meta.get("image")
         if image is not None:
-            _, cname = cover_name(meta["guid"], image)
+            _, cname = cover_name(image)
             if any(a.name == cname for a in rel.assets):
                 cover_url = asset_url(owner, repo, tag, cname)
             else:
                 print(f"  {tag}: cover {cname} missing from the release, omitted")
-        candidates.append((meta, asset, sha, cover_url, packages[0][2], tag))
+        candidates.append(({**meta, "identifier": identifier}, asset, sha, cover_url, packages[0][2], tag,
+                           content, asset_order_key(packages[0][0]) + (tag,)))
 
+    # the same content + title + version under several identifiers: the mod
+    # whose first package is the earliest wins, the later ones are skipped
+    kept: dict[tuple, str] = {}
     entries = []
-    for meta, asset, sha, cover_url, owner_uid, tag in candidates:
+    for meta, asset, sha, cover_url, owner_uid, tag, content, _ in sorted(candidates, key=lambda c: c[7]):
+        key = (norm_title(meta["title"]), meta["version"].strip(), content)
+        if key in kept:
+            print(f"  {tag}: duplicate of {kept[key]} (same content, title and version), skipped",
+                  file=sys.stderr)
+            continue
+        kept[key] = tag
         entries.append(entry_from_meta(
             {**meta, "author": latest_by_uid[owner_uid][1]},
             file_url=asset_url(owner, repo, tag, asset.name), size=asset.size, sha256=sha,

@@ -18,7 +18,8 @@
       "type": "object",
       "required": ["id", "name", "file"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1,
+                "description": "The mod's permanent identity (ModCatalog: the trailer identifier); unique case-insensitively." },
         "name": { "type": "string", "minLength": 1, "maxLength": 256 },
         "author": { "type": "string", "maxLength": 256 },
         "version": { "type": "string", "maxLength": 64 },

@@ -20,10 +20,12 @@ A public mod catalog and upload system, running entirely on free tiers:
 
 ## The release assets are the source of truth
 
-Every mod is a `.zip` **release asset** (a `mod-<guid>` release, one per mod)
+Every mod is a `.zip` **release asset** (a `mod-<identifier slug>-<hash>`
+release, one per mod; the trailer `identifier`, minted on the first upload as
+`{discordId}.{Title}` and then locked, is the mod's identity)
 whose package contains a UE packaged container whose `.utoc` carries a
 **metadata trailer** (the ModManager trailer format: `"UEMODMET"` magic +
-JSON payload with `title`/`author`/`description`/`version`/`guid` and an
+JSON payload with `title`/`author`/`description`/`version`/`identifier`/`guid` and an
 embedded cover image). Nothing about a mod is typed into `catalog.json` by
 hand.
 
@@ -31,7 +33,7 @@ hand.
 
 - **`Process inbox`** (`.github/workflows/process-inbox.yml`) drains the
   `inbox` release (the Worker's staging area), validates each package,
-  re-homes it to `mod-<guid>`, merges the entry into `site/catalog.json`
+  re-homes it to its mod's release, merges the entry into `site/catalog.json`
   and deploys Pages — all in one run.
 - **`Rebuild catalog`** (`.github/workflows/rebuild.yml`) regenerates the
   whole file from scratch from the `mod-*` releases, so a lost or corrupt
@@ -66,11 +68,16 @@ Pages.
 Limits: **100 MB per upload** (one file or one part; Cloudflare free-plan
 request-body limit) — raw file sets may be up to GitHub's **2 GiB**
 per-asset limit, and the daily quota is **2 GiB per user**;
-**versions are immutable** (re-uploading a `name-version` you already
-published is rejected; publish a new version instead). The first uploader of a mod's GUID becomes its owner; uploads by
-anyone else are rejected (admins from `ADMIN_DISCORD_IDS` bypass this).
-The author shown is always your Discord **username**, whatever the package
-says: the catalog rewrites the stored trailer's `author` and `identifier`.
+stored packages are never overwritten (re-uploading a version you already
+published with changed files is stored alongside it and becomes the current
+download; an unchanged re-upload is rejected), and the same files with the
+same title and version under another identifier are rejected as a duplicate
+of the existing mod. A new upload mints the mod's identifier
+`{discordId}.{Title}` (an identifier you already have is rejected: update that
+mod instead); an update (`metadata.json` `identifier`) must target one of your
+own mods (admins from `ADMIN_DISCORD_IDS` bypass this). The author shown is
+always your Discord **username**, whatever the package says: the catalog
+rewrites the stored trailer's `author`, `identifier` and (fresh) `guid`.
 
 ## Files
 
@@ -99,11 +106,11 @@ tests/                    offline unit tests for the pipeline (unittest)
 
 Top level: `{ "name", "description", "mods": [ ... ] }` (`name`/`description`
 from `site/config.json` `title`/`description`). Each mod entry
-(one per GUID, pointing at the most recently uploaded version):
+(one per mod identifier, pointing at the most recently uploaded version):
 
 | Field         | Meaning                                                       |
 |---------------|---------------------------------------------------------------|
-| `id`          | The trailer GUID (stable identity across versions)            |
+| `id`          | The trailer identifier (permanent identity across versions and renames) |
 | `name`        | Trailer title                                                 |
 | `author`      | The uploader's Discord username, **verified** (the catalog sets `"verifiedAuthors": true`); follows renames on the owner's uploads |
 | `version`     | Trailer version (shown as `v{version}`)                       |

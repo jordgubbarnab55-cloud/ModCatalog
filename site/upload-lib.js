@@ -4,6 +4,7 @@
 // module; the helpers are also put on `window`.
 
 import { buildIdentifier } from "./trailer.js";
+import { matches, sanitizeTags } from "./catalog-lib.js";
 
 /** True when config.json points at a usable (non-placeholder) Worker URL. */
 export function configOk(uploadUrl) {
@@ -150,10 +151,11 @@ export function deriveIdentifier(author, title) {
 /** The verified fields of this catalog (mod-contract/upload.md): the author is
  *  the uploader's Discord username and the identifier is
  *  "{discordId}.{Title}" without whitespace, following the title live. */
-export function forcedFields(identity) {
+export function forcedFields(identity, targetIdentifier = null) {
   return {
     author: identity.username,
-    identifier: (form) => deriveIdentifier(identity.discordId, form.title),
+    // an update keeps its mod's locked identifier whatever the title becomes
+    identifier: targetIdentifier || ((form) => deriveIdentifier(identity.discordId, form.title)),
   };
 }
 
@@ -218,7 +220,11 @@ export function resolveForm(form, forced = {}) {
 }
 
 /** The metadata.json body (mod-contract/upload.md). `image` undefined keeps the
- *  package's cover, null removes it, { mime, data: Uint8Array } replaces it. */
+ *  package's cover (an update with none reuses the mod's current one), null
+ *  removes it, { mime, data: Uint8Array } replaces it. `form.targetIdentifier`
+ *  (optional) makes the upload an UPDATE of that mod; without it the server
+ *  mints a new mod's identifier from the title. No `guid` is ever sent: the
+ *  server writes a fresh revision GUID. */
 export function buildMetadataJson(form) {
   const body = {
     title: (form.title ?? "").trim(),
@@ -228,22 +234,28 @@ export function buildMetadataJson(form) {
     game_version: (form.gameVersion ?? "").trim(),
     tags: [...(form.tags ?? [])],
   };
-  if (form.guid) body.guid = form.guid;
+  const target = (form.targetIdentifier ?? "").trim();
+  if (target) body.identifier = target;
   if (form.image === null) body.image = null;
   else if (form.image) body.image = { mime: form.image.mime, data: bytesToBase64(form.image.data) };
   return JSON.stringify(body);
 }
 
-/** "Upload ‹title› v‹version› to the catalog?" */
-export function confirmText(title, version) {
+/** "Upload ‹title› v‹version› to the catalog?", or for an update
+ *  "Update ‹title› to v‹version›?". */
+export function confirmText(title, version, update = false) {
   const v = (version ?? "").trim();
-  return `Upload “${(title ?? "").trim()}”${v ? ` v${v}` : ""} to the catalog?`;
+  const t = (title ?? "").trim();
+  if (update) return `Update “${t}”${v ? ` to v${v}` : ""}?`;
+  return `Upload “${t}”${v ? ` v${v}` : ""} to the catalog?`;
 }
 
 /** The result modal's heading once every request of the upload was accepted. */
-export function uploadedText(title, version) {
+export function uploadedText(title, version, update = false) {
   const v = (version ?? "").trim();
-  return `“${(title ?? "").trim()}”${v ? ` v${v}` : ""} is uploaded`;
+  const t = (title ?? "").trim();
+  if (update) return `The update of “${t}”${v ? ` to v${v}` : ""} is uploaded`;
+  return `“${t}”${v ? ` v${v}` : ""} is uploaded`;
 }
 
 /** The flow's final line once the mod shows up in the catalog. */
@@ -315,19 +327,72 @@ export function findNewModByName(before, after, name) {
     (name === null || (m["name"] || "").toLowerCase() === String(name).toLowerCase())) || null;
 }
 
-/** The upload's mod once it is published: matched by id (when known) or name,
- *  and new in the catalog or changed since `before` (a new version of an
- *  existing mod keeps its id). */
+/** The upload's mod once it is published: matched by id (the identifier,
+ *  case-insensitively, when known) or name, and new in the catalog or changed
+ *  since `before` (a new version of an existing mod keeps its id). */
 export function findPublishedMod(before, after, { id, name, version }) {
   const old = new Map((before || []).map((m) => [m["id"], m]));
+  const want = id ? String(id).toLowerCase() : null;
   return (after || []).find((m) => {
     if (!m) return false;
-    const same = id ? m["id"] === id : (m["name"] || "").toLowerCase() === String(name).toLowerCase();
+    const same = want ? String(m["id"] ?? "").toLowerCase() === want
+      : (m["name"] || "").toLowerCase() === String(name).toLowerCase();
     if (!same) return false;
     if (version && m["version"] !== version) return false;
     const prior = old.get(m["id"]);
     return !prior || prior["file"] !== m["file"] || prior["version"] !== m["version"] || prior["updated"] !== m["updated"];
   }) || null;
+}
+
+// ------------------------------------------------------ upload or update
+
+/** Why Update is unavailable (the choice step's tooltip). */
+export const NO_OWN_MODS_TEXT = "You haven't uploaded any mods yet — Update needs a mod you own.";
+
+/** The catalog mods (parseCatalog entries) owned by `discordId`, by name. */
+export function ownMods(mods, discordId) {
+  const id = discordId == null ? "" : String(discordId);
+  if (!id) return [];
+  return (mods || [])
+    .filter((m) => m && m.uploader === id)
+    .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? "", undefined, { sensitivity: "base" })
+      || String(a.id).localeCompare(String(b.id)));
+}
+
+/** The update picker's search: the catalog's own `matches` (every word must
+ *  appear in the name, author, description or a tag), plus the identifier. */
+export function filterPickerMods(mods, query) {
+  const words = (query ?? "").trim().toLowerCase().split(/\s+/).filter((w) => w.length > 0);
+  return (mods || []).filter((m) => {
+    const id = String(m.id ?? "").toLowerCase();
+    return words.every((w) => id.includes(w) || matches(m, w, []));
+  });
+}
+
+/** The editor's prefill for an update: the chosen catalog entry's values
+ *  (tags cleaned against the vocabulary), not the package trailer's. */
+export function editorPrefillFromEntry(entry, vocabulary = null) {
+  return {
+    title: entry.name ?? "",
+    author: entry.author ?? "",
+    version: entry.version ?? "",
+    gameVersion: entry.gameVersion ?? "",
+    description: entry.description ?? "",
+    tags: sanitizeTags(entry.tags ?? [], vocabulary).kept,
+    image: null,
+    cover: entry.cover ? { url: entry.cover, label: "Current cover" } : null,
+  };
+}
+
+/** An update's editor prefill and notes from the chosen entry and the picked
+ *  package. The image picker shows what the server will publish when it is left
+ *  untouched (no `image` sent): the mod's current cover when it has one (an
+ *  update keeps it over the package's own — build.py apply_metadata), else the
+ *  package's own cover. */
+export function updatePrefill(entry, packagePrefill, vocabulary = null) {
+  const prefill = editorPrefillFromEntry(entry, vocabulary);
+  if (!prefill.cover && packagePrefill?.image) prefill.image = packagePrefill.image;
+  return { prefill, notes: [] };
 }
 
 // The pages load this as <script type="module">; expose the helpers

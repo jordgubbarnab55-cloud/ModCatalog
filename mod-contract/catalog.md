@@ -15,7 +15,7 @@ follow the lenient rules below; the fixtures in `fixtures/catalogs/` pin both.
   "verifiedAuthors": true,           // optional; see below
   "mods": [
     {
-      "id": "3f2b8c1e-…",            // stable per server; the trailer GUID is ideal
+      "id": "123456789.FullMod",     // the mod's permanent identity; ModCatalog: the trailer identifier
       "name": "Full Mod",            // the trailer title
       "author": "Team Name",
       "version": "2.3.4",
@@ -37,6 +37,11 @@ entry's `author` to the name of the account that uploaded it (ModCatalog: the
 uploader's Discord username), rather than to text the package declared.
 Readers may surface it (a "verified" mark next to the author); they must not
 rely on it for security decisions, since any catalog can claim it.
+
+`id` is the mod's permanent identity: a writer keeps it across versions and
+renames. ModCatalog uses the trailer `identifier` (`trailer-spec.md`), so a
+dependency can name a mod by it; two entries never differ only by case. (The
+trailer `guid` is a per-upload revision id, not an identity.)
 
 Only `mods[].id`, `name` and `file` are required. Extra fields (ModCatalog's
 `uploader`, `updated`) are allowed and ignored by readers. URLs should be

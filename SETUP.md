@@ -41,7 +41,7 @@ because moving `index.html` into `site/` breaks the old Pages build.
    username is published as their author — every package in the catalog
    belongs to a verified account). It treats the zips in `legacy-assets/` as
    uploads by that account: creates the `inbox` release, the three
-   `mod-<guid>` releases (with covers), writes `site/catalog.json` and
+   per-mod `mod-<identifier slug>-<hash>` releases (with covers), writes `site/catalog.json` and
    deploys Pages. (Locally: `python build.py process --from-dir legacy-assets
    --as-uid <id> --as-username <name>`; it refuses to run without both.)
 7. **Verify.**

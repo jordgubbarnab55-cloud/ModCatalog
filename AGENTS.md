@@ -23,15 +23,26 @@ repos sit side by side) and runs the shared fixtures against `trailer.py`,
 
 ## Core contract: the release assets are the source of truth
 
-- A mod = a `.zip` **release asset** in a per-mod release tagged
-  `mod-<guid>` (one release per mod), whose package is a UE container
+- **A mod's identity is its trailer `identifier`** (catalog `id`): minted on
+  its first upload as `{discordId}.{Title, whitespace removed}`
+  (`mint_identifier`), then **locked** for every later version, whatever the
+  title becomes; compared **case-insensitively** (`ident_key`). Dependencies
+  will reference it. The trailer **GUID is only a revision id**: the runner
+  writes a fresh one on every accepted upload; nothing keys on it (use
+  sha256 / `content_hash`).
+- A mod = `.zip` **release assets** in one per-mod release tagged
+  `mod_tag(identifier)` = `mod-<slug>-<8 hex>` (slug = the lowercased
+  identifier reduced to `[a-z0-9._-]`, no `..`, no leading/trailing `.`/`-`,
+  <= 100 chars; hex = `sha256(lowercased identifier)[:8]`, so distinct
+  identifiers never share a tag; e.g. `123.CoolMod!` ->
+  `mod-123.coolmod-<hex>`), whose package is a UE container
   whose `.utoc` carries a **metadata trailer** (`"UEMODMET"` magic +
   compact UTF-8 JSON payload: `schema`/`title`/`author`/`description`/
   `version`/`game_version`/`guid`/`identifier` + optional `tags` and base64
   `image` PNG/JPEG ≤ 4 MiB — `mod-contract/trailer-spec.md`). In this
   catalog `author` and `identifier` are **verified** (see "Ownership").
 - `site/catalog.json` is a **generated artifact — never edit it by hand**.
-  All mod data (including the `id`, the trailer GUID) is derived from the
+  All mod data (including the `id`, the trailer identifier) is derived from the
   packages. Top-level catalog `name`/`description` come from
   `site/config.json` `title`/`description` (`build.load_catalog_identity`;
   defaults `DEFAULT_CATALOG_NAME`/`DEFAULT_CATALOG_DESCRIPTION` when absent
@@ -48,7 +59,7 @@ repos sit side by side) and runs the shared fixtures against `trailer.py`,
 
 ## The inbox → re-home flow (and why)
 
-The Worker cannot know a package's GUID without parsing the zip (10 ms CPU
+The Worker cannot know a package's metadata without parsing the zip (10 ms CPU
 on the free plan, and it must not trust client-supplied IDs), so:
 
 1. The Worker streams each upload into one fixed release tagged
@@ -76,58 +87,96 @@ on the free plan, and it must not trust client-supplied IDs), so:
    one), so processing "the asset named in the dispatch payload" would
    silently strand uploads. Hence `concurrency: {group: catalog,
    cancel-in-progress: false}` — index merges never race.
-3. For upload sets the workflow first **reassembles the parts, verifies
-   the per-file sha256 against the manifest, writes the trailer, and zips
-   the set on the runner** (`build_set_package` → `apply_metadata` →
-   `make_package_zip`, deterministic member order — the Worker cannot, 10 ms
-   CPU). **Every accepted package gets its trailer rewritten** —
-   `apply_metadata` is **the one function that writes a stored trailer**:
-   the metadata is the `metadata.json` when there is one, else the package's
-   own trailer fields (which must exist); **`author` = the stamped username
-   and `identifier` = `{discordId}.{Title, whitespace removed}` are forced**
-   on top of either; GUID = the package's existing one, else new; a metadata
-   `guid` that differs is a rejection; `image` absent keeps the cover, `null`
-   removes it, an object replaces it. The package zip is built from the set
-   members + that `.utoc` (a `.zip` set is re-zipped from its set members,
-   unrelated entries dropped). The old zip mode goes through the same
-   rewrite (`stamp_zip_file`), so a package edited in the app is corrected
-   too. An invalid
+3. For upload sets the workflow first **reassembles the parts and verifies
+   the per-file sha256 against the manifest** on the runner (the Worker
+   cannot, 10 ms CPU): `raw_group_source` → `set_members` (zip mode:
+   `read_zip_package`) give a `Staged` (set members + parsed
+   `metadata.json`). The `Processor` then decides **new mod or update**
+   (`Processor._target`, `mod-contract/upload.md`):
+   - `metadata.json` `identifier` present → update of that mod: it must
+     exist (case-insensitive) and be the uploader's (admins bypass), else
+     rejected ("no mod with that identifier" / "belongs to …");
+   - `metadata.json` without it → new mod, identifier minted from the title;
+     an existing identifier → rejected ("you already have a mod with the
+     identifier …; choose Update"); a whitespace-only title cannot mint;
+   - no `metadata.json` (zip mode = ModManager's `UploadClient`, or a set
+     without one) → update when the trailer identifier starts with
+     `{uploaderId}.` and that mod exists, else a new mod (minted, same
+     collision rule).
+   The metadata `guid` is **ignored**. **Every accepted package gets its
+   trailer rewritten** — `apply_metadata` is **the one function that writes
+   a stored trailer**: the fields are the `metadata.json` when there is one,
+   else the package's own trailer (which must exist); **`author` = the
+   stamped username (an admin updating someone else's mod: the owner's
+   catalog name), `identifier` = the resolved one and a fresh `guid` are
+   forced**; `image` absent: a new mod keeps the package's cover; a
+   `metadata.json` **update** (`identifier`) keeps the mod's **current**
+   cover even over the package's own (the package's is used only when the mod
+   has none); an update without `metadata.json` keeps the package's cover and
+   reuses the current one only when it has none. A reused cover is downloaded
+   from the mod's release and written in (so `rebuild` sees it); `null`
+   removes it, an object replaces it. The package zip is then built from the set members +
+   that `.utoc` (`make_package_zip`, deterministic member order; a `.zip`
+   set is re-zipped from its set members, unrelated entries dropped). An invalid
    `metadata.json` (schema, bad base64/image, sha mismatch) rejects the
    whole set and deletes its inbox assets. A manifest that declares
    metadata makes the group wait until `metadata.json` arrives.
    Incomplete groups are left for the next run; groups stalled for over
    7 days are swept.
 4. The workflow then **re-homes** the package: ensures release
-   `mod-<guid>` exists (title = mod name), uploads the zip as
-   `<SafeName>-<version>.zip`, uploads the cover (if any) as
-   `<guid>-cover-<sha256[:8]>.png|jpg`, and deletes the inbox assets
+   `mod_tag(identifier)` exists (title = the mod's first name), uploads the
+   zip as `<SafeName>-<version>.zip` (or the next free `-2`, `-3`, … suffix,
+   see step 5), uploads the cover (if any) as
+   `cover-<sha256[:8]>.png|jpg`, and deletes the inbox assets
    (whether or not processing succeeded). GitHub cannot move assets between
    releases, hence the re-upload (runners have bandwidth to spare).
-5. **Versions are immutable**: an existing `<SafeName>-<version>.zip` name
-   rejects the upload (never overwrite). Old versions' assets stay; the
-   catalog entry points at the most recently uploaded version.
+5. **Assets are immutable, versions may be re-uploaded**: a bumped version
+   of a mod is an update; the **same version with different bytes** (e.g.
+   rebuilt for a new game version) is an update too, stored under the next
+   free `<SafeName>-<version>-<n>.zip` (n = 2, 3, …; `free_asset_name`) —
+   an existing asset is never overwritten. A re-upload whose stored package
+   equals one of that version's assets (`package_fingerprint`: `content_hash`
+   + every trailer field except the per-upload guid; zip container ignored —
+   the package zip is **not** byte-deterministic, member timestamps are the
+   build time) is
+   rejected as "nothing changed". Old assets stay; the catalog entry points
+   at the most recently uploaded one (`rebuild` orders by
+   `asset_order_key`: created-at, then the longer = suffixed name).
+   **The same mod under another identifier is rejected**, whoever uploads
+   it: same `content_hash` (the set's `.utoc` cut at `TocEnd` +
+   `.ucas`/`.pak`/`.sig`, trailer and names ignored) + same title (trimmed,
+   case-insensitive) + same version (trimmed) as another mod's **current**
+   catalog entry (only those
+   title+version matches are downloaded; earlier uploads of the same run
+   count). Differing title, version or content is a new mod. `rebuild`
+   applies the same rule: of mods whose newest packages match, the one
+   whose first package is earliest wins, the others are skipped with a log
+   line.
 6. The workflow creates the `inbox` release if it does not exist, so
    nobody has to create it by hand. The built zip is capped at GitHub's
    2 GiB per-asset limit (the 100 MB number is only the Worker's request
    body).
 
-## Ownership and verified authors (the GUID is self-declared inside the file)
+## Ownership and verified authors
 
-- The **first** uploader of a GUID becomes its owner (`uploader` catalog
-  field, the Discord user id). Later uploads of an existing GUID from a
-  different Discord id are rejected and their inbox asset deleted.
+- The uploader who mints a mod owns it (`uploader` catalog field, the
+  Discord user id — also the identifier's `{id}.` prefix). An update
+  (`metadata.json` `identifier`) of someone else's mod is rejected and its
+  inbox assets deleted; a zip/metadata-less upload carrying someone else's
+  identifier simply becomes the uploader's own new mod.
 - Discord ids in the `ADMIN_DISCORD_IDS` repo variable (comma-separated,
-  read from the environment) bypass the **ownership** check only: an admin's
-  package is forced like everyone's, and the entry stays under its owner
-  (its `author` is not changed to the admin's name). Every package has an
-  uploader — there are no `uploader: null` entries.
+  read from the environment) bypass the **ownership** check only (updates
+  by `metadata.json` `identifier`): the entry stays under its owner, and
+  both the entry and the stored package carry the **owner's** catalog name
+  (so `rebuild` attributes it correctly — the locked identifier names the
+  owner, not the admin). Every package has an uploader — there are no
+  `uploader: null` entries.
 - **The author is verified in this catalog** (catalog `"verifiedAuthors":
   true`): every stored package's trailer has `author` = the uploader's
-  Discord **`username`** (not the display name or nickname) at upload time and
-  `identifier` = `{discordUid}.{Title without whitespace}` (cosmetic, the GUID
-  stays the identity), forced in `apply_metadata` whatever the package or
-  `metadata.json` says. Elsewhere (ModManager's editor, `io-trailer`) the
-  trailer author stays cosmetic text — nothing there changed.
+  Discord **`username`** (not the display name or nickname) at upload time,
+  forced in `apply_metadata` whatever the package or `metadata.json` says.
+  Elsewhere (ModManager's editor, `io-trailer`) the trailer author stays
+  cosmetic text — nothing there changed.
 - **Renames propagate only through the owner's own uploads**: after any
   successful upload by `uid`, `author` of **every** catalog entry whose
   `uploader == uid` is set to the current username. Someone who leaves keeps
@@ -136,10 +185,12 @@ on the free plan, and it must not trust client-supplied IDs), so:
   change.
 - **`rebuild` reproduces all of it from the releases alone** (only the
   runner writes into `mod-*` releases, so a trailer `identifier`'s id prefix
-  is trusted): a release's owner = the uploader of its earliest valid
-  package; an entry's `author` = the author of the most recently uploaded
-  package (any release) by that owner id. Packages whose identifier carries
-  no id prefix (not written by this catalog) are skipped with a log line.
+  is trusted): one entry per release/identifier; identifier = the earliest
+  valid package's (locked), owner = its uploader (the id prefix); the entry
+  points at the newest package (`asset_order_key`); `author` = the author of
+  the most recently uploaded package (any release) under that owner id.
+  Packages whose identifier carries no id prefix (not written by this
+  catalog) or maps to another release's tag are skipped with a log line.
   This reads every version zip of every release, not just the newest.
 - Seeding: `process --from-dir DIR --as-uid ID --as-username NAME` (both
   required, the command refuses without them) treats the dir's zips as
@@ -176,8 +227,8 @@ to 64 KiB.
 - `python build.py process --from-dir <dir> --as-uid <id> --as-username
   <name>` — treat the dir's zips as uploads by that Discord account; used
   for one-off seeding (the `seed-legacy` workflow's inputs).
-- `python build.py rebuild` — enumerate all `mod-*` releases, read each
-  newest version zip's trailer, regenerate the whole catalog from scratch
+- `python build.py rebuild` — enumerate all `mod-*` releases, read every
+  version zip's trailer, regenerate the whole catalog from scratch
   (releases are the source of truth, so a lost/corrupt catalog recovers,
   `uploader` and the verified `author`s included — see Ownership).
 - **`--client local --root <dir>`** selects the directory-backed fake
@@ -192,7 +243,9 @@ to 64 KiB.
   installer (`mod-contract/package-spec.md`: no unsafe member paths, exactly
   one complete `.utoc/.ucas/.pak` (+`.sig`) set grouped by base name —
   `classify_members` / `classify_raw`); that set's `.utoc` has a valid
-  trailer.
+  trailer (or a `metadata.json`); then new-mod/update resolution with
+  ownership, not a duplicate of another mod's current entry, and not an
+  unchanged re-upload of a stored asset (inbox flow steps 3 and 5).
 - **Catalog entries** come from one function, `entry_from_meta` (both
   `process` and `rebuild`): `gameVersion` and `tags` are emitted when
   non-empty; tags are filtered through `mod-contract/tags.json`
@@ -200,7 +253,7 @@ to 64 KiB.
   catalog carries `schemaVersion: 1` and must validate against
   `mod-contract/catalog.schema.json` (`mod-contract/tools/schema_check.py`).
 - **Upload sets** are accepted in the inbox alongside zips
-  (`parse_inbox_name` / `raw_group_source` / `build_set_package` in
+  (`parse_inbox_name` / `raw_group_source` / `set_members` in
   `build.py`): manifest + part-split files (+ metadata), reassembled,
   given their trailer and zipped on the runner (see the inbox flow above).
 - Output is **deterministic** (sorted entries, stable JSON, `updated` from
@@ -376,7 +429,22 @@ flow; nothing is uploaded before the confirm):
    the flow starts. A 401 clears the stored token and shows the server's
    message on the token step; a network/server failure offers "Try again". The
    result (`{discordId, username}`) lives in the session.
-2. **Package** — drop/pick one `.zip` or the loose `.utoc/.ucas/.pak(+.sig)`
+2. **Upload or update** — two large options, "Upload a new mod" / "Update a
+   mod". The flow refetches `catalog.json` (`cache:'no-store'`, ctx
+   `loadMods`; falls back to the page's copy) when it starts; `parseCatalog`
+   keeps the ModCatalog `uploader` extension for this. Update is **always
+   shown**, but when `ownMods(mods, discordId)` is empty it is
+   `aria-disabled="true"` (not `disabled`: it stays focusable and hoverable)
+   with a `role="tooltip"` (`NO_OWN_MODS_TEXT`, `aria-describedby`) shown on
+   hover and `:focus-visible`. Upload → step 4.
+3. **Mod picker** (Update only) — the user's own mods as compact rows (cover
+   thumb as a plain `<img>`/letter placeholder, name, `vX • [game]`,
+   identifier) under a search box: `filterPickerMods` = the catalog's
+   every-word `matches` plus the identifier. ↓ from the search box into the
+   rows, ↑/↓/Home/End between them, Enter on the box picks the first match;
+   "Back" returns to the choice. A token change to an account that does not
+   own the picked mod sends the flow back to the choice.
+4. **Package** — drop/pick one `.zip` or the loose `.utoc/.ucas/.pak(+.sig)`
    (`classifySelection` in `upload-lib.js`). A zip is read **only at its
    `.utoc`**: `zip-lib.js` slices the End Of Central Directory (ZIP64
    aware), the central directory and that one member out of the `File`
@@ -388,7 +456,7 @@ flow; nothing is uploaded before the confirm):
    the `.utoc` is read the drop zone shows a spinner (`aria-busy`, further
    picks ignored), and an invalid selection stays on the step with the error
    in a boxed `role="alert"` line under the zone.
-3. **Metadata editor** (`upload-editor.js`) — ModManager's
+5. **Metadata editor** (`upload-editor.js`) — ModManager's
    `DevelopmentEditor` on the web: Title \*, Author \*, Version, Game
    version, the 160×160 image picker (PNG/JPEG by magic bytes, hard limit
    4 MiB, over 512 KiB warns and downscales to ≤ 512 px PNG through a
@@ -409,8 +477,18 @@ flow; nothing is uploaded before the confirm):
    says the catalog will publish it as `<username>` instead. The server
    enforces the same values regardless of what the page sends. No version-format rules are enforced (the app's
    `{0-999}.{1-999}` / game-version ranges are app-side), only the trailer's
-   lengths.
-4. **Confirm** — "Upload ‹title› v‹version›?" over the editor (Cancel
+   lengths. **An update** is prefilled from the chosen catalog entry instead
+   (`updatePrefill` / `editorPrefillFromEntry`), the identifier is the mod's
+   **locked** id (`forcedFields(identity, target.id)`; title edits do not
+   change it) and the submitted form carries `targetIdentifier`. The picker
+   shows what an untouched picker publishes: the mod's current cover
+   (`prefill.cover = {url, label: "Current cover"}`, a plain `<img>` of the
+   release URL, never fetched) even when the package carries its own, else
+   the package's cover. Untouched sends no `image`, a new pick sends it, ✕
+   sends `null`.
+6. **Confirm** — "Upload ‹title› v‹version›?" (an update: "Update ‹title›
+   to v‹version›?", result "The update of ‹title› to v‹version› is
+   uploaded") over the editor (Cancel
    returns to the editor with the values kept), then the upload: manifest,
    `metadata.json`, the files part-split at 90 MB, through
    `XMLHttpRequest` with a progress bar (not dismissible while sending). A
@@ -425,7 +503,10 @@ flow; nothing is uploaded before the confirm):
 
 The browser sends the package bytes **unchanged** and never writes a
 trailer; the metadata travels as `metadata.json` (`buildMetadataJson`;
-`image` omitted = keep the package's cover, `null` = remove). The tag chips
+`image` omitted = keep the package's cover, `null` = remove; never a `guid`;
+`form.targetIdentifier` → `identifier` = an update of that mod, absent = a
+new mod, set by the Update path; the result poll matches the target or
+forced identifier, case-insensitively). The tag chips
 come from `site/tags.json`, which the deploy steps copy from
 `mod-contract/tags.json` (gitignored; the tags section hides when it is
 missing, e.g. a local preview). Pure helpers: `upload-lib.js`, `zip-lib.js`,

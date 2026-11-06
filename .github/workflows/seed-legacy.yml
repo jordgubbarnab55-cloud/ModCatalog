@@ -3,7 +3,7 @@ name: Seed legacy mods
 # One-off: treats the packages in legacy-assets/ as uploads by the Discord
 # account given in the inputs (that account becomes their owner and its
 # username their author), which creates the `inbox` release convention, the
-# three `mod-<guid>` releases and the first site/catalog.json, then deploys
+# three per-mod `mod-<slug>-<hash>` releases and the first site/catalog.json, then deploys
 # Pages. Run it once by hand after the cutover; the legacy-assets/ directory
 # is deleted in a follow-up commit (see SETUP.md). Shares the `catalog`
 # concurrency group.

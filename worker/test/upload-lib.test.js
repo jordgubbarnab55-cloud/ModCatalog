@@ -7,6 +7,7 @@ import {
   configOk, statusMessage, findNewMod, findNewModByName, POLL_MAX_MS,
   whoamiUrl, checkToken, forcedFields, authorMismatchNote, resolveForm, buildMetadataJson,
   classifySelection, selectionLabel, uploadedText, confirmText,
+  ownMods, filterPickerMods, editorPrefillFromEntry, updatePrefill, NO_OWN_MODS_TEXT,
 } from "../../site/upload-lib.js";
 
 test("configOk rejects placeholders, empty, non-http and missing values", () => {
@@ -152,4 +153,86 @@ test("uploadedText mirrors confirmText's title and optional version", () => {
   assert.equal(uploadedText("My Mod", ""), "“My Mod” is uploaded");
   assert.equal(uploadedText("My Mod", undefined), "“My Mod” is uploaded");
   assert.match(confirmText("My Mod", "1.2"), /“My Mod” v1\.2/);
+});
+
+// ------------------------------------------------------ upload or update
+
+const entry = (id, uploader, extra = {}) => ({
+  id, name: id.split(".")[1] ?? id, author: "alice", version: "1.0", gameVersion: "", description: "",
+  tags: [], file: `https://h.example/${id}.zip`, size: 1, sha256: null, cover: null, accent: null, uploader, ...extra,
+});
+
+test("ownMods: only the user's entries, by name; none without an id", () => {
+  const mods = [entry("42.Zeta", "42"), entry("7.Other", "7"), entry("42.alpha", "42"), entry("x.NoOwner", null)];
+  assert.deepEqual(ownMods(mods, "42").map((m) => m.id), ["42.alpha", "42.Zeta"]);
+  assert.deepEqual(ownMods(mods, 42).map((m) => m.id), ["42.alpha", "42.Zeta"]);
+  assert.deepEqual(ownMods(mods, "99"), []);
+  assert.deepEqual(ownMods(mods, ""), []);
+  assert.deepEqual(ownMods(mods, null), []);
+  assert.deepEqual(ownMods(null, "42"), []);
+  assert.match(NO_OWN_MODS_TEXT, /Update needs a mod you own/);
+});
+
+test("filterPickerMods: every word must match name/author/description/tags or the identifier", () => {
+  const mods = [
+    entry("42.GalaxyLockers", "42", { name: "Galaxy Lockers", description: "Space lockers", tags: ["Skin"] }),
+    entry("42.RedCar", "42", { name: "Red Car", description: "fast", tags: ["VFX"] }),
+  ];
+  const ids = (q) => filterPickerMods(mods, q).map((m) => m.id);
+  assert.deepEqual(ids(""), ["42.GalaxyLockers", "42.RedCar"]);
+  assert.deepEqual(ids("  "), ["42.GalaxyLockers", "42.RedCar"]);
+  assert.deepEqual(ids("galaxy space"), ["42.GalaxyLockers"]);
+  assert.deepEqual(ids("ALICE vfx"), ["42.RedCar"]);
+  assert.deepEqual(ids("42.redcar"), ["42.RedCar"]); // the identifier counts too
+  assert.deepEqual(ids("galaxy fast"), []);           // words across different mods do not combine
+});
+
+test("editorPrefillFromEntry: the entry's fields, tags cleaned, the cover as a URL", () => {
+  const e = entry("42.Mod", "42", {
+    name: "My Mod", version: "1.2", gameVersion: "5.6", description: "d", tags: ["skin", "Nope"],
+    cover: "https://h.example/cover.png",
+  });
+  assert.deepEqual(editorPrefillFromEntry(e, ["Skin", "VFX"]), {
+    title: "My Mod", author: "alice", version: "1.2", gameVersion: "5.6", description: "d", tags: ["Skin"],
+    image: null, cover: { url: "https://h.example/cover.png", label: "Current cover" },
+  });
+  assert.equal(editorPrefillFromEntry({ ...e, cover: null }, null).cover, null);
+});
+
+test("updatePrefill: the current cover wins over the package's own; the package's is the fallback", () => {
+  const e = entry("42.Mod", "42", { cover: "https://h.example/c.png" });
+  const current = { url: "https://h.example/c.png", label: "Current cover" };
+  const none = updatePrefill(e, { image: null }, null);
+  assert.deepEqual(none.prefill.cover, current);
+  assert.equal(none.prefill.image, null);
+  assert.deepEqual(none.notes, []);
+
+  const img = { mime: "image/png", data: Uint8Array.from([1]) };
+  const both = updatePrefill(e, { image: img }, null);
+  assert.deepEqual(both.prefill.cover, current); // the package's cover does not replace it
+  assert.equal(both.prefill.image, null);
+  assert.deepEqual(both.notes, []);
+  // no current cover: the package's own is shown (and kept by the server)
+  const fallback = updatePrefill({ ...e, cover: null }, { image: img }, null);
+  assert.equal(fallback.prefill.image, img);
+  assert.equal(fallback.prefill.cover, null);
+  assert.deepEqual(fallback.notes, []);
+});
+
+test("forcedFields: an update's identifier is locked, whatever the title", () => {
+  const forced = forcedFields({ discordId: "42", username: "alice" }, "42.OldName");
+  assert.equal(forced.author, "alice");
+  assert.equal(resolveForm({ title: "Brand New Title", author: "" }, forced).identifier, "42.OldName");
+  assert.equal(typeof forcedFields({ discordId: "42", username: "alice" }, null).identifier, "function");
+});
+
+test("confirmText / uploadedText for an update", () => {
+  assert.equal(confirmText(" My Mod ", " 1.3 ", true), "Update “My Mod” to v1.3?");
+  assert.equal(confirmText("My Mod", "", true), "Update “My Mod”?");
+  assert.equal(uploadedText("My Mod", "1.3", true), "The update of “My Mod” to v1.3 is uploaded");
+  assert.equal(uploadedText("My Mod", "", true), "The update of “My Mod” is uploaded");
+  // and the update's metadata.json names its mod
+  const body = JSON.parse(buildMetadataJson({ title: "New Title", author: "alice", version: "1.3", targetIdentifier: "42.OldName" }));
+  assert.equal(body.identifier, "42.OldName");
+  assert.ok(!("image" in body));
 });

@@ -71,6 +71,20 @@ Written with keys in this order; `tags` omitted when empty, `image` when absent:
 
 All lengths count **UTF-16 code units** (C# `string.Length`, JS `.length`).
 
+### What `identifier` and `guid` mean
+
+- **`identifier` is the mod's identity** — what catalogs key a mod by and
+  what dependencies reference. It is compared **case-insensitively**
+  (lowercase both sides). A catalog may *mint* it on a mod's first upload
+  (ModCatalog: `{discordId}.{Title}`, whitespace removed, see `upload.md`) and
+  then keeps it **unchanged** for every later version, whatever the title
+  becomes. The format puts no charset rule on it beyond the length; any
+  non-whitespace character a title may hold is allowed.
+- **`guid` is a revision id**: required by the format and unique per write,
+  but not an identity. A catalog may write a fresh one on every accepted
+  upload; nothing should key a mod by it (use the identifier, or a sha256 of
+  the package for "is this the same file").
+
 JSON reading follows System.Text.Json into typed fields:
 
 - not JSON, not an object, or a wrong JSON type (a number for `title`, a

@@ -120,12 +120,13 @@ Order the `files` entries the way you want them inside the package zip.
 `metadata` is present only when a `metadata.json` upload follows
 (`X-File-Idx: -2`, `X-Part-Idx: 0`, `X-Part-Count: 1`, one request); its body
 is the trailer metadata (`title`, `author`, `description`, `version`,
-`game_version`, `tags`, optional `guid`, optional `image`; schema and
-semantics in `mod-contract/upload.md`). The workflow validates it with the
-trailer's limits, writes it into the `.utoc` and rejects the set when it is
-invalid or its `guid` is not the package's. A set without metadata keeps its
-package's own fields, except that `author` and `identifier` are always forced
-to the uploader's verified values.
+`game_version`, `tags`, optional `identifier` (= update that mod; absent =
+a new mod), optional `image`; a `guid` is ignored; schema and semantics in
+`mod-contract/upload.md`). The workflow validates it with the trailer's
+limits, writes it into the `.utoc` and rejects the set when it is invalid, an
+update targets an unknown mod or someone else's, or a new mod's minted
+identifier already exists. A set without metadata keeps its package's own
+fields, except that `author`, `identifier` and `guid` are always forced.
 
 | Status | Meaning |
 |--------|---------|

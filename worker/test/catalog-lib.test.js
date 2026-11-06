@@ -19,10 +19,24 @@ for (const c of all.cases) {
     assert.equal(doc.schemaVersion, c.expect.schemaVersion);
     assert.equal(doc.name, c.expect.name);
     assert.equal(doc.skipped, c.expect.skipped);
-  assert.equal(doc.verifiedAuthors, c.expect.verifiedAuthors);
-    assert.deepEqual(doc.mods, c.expect.mods);
+    assert.equal(doc.verifiedAuthors, c.expect.verifiedAuthors);
+    // the shared fixtures describe the contract fields; `uploader` is this page's extension
+    assert.deepEqual(doc.mods.map(({ uploader, ...rest }) => rest), c.expect.mods);
   });
 }
+
+test("catalog parse: keeps the uploader (ModCatalog's owner id) as text, else null", () => {
+  const canonical = parseCatalog(load("catalogs/canonical.json"), all.base);
+  assert.equal(canonical.mods[0].uploader, "1509993694902878381");
+  const doc = parseCatalog([
+    { file: "https://h.example/a.zip", id: "a", uploader: "42" },
+    { file: "https://h.example/b.zip", id: "b", uploader: null },
+    { file: "https://h.example/c.zip", id: "c", uploader: 7 },
+    { file: "https://h.example/d.zip", id: "d", uploader: "" },
+    { file: "https://h.example/e.zip", id: "e" },
+  ], "https://h.example/");
+  assert.deepEqual(doc.mods.map((m) => m.uploader), ["42", null, "7", null, null]);
+});
 
 test("catalog parse: unusable roots throw", () => {
   assert.throws(() => parseCatalog({ items: [] }, all.base));

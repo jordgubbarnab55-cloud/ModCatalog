@@ -106,16 +106,21 @@ test("resolveForm: forced author and a static or title-following identifier", ()
   assert.equal(resolveForm({ author: "x", title: "Z" }, live).identifier, "123.Z");
 });
 
-test("buildMetadataJson: fields, trimming, guid and the three image states", () => {
+test("buildMetadataJson: fields, trimming, no guid, the target identifier and the three image states", () => {
   const form = { title: " T ", author: " A ", description: "d\nd", version: " 1.0 ", gameVersion: "5.6", tags: ["Skin"] };
   const base = JSON.parse(buildMetadataJson(form));
   assert.deepEqual(base, { title: "T", author: "A", description: "d\nd", version: "1.0", game_version: "5.6", tags: ["Skin"] });
-  assert.ok(!("image" in base) && !("guid" in base));
+  assert.ok(!("image" in base) && !("guid" in base) && !("identifier" in base)); // a new mod
 
   assert.equal(JSON.parse(buildMetadataJson({ ...form, image: null })).image, null);
   const withImg = JSON.parse(buildMetadataJson({ ...form, guid: "g", image: { mime: "image/png", data: Uint8Array.from([1, 2, 3]) } }));
   assert.deepEqual(withImg.image, { mime: "image/png", data: "AQID" });
-  assert.equal(withImg.guid, "g");
+  assert.ok(!("guid" in withImg)); // never sent: the server writes a fresh revision GUID
+
+  // an update names its mod; the forced (display) identifier is never sent as a target
+  const update = JSON.parse(buildMetadataJson({ ...form, identifier: "42.T", targetIdentifier: " 42.Old " }));
+  assert.equal(update.identifier, "42.Old");
+  assert.ok(!("identifier" in JSON.parse(buildMetadataJson({ ...form, identifier: "42.T", targetIdentifier: " " }))));
 });
 
 test("confirmText and titleFromBase", () => {
@@ -181,4 +186,7 @@ test("findPublishedMod: a new mod, a new version of a known id, and non-matches"
   assert.equal(findPublishedMod(before, bumped, { id: "a", name: "x", version: "1.0" }), null);
   // an unchanged known mod is not "published by this upload"
   assert.equal(findPublishedMod(before, before, { id: "a", name: "Alpha", version: "1.0" }), null);
+  // ids are identifiers, matched case-insensitively
+  const minted = [...before, { id: "42.CoolMod", name: "Cool Mod", version: "1", file: "f4", updated: "t4" }];
+  assert.equal(findPublishedMod(before, minted, { id: "42.coolmod", name: "x", version: "1" }).id, "42.CoolMod");
 });

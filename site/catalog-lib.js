@@ -116,6 +116,9 @@ function parseEntry(el, index, catalogUrl, warnings) {
     sha256: sha,
     cover,
     accent: str(el, "accent"),
+    // ModCatalog's extension (catalog.md: "allowed and ignored by readers"): the
+    // owner's Discord id, which the page's upload flow uses to offer Update
+    uploader: text(el, "uploader"),
   };
 }
 

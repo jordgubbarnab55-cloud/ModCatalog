@@ -4,6 +4,7 @@ Run: python -m unittest discover -s tests
 """
 
 import base64
+import contextlib
 import hashlib
 import io
 import json
@@ -51,8 +52,12 @@ def make_package(dest: pathlib.Path, title: str = "Test Mod", author: str = "Tes
                  second_set: bool = False, include_ucas: bool = True, include_pak: bool = True,
                  no_trailer: bool = False, extra_members: list[str] | None = None,
                  corrupt: bool = False, tags: list[str] | None = None,
-                 game_version: str = "") -> pathlib.Path:
-    """Builds a synthetic package zip (fake utoc/ucas/pak bytes + a real trailer)."""
+                 game_version: str = "", payload: str | None = None,
+                 identifier: str | None = None) -> pathlib.Path:
+    """Builds a synthetic package zip (fake utoc/ucas/pak bytes + a real trailer).
+    The .ucas/.pak bytes derive from `payload` (default: the GUID). The trailer
+    identifier defaults to the derived `Author.Title` (not catalog-written);
+    pass `{uid}.Title` to make a zip-mode upload an update of that mod."""
     if guid is None:
         guid = str(uuid.uuid4())
     if corrupt:
@@ -60,15 +65,16 @@ def make_package(dest: pathlib.Path, title: str = "Test Mod", author: str = "Tes
         return dest
     meta = {"title": title, "author": author, "description": description,
             "version": version, "guid": guid, "image": image, "tags": tags or [],
-            "game_version": game_version}
+            "game_version": game_version, "identifier": identifier}
+    content = (payload if payload is not None else guid).encode()
     utoc = fake_toc()
     if not no_trailer:
         utoc = trailer.write_trailer(utoc, meta)[0]
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
         if include_pak:
-            z.writestr("mod.pak", b"FAKE-PAK-" + guid.encode() + b"\x00" * 1024)
+            z.writestr("mod.pak", b"FAKE-PAK-" + content + b"\x00" * 1024)
         if include_ucas:
-            z.writestr("mod.ucas", b"FAKE-UCAS-" + guid.encode() + b"\x00" * 1024)
+            z.writestr("mod.ucas", b"FAKE-UCAS-" + content + b"\x00" * 1024)
         z.writestr("mod.utoc", utoc)
         if second_set:
             for ext in (".utoc", ".ucas", ".pak"):
@@ -123,11 +129,11 @@ class Base(unittest.TestCase):
     def inbox_names(self) -> list[str]:
         return [a.name for a in self.client.list_assets(build.INBOX_TAG)]
 
-    def stored(self, guid: str, name: str) -> tuple:
+    def stored(self, identifier: str, name: str) -> tuple:
         """(member names, trailer metadata, .utoc bytes) of a stored package zip."""
         with tempfile.TemporaryDirectory() as td:
             z = pathlib.Path(td) / "p.zip"
-            self.client.download_asset(f"mod-{guid}", name, z)
+            self.client.download_asset(build.mod_tag(identifier), name, z)
             with zipfile.ZipFile(z) as zf:
                 names = zf.namelist()
                 return names, build.validate_package(z), zf.read(next(n for n in names if n.endswith(".utoc")))
@@ -135,16 +141,16 @@ class Base(unittest.TestCase):
 
 class TestGoodPackage(Base):
     def test_entry_fields_sha_and_urls(self):
-        guid = str(uuid.uuid4())
         image = make_image("png")
-        make_package(self.root / "a.zip", guid=guid, image=image)
+        make_package(self.root / "a.zip", image=image)
         self.to_inbox(self.root / "a.zip", "12345", f"{S('12345')}__1__A.zip")
 
         summary = self.run_process()
         self.assertEqual(summary, {"ok": 1, "rejected": 0})
 
-        e = self.catalog_mods()[guid]
-        tag = f"mod-{guid}"
+        e = self.catalog_mods()["12345.TestMod"]  # the minted identifier is the id
+        tag = build.mod_tag("12345.TestMod")
+        self.assertRegex(tag, r"^mod-12345\.testmod-[0-9a-f]{8}$")
         # the stored package is rewritten (forced author/identifier), so its hash is the stored one
         with tempfile.TemporaryDirectory() as td:
             stored = pathlib.Path(td) / "s.zip"
@@ -168,14 +174,13 @@ class TestGoodPackage(Base):
         self.assertEqual(self.inbox_names(), [])
         names = {a.name for a in self.client.list_assets(tag)}
         self.assertIn("Test-Mod-1.0.0.zip", names)
-        self.assertIn(f"{guid}-cover-{hashlib.sha256(image['data']).hexdigest()[:8]}.png", names)
+        self.assertIn(f"cover-{hashlib.sha256(image['data']).hexdigest()[:8]}.png", names)
 
     def test_no_cover_omits_field(self):
-        guid = str(uuid.uuid4())
-        make_package(self.root / "a.zip", guid=guid)
+        make_package(self.root / "a.zip")
         self.to_inbox(self.root / "a.zip", "12345", f"{S('12345')}__1__A.zip")
         self.run_process()
-        self.assertNotIn("cover", self.catalog_mods()[guid])
+        self.assertNotIn("cover", self.catalog_mods()["12345.TestMod"])
 
 
 class TestRejections(Base):
@@ -219,31 +224,518 @@ class TestRejections(Base):
 
 
 class TestVersions(Base):
-    def test_same_version_rejected_new_version_wins(self):
-        guid = str(uuid.uuid4())
+    def test_identical_reupload_rejected_new_version_wins(self):
+        guid, ident = str(uuid.uuid4()), "12345.VerMod"
         make_package(self.root / "v1.zip", title="Ver Mod", version="1.0.0", guid=guid)
         self.to_inbox(self.root / "v1.zip", "12345", f"{S('12345')}__1__v1.zip")
         self.run_process()
 
-        # same guid + version (different bytes) -> rejected, original stays
-        make_package(self.root / "v1b.zip", title="Ver Mod", version="1.0.0", guid=guid)
+        # same identifier + version + bytes -> "nothing changed", original stays
+        # (the fresh GUID the runner writes does not count)
+        make_package(self.root / "v1b.zip", title="Ver Mod", version="1.0.0", guid=guid, identifier=ident)
         self.to_inbox(self.root / "v1b.zip", "12345", f"{S('12345')}__2__v1b.zip")
         self.assertEqual(self.run_process(), {"ok": 0, "rejected": 1})
-        tag = f"mod-{guid}"
+        tag = build.mod_tag(ident)
         names = {a.name for a in self.client.list_assets(tag)}
         self.assertEqual(names, {"Ver-Mod-1.0.0.zip"})
         self.assertEqual(self.inbox_names(), [])
 
         # a new version becomes the main entry; the old asset stays
-        make_package(self.root / "v2.zip", title="Ver Mod", version="1.1.0", guid=guid)
+        make_package(self.root / "v2.zip", title="Ver Mod", version="1.1.0", guid=guid, identifier=ident)
         self.to_inbox(self.root / "v2.zip", "12345", f"{S('12345')}__3__v2.zip")
         self.run_process()
-        e = self.catalog_mods()[guid]
+        e = self.catalog_mods()[ident]
         self.assertEqual(e["version"], "1.1.0")
         self.assertTrue(e["file"].endswith("Ver-Mod-1.1.0.zip"))
         names = {a.name for a in self.client.list_assets(tag)}
         self.assertIn("Ver-Mod-1.0.0.zip", names)
         self.assertIn("Ver-Mod-1.1.0.zip", names)
+
+
+class TestDuplicateRules(Base):
+    """Re-uploads of a version, and the same mod under another identifier."""
+
+    def up(self, uid: str, label: str, **kw) -> str:
+        make_package(self.root / f"{label}.zip", **kw)
+        return self.to_inbox(self.root / f"{label}.zip", uid,
+                             f"{S(uid)}__{self.next_ts()}__{label}.zip")
+
+    def assets(self, identifier: str) -> set[str]:
+        return {a.name for a in self.client.list_assets(build.mod_tag(identifier))}
+
+    def rejection(self) -> tuple[dict, str]:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            summary = self.run_process()
+        return summary, err.getvalue()
+
+    # 1
+    def test_same_content_bumped_version_same_mod_is_an_update(self):
+        self.up("111", "a", title="Upd", version="1.0", payload="P")
+        self.run_process()
+        self.up("111", "b", title="Upd", version="1.1", payload="P", identifier="111.Upd")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(self.assets("111.Upd"), {"Upd-1.0.zip", "Upd-1.1.zip"})
+        self.assertTrue(self.catalog_mods()["111.Upd"]["file"].endswith("/Upd-1.1.zip"))
+
+    # 2
+    def test_same_version_new_content_is_stored_under_a_suffix(self):
+        ident = "111.ReMod"
+        self.up("111", "a", title="Re Mod", version="1.0", payload="A")
+        self.run_process()
+        tag = build.mod_tag(ident)
+        first = self.client.asset_bytes(tag, "Re-Mod-1.0.zip")
+        self.up("111", "b", title="Re Mod", version="1.0", payload="B", identifier=ident,
+                game_version="5.6")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.up("111", "c", title="Re Mod", version="1.0", payload="C", identifier=ident)
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(self.assets(ident), {"Re-Mod-1.0.zip", "Re-Mod-1.0-2.zip", "Re-Mod-1.0-3.zip"})
+        self.assertEqual(self.client.asset_bytes(tag, "Re-Mod-1.0.zip"), first)  # never overwritten
+        e = self.catalog_mods()[ident]
+        self.assertTrue(e["file"].endswith("/Re-Mod-1.0-3.zip"))
+        self.assertEqual(e["sha256"], hashlib.sha256(
+            self.client.asset_bytes(tag, "Re-Mod-1.0-3.zip")).hexdigest())
+
+        # rebuild picks the newest (suffixed) upload too
+        live = json.loads(self.catalog.read_text(encoding="utf-8"))
+        self.catalog.unlink()
+        build.rebuild(self.client, OWNER, REPO, self.catalog)
+        rebuilt = json.loads(self.catalog.read_text(encoding="utf-8"))
+        for doc in (live, rebuilt):
+            for m in doc["mods"]:
+                m.pop("updated")
+        self.assertEqual(rebuilt, live)
+
+    def test_identical_reupload_of_a_suffixed_version_is_rejected(self):
+        ident = "111.ReMod"
+        self.up("111", "a", title="Re Mod", version="1.0", payload="A", identifier=ident)
+        self.up("111", "b", title="Re Mod", version="1.0", payload="B", identifier=ident)
+        self.assertEqual(self.run_process(), {"ok": 2, "rejected": 0})  # same run works too
+        before = self.catalog.read_bytes()
+        for label, payload in (("c", "B"), ("d", "A")):
+            self.up("111", label, title="Re Mod", version="1.0", payload=payload, identifier=ident)
+            summary, err = self.rejection()
+            self.assertEqual(summary, {"ok": 0, "rejected": 1})
+            self.assertIn("nothing changed", err)
+        self.assertEqual(self.assets(ident), {"Re-Mod-1.0.zip", "Re-Mod-1.0-2.zip"})
+        self.assertEqual(self.inbox_names(), [])
+        self.assertEqual(self.catalog.read_bytes(), before)
+
+    def test_same_bytes_with_a_different_trailer_is_a_change(self):
+        self.up("111", "a", title="Re Mod", version="1.0", payload="A")
+        self.run_process()
+        self.up("111", "b", title="Re Mod", version="1.0", payload="A", identifier="111.ReMod",
+                description="better words")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(self.catalog_mods()["111.ReMod"]["description"], "better words")
+
+    # 3
+    def test_same_content_title_version_under_another_identifier_is_rejected(self):
+        self.up("111", "a", title="Dup Mod", version="1.0", payload="X")
+        self.run_process()
+        before = self.catalog.read_bytes()
+        for uid, title in (("222", "  dup MOD "), (ADMIN, "DUP MOD")):
+            self.up(uid, f"dup{uid}", title=title, version=" 1.0 ", payload="X",
+                    description="other words", author="someone")
+            summary, err = self.rejection()
+            self.assertEqual(summary, {"ok": 0, "rejected": 1}, uid)
+            self.assertIn("duplicate of the existing mod 'Dup Mod' v1.0 (id 111.DupMod)", err)
+            self.assertEqual(self.client.list_tags(build.MOD_TAG_PREFIX), [build.mod_tag("111.DupMod")])
+        # the owner's own re-upload as a NEW mod collides with the identifier first
+        self.up("111", "again", title="dup mod", version="1.0", payload="X")
+        summary, err = self.rejection()
+        self.assertEqual(summary, {"ok": 0, "rejected": 1})
+        self.assertIn("you already have a mod with the identifier '111.DupMod'", err)
+        self.assertEqual(self.inbox_names(), [])
+        self.assertEqual(self.catalog.read_bytes(), before)
+
+    def test_duplicates_in_the_same_run(self):
+        self.up("111", "a", title="Dup Mod", version="1.0", payload="X")
+        self.up("222", "b", title="Dup Mod", version="1.0", payload="X")
+        self.up("333", "c", title="Other")
+        self.assertEqual(self.run_process(), {"ok": 2, "rejected": 1})
+        self.assertEqual(set(self.catalog_mods()), {"111.DupMod", "333.Other"})
+        self.assertEqual(self.inbox_names(), [])
+
+    def test_a_different_title_or_version_is_a_new_mod(self):
+        self.up("111", "a", title="Base", version="1.0", payload="X")
+        self.up("111", "b", title="Base 2", version="1.0", payload="X")
+        self.up("222", "c", title="Base", version="1.1", payload="X")
+        self.assertEqual(self.run_process(), {"ok": 3, "rejected": 0})
+        self.assertEqual(set(self.catalog_mods()), {"111.Base", "111.Base2", "222.Base"})
+
+    def test_different_content_same_title_version_is_a_new_mod(self):
+        self.up("111", "a", title="Base", version="1.0", payload="X")
+        self.up("222", "b", title="Base", version="1.0", payload="Y")
+        self.assertEqual(self.run_process(), {"ok": 2, "rejected": 0})
+
+    def test_only_the_current_version_counts(self):
+        self.up("111", "a", title="Base", version="1.0", payload="X")
+        self.up("111", "b", title="Base", version="2.0", payload="Z", identifier="111.Base")
+        self.run_process()
+        self.up("222", "c", title="Base", version="1.0", payload="X")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+
+    def test_rebuild_keeps_the_earliest_of_duplicate_mods(self):
+        self.up("111", "a", title="Dup Mod", version="1.0", payload="X")
+        self.run_process()
+        live = json.loads(self.catalog.read_text(encoding="utf-8"))
+        self.catalog.unlink()  # forget 111.DupMod: a duplicate gets stored (as before this rule)
+        self.up("222", "b", title="dup mod", version="1.0", payload="X")
+        self.run_process()
+        self.assertIsNotNone(self.client.get_release(build.mod_tag("222.dupmod")))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            build.rebuild(self.client, OWNER, REPO, self.catalog)
+        self.assertIn(f"{build.mod_tag('222.dupmod')}: duplicate of {build.mod_tag('111.DupMod')}",
+                      err.getvalue())
+        rebuilt = json.loads(self.catalog.read_text(encoding="utf-8"))
+        for doc in (live, rebuilt):
+            for m in doc["mods"]:
+                m.pop("updated")
+        self.assertEqual(rebuilt, live)
+
+    def test_content_hash_and_fingerprint(self):
+        utoc = fake_toc()
+        meta = {"title": "T", "author": "A", "description": "", "version": "1", "game_version": "",
+                "tags": [], "guid": None, "image": None, "identifier": "1.T"}
+        a = {"x.utoc": utoc, "x.ucas": b"U", "x.pak": b"P"}
+        b = {"y.pak": b"P", "y.ucas": b"U", "y.utoc": trailer.write_trailer(utoc, meta)[0]}
+        self.assertEqual(build.content_hash(a), build.content_hash(b))  # trailer and names ignored
+        self.assertNotEqual(build.content_hash(a), build.content_hash({**a, "x.sig": b"S"}))
+        self.assertNotEqual(build.content_hash(a), build.content_hash({**a, "x.pak": b"Q"}))
+        # the fingerprint ("the same stored package") counts the trailer but not its guid
+        self.assertNotEqual(build.package_fingerprint(a), build.package_fingerprint(b))
+        c = {**b, "y.utoc": trailer.write_trailer(utoc, {**meta, "guid": str(uuid.uuid4())})[0]}
+        self.assertNotEqual(trailer.read_trailer(b["y.utoc"])["guid"], trailer.read_trailer(c["y.utoc"])["guid"])
+        self.assertEqual(build.package_fingerprint(b), build.package_fingerprint(c))
+        d = {**b, "y.utoc": trailer.write_trailer(utoc, {**meta, "description": "x"})[0]}
+        self.assertNotEqual(build.package_fingerprint(b), build.package_fingerprint(d))
+
+    def test_suffix_helpers(self):
+        self.assertEqual(build.free_asset_name("M-1.0.zip", set()), "M-1.0.zip")
+        self.assertEqual(build.free_asset_name("M-1.0.zip", {"M-1.0.zip", "M-1.0-2.zip"}), "M-1.0-3.zip")
+        self.assertEqual(build.same_version_names("M-1.0.zip", ["M-1.0.zip", "M-1.0-2.zip", "M-1.0.1.zip",
+                                                                "M-1.0-x.zip", "M-1.zip"]),
+                         ["M-1.0-2.zip", "M-1.0.zip"])
+        t = build.datetime(2026, 1, 1, tzinfo=build.timezone.utc)
+        older = [build.Asset("M-1.0-10.zip", 1, t), build.Asset("M-1.0-9.zip", 1, t),
+                 build.Asset("M-1.0.zip", 1, t)]
+        self.assertEqual([a.name for a in sorted(older, key=build.asset_order_key)],
+                         ["M-1.0.zip", "M-1.0-9.zip", "M-1.0-10.zip"])
+
+
+class TestIdentity(Base):
+    """The identifier is the mod's permanent identity (minted, then locked);
+    the GUID is a per-upload revision id."""
+
+    def set_upload(self, uid: str, upload_id: str, metadata: dict | None = None,
+                   utoc: bytes | None = None, payload: bytes = b"PAK", username: str | None = None) -> None:
+        """A loose set (+ optional metadata.json) in the inbox."""
+        self.client.create_release(build.INBOX_TAG, "inbox")
+        d = self.client._release_dir(build.INBOX_TAG)
+        files = [("mod.pak", payload), ("mod.ucas", b"UCAS"), ("mod.utoc", utoc or fake_toc())]
+        manifest: dict = {"files": [{"name": n, "sha256": hashlib.sha256(b).hexdigest(), "parts": 1}
+                                    for n, b in files]}
+        raw = json.dumps(metadata).encode("utf-8") if metadata is not None else None
+        if raw is not None:
+            manifest["metadata"] = {"sha256": hashlib.sha256(raw).hexdigest()}
+        stamp = S(uid, username)
+        (d / f"{stamp}__{upload_id}__manifest.json").write_bytes(json.dumps(manifest).encode("utf-8"))
+        for idx, (n, b) in enumerate(files):
+            (d / f"{stamp}__{upload_id}__f{idx}__p0of1__{n}").write_bytes(b)
+        if raw is not None:
+            (d / f"{stamp}__{upload_id}__metadata.json").write_bytes(raw)
+
+    @staticmethod
+    def meta(title: str = "Cool Mod", version: str = "1.0", **over) -> dict:
+        m = {"title": title, "author": "whoever", "description": "d", "version": version,
+             "game_version": "", "tags": []}
+        m.update(over)
+        return m
+
+    def rejection(self) -> tuple[dict, str]:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            summary = self.run_process()
+        return summary, err.getvalue()
+
+    def zips(self, identifier: str) -> list[str]:
+        return sorted(a.name for a in self.client.list_assets(build.mod_tag(identifier))
+                      if a.name.endswith(".zip"))
+
+    def test_mod_tag_slug(self):
+        h = lambda s: hashlib.sha256(s.lower().encode("utf-8")).hexdigest()[:8]
+        self.assertEqual(build.mod_tag("123.CoolMod"), f"mod-123.coolmod-{h('123.coolmod')}")
+        self.assertEqual(build.mod_tag("123.COOLMOD"), build.mod_tag("123.CoolMod"))  # case-insensitive
+        self.assertEqual(build.mod_tag("1.a..b/c?d"), f"mod-1.a.b-c-d-{h('1.a..b/c?d')}")
+        self.assertEqual(build.mod_tag("1.Ünï"), f"mod-1.-n-{h('1.ünï')}")
+        self.assertEqual(build.mod_tag("1.日本"), f"mod-1-{h('1.日本')}")
+        self.assertEqual(build.mod_tag("...--"), f"mod-{h('...--')}")
+        # same slug, different identifiers -> different tags
+        self.assertEqual(build.mod_tag("1.a!b").rsplit("-", 1)[0], build.mod_tag("1.a?b").rsplit("-", 1)[0])
+        self.assertNotEqual(build.mod_tag("1.a!b"), build.mod_tag("1.a?b"))
+        long_tag = build.mod_tag("1." + "x" * 400)
+        self.assertLessEqual(len(long_tag), len("mod-") + 100 + 9)
+        for ident in ("1.a..b", "1.-x-", "1..", "1.x.lock", "1.a b", "1.~^:"):
+            tag = build.mod_tag(ident)
+            self.assertRegex(tag, r"^mod-([a-z0-9._-]*[a-z0-9]-)?[0-9a-f]{8}$", ident)
+            self.assertNotIn("..", tag)
+
+    def test_mint_identifier(self):
+        self.assertEqual(build.mint_identifier("42", " My\tCool  Mod! "), "42.MyCoolMod!")
+        with self.assertRaises(build.PackageError):
+            build.mint_identifier("42", " \t ")
+
+    def test_minted_then_locked_across_a_title_change(self):
+        self.set_upload("111", "u1", self.meta("Cool Mod", "1.0"))
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(list(self.catalog_mods()), ["111.CoolMod"])
+        # the update renames the mod; the identifier, tag and id stay
+        self.set_upload("111", "u2", self.meta("Renamed Thing", "2.0", identifier="111.CoolMod"),
+                        payload=b"PAK2")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        mods = self.catalog_mods()
+        self.assertEqual(list(mods), ["111.CoolMod"])
+        self.assertEqual((mods["111.CoolMod"]["name"], mods["111.CoolMod"]["version"]), ("Renamed Thing", "2.0"))
+        self.assertEqual(self.zips("111.CoolMod"), ["Cool-Mod-1.0.zip", "Renamed-Thing-2.0.zip"])
+        self.assertEqual(self.stored("111.CoolMod", "Renamed-Thing-2.0.zip")[1]["identifier"], "111.CoolMod")
+        # a NEW mod with the new title is a different mod
+        self.set_upload("111", "u3", self.meta("Renamed Thing", "1.0"), payload=b"PAK3")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(sorted(self.catalog_mods()), ["111.CoolMod", "111.RenamedThing"])
+
+    def test_zip_mode_locks_through_the_trailer_identifier(self):
+        make_package(self.root / "a.zip", title="Zip Mod", version="1.0")
+        self.to_inbox(self.root / "a.zip", "111")
+        self.run_process()
+        # the stored package carries 111.ZipMod: ModManager re-uploads it renamed
+        make_package(self.root / "b.zip", title="Zip Mod Deluxe", version="2.0", identifier="111.ZipMod")
+        self.to_inbox(self.root / "b.zip", "111")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(list(self.catalog_mods()), ["111.ZipMod"])
+        self.assertEqual(self.catalog_mods()["111.ZipMod"]["name"], "Zip Mod Deluxe")
+        # someone else's identifier in the trailer -> a new mod of the uploader
+        make_package(self.root / "c.zip", title="Zip Mod", version="3.0", identifier="111.ZipMod")
+        self.to_inbox(self.root / "c.zip", "222")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(sorted(self.catalog_mods()), ["111.ZipMod", "222.ZipMod"])
+        self.assertEqual(self.catalog_mods()["111.ZipMod"]["version"], "2.0")
+        # an identifier of the uploader's that does not exist -> a new (minted) mod
+        make_package(self.root / "d.zip", title="Fresh", identifier="111.Gone")
+        self.to_inbox(self.root / "d.zip", "111")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertIn("111.Fresh", self.catalog_mods())
+
+    def test_update_of_own_mod_case_insensitive(self):
+        self.set_upload("111", "u1", self.meta("Cool Mod", "1.0"))
+        self.run_process()
+        self.set_upload("111", "u2", self.meta("Cool Mod", "1.1", identifier="111.COOLMOD"), payload=b"P2")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(list(self.catalog_mods()), ["111.CoolMod"])  # the stored case is kept
+        self.assertEqual(self.catalog_mods()["111.CoolMod"]["version"], "1.1")
+
+    def test_update_of_someone_elses_mod_is_rejected(self):
+        self.set_upload("111", "u1", self.meta("Cool Mod", "1.0"))
+        self.run_process()
+        before = self.catalog.read_bytes()
+        self.set_upload("222", "u2", self.meta("Cool Mod", "2.0", identifier="111.CoolMod"), payload=b"P2")
+        summary, err = self.rejection()
+        self.assertEqual(summary, {"ok": 0, "rejected": 1})
+        self.assertIn("update of '111.CoolMod': the mod belongs to 111; uploader 222 rejected", err)
+        self.assertEqual(self.catalog.read_bytes(), before)
+        self.assertEqual(self.zips("111.CoolMod"), ["Cool-Mod-1.0.zip"])
+        self.assertEqual(self.inbox_names(), [])
+
+    def test_update_of_an_unknown_identifier_is_rejected(self):
+        self.set_upload("111", "u1", self.meta("Cool Mod", "1.0", identifier="111.Nope"))
+        summary, err = self.rejection()
+        self.assertEqual(summary, {"ok": 0, "rejected": 1})
+        self.assertIn("update of '111.Nope': no mod with that identifier in the catalog", err)
+        self.assertEqual(self.client.list_tags(build.MOD_TAG_PREFIX), [])
+        self.assertEqual(self.inbox_names(), [])
+
+    def test_admin_updates_anyones_mod_under_its_owner(self):
+        self.set_upload("111", "u1", self.meta("Cool Mod", "1.0"), username="alice")
+        self.run_process()
+        self.set_upload(ADMIN, "u2", self.meta("Cool Mod", "2.0", identifier="111.coolmod"),
+                        payload=b"P2", username="boss")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        e = self.catalog_mods()["111.CoolMod"]
+        self.assertEqual((e["version"], e["uploader"], e["author"]), ("2.0", "111", "alice"))
+        meta = self.stored("111.CoolMod", "Cool-Mod-2.0.zip")[1]
+        self.assertEqual((meta["identifier"], meta["author"]), ("111.CoolMod", "alice"))
+
+    def test_new_mod_collision_is_rejected(self):
+        self.set_upload("111", "u1", self.meta("Cool Mod", "1.0"))
+        self.run_process()
+        before = self.catalog.read_bytes()
+        for n, title in enumerate(("Cool Mod", "cool  MOD", "COOLMOD")):  # case/whitespace-insensitive
+            self.set_upload("111", f"n{n}", self.meta(title, "9.0"), payload=f"other{n}".encode())
+            summary, err = self.rejection()
+            self.assertEqual(summary, {"ok": 0, "rejected": 1}, title)
+            self.assertIn("you already have a mod with the identifier '111.CoolMod'; choose Update", err)
+        self.assertEqual(self.catalog.read_bytes(), before)
+        self.assertEqual(self.zips("111.CoolMod"), ["Cool-Mod-1.0.zip"])
+        # another user minting the same title gets their own identifier
+        self.set_upload("222", "x", self.meta("Cool Mod", "1.0"), payload=b"theirs")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(sorted(self.catalog_mods()), ["111.CoolMod", "222.CoolMod"])
+
+    def test_same_run_new_mod_then_collision(self):
+        self.set_upload("111", "a", self.meta("Race", "1.0"))
+        self.set_upload("111", "b", self.meta("race", "2.0"), payload=b"P2")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 1})
+
+    def test_metadata_guid_is_ignored(self):
+        self.set_upload("111", "u1", self.meta("Cool Mod", "1.0", guid="not even a guid"))
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+
+    def test_metadata_identifier_must_be_a_string(self):
+        self.set_upload("111", "u1", self.meta("Cool Mod", "1.0", identifier=5))
+        self.assertEqual(self.run_process(), {"ok": 0, "rejected": 1})
+        for blank in (None, "", "  "):  # = a new mod
+            self.assertIsNone(build.parse_upload_metadata(
+                json.dumps(self.meta(identifier=blank)).encode())["target"])
+
+    def test_fresh_guid_per_upload(self):
+        guid = str(uuid.uuid4())
+        utoc = trailer.write_trailer(fake_toc(), {"title": "G", "author": "a", "description": "",
+                                                  "version": "1", "guid": guid})[0]
+        self.set_upload("111", "u1", None, utoc=utoc)
+        self.set_upload("111", "u2", self.meta("G", "2", identifier="111.G"), utoc=utoc, payload=b"P2")
+        self.assertEqual(self.run_process(), {"ok": 2, "rejected": 0})
+        g1 = self.stored("111.G", "G-1.zip")[1]["guid"]
+        g2 = self.stored("111.G", "G-2.zip")[1]["guid"]
+        self.assertEqual(len({guid, g1, g2}), 3)
+        self.assertEqual(uuid.UUID(g1).version, 4)
+
+    def test_cover_reuse_on_update(self):
+        png = make_image("png")
+        data = base64.b64encode(png["data"]).decode("ascii")
+        self.set_upload("111", "u1", self.meta("Cool Mod", "1.0", image={"mime": "image/png", "data": data}))
+        self.run_process()
+        cover = self.catalog_mods()["111.CoolMod"]["cover"]
+        # image absent + a package without a cover: the mod's cover is reused
+        self.set_upload("111", "u2", self.meta("Cool Mod", "2.0", identifier="111.CoolMod"), payload=b"P2")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(self.catalog_mods()["111.CoolMod"]["cover"], cover)
+        self.assertEqual(self.stored("111.CoolMod", "Cool-Mod-2.0.zip")[1]["image"], png)
+        # zip mode (no metadata) reuses it too
+        make_package(self.root / "z.zip", title="Cool Mod", version="3.0", identifier="111.CoolMod")
+        self.to_inbox(self.root / "z.zip", "111")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(self.stored("111.CoolMod", "Cool-Mod-3.0.zip")[1]["image"], png)
+        # null removes it
+        self.set_upload("111", "u4", self.meta("Cool Mod", "4.0", identifier="111.CoolMod", image=None),
+                        payload=b"P4")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertNotIn("cover", self.catalog_mods()["111.CoolMod"])
+        self.assertIsNone(self.stored("111.CoolMod", "Cool-Mod-4.0.zip")[1]["image"])
+        # nothing to reuse now; an object replaces
+        self.set_upload("111", "u5", self.meta("Cool Mod", "5.0", identifier="111.CoolMod"), payload=b"P5")
+        self.run_process()
+        self.assertNotIn("cover", self.catalog_mods()["111.CoolMod"])
+        jpeg = make_image("jpeg")
+        self.set_upload("111", "u6", self.meta("Cool Mod", "6.0", identifier="111.CoolMod", image={
+            "mime": "image/jpeg", "data": base64.b64encode(jpeg["data"]).decode("ascii")}), payload=b"P6")
+        self.run_process()
+        self.assertTrue(self.catalog_mods()["111.CoolMod"]["cover"].endswith(".jpg"))
+        # a new mod never inherits a cover
+        self.set_upload("111", "u7", self.meta("Other Mod", "1.0"), payload=b"P7")
+        self.run_process()
+        self.assertNotIn("cover", self.catalog_mods()["111.OtherMod"])
+
+    def test_update_keeps_current_cover_over_the_packages_own(self):
+        png, jpeg = make_image("png"), make_image("jpeg")
+        def with_cover(title, version, image):
+            return trailer.write_trailer(fake_toc(), {"title": title, "author": "x", "description": "",
+                                                      "version": version, "image": image})[0]
+        data = base64.b64encode(png["data"]).decode("ascii")
+        self.set_upload("111", "u1", self.meta("Cool Mod", "1.0", image={"mime": "image/png", "data": data}))
+        self.run_process()
+        cover = self.catalog_mods()["111.CoolMod"]["cover"]
+        # metadata.json update, image absent, a package WITH its own cover: the current cover wins
+        self.set_upload("111", "u2", self.meta("Cool Mod", "2.0", identifier="111.CoolMod"),
+                        utoc=with_cover("Cool Mod", "2.0", jpeg), payload=b"P2")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(self.catalog_mods()["111.CoolMod"]["cover"], cover)
+        self.assertEqual(self.stored("111.CoolMod", "Cool-Mod-2.0.zip")[1]["image"], png)
+        # no metadata.json (zip mode): the package's own trailer is the intent, its cover is kept
+        make_package(self.root / "z.zip", title="Cool Mod", version="3.0", identifier="111.CoolMod", image=jpeg)
+        self.to_inbox(self.root / "z.zip", "111")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(self.stored("111.CoolMod", "Cool-Mod-3.0.zip")[1]["image"], jpeg)
+        self.assertTrue(self.catalog_mods()["111.CoolMod"]["cover"].endswith(".jpg"))
+        # a mod without a current cover falls back to the package's cover
+        self.set_upload("111", "u4", self.meta("Bare Mod", "1.0"), payload=b"P4")
+        self.run_process()
+        self.assertNotIn("cover", self.catalog_mods()["111.BareMod"])
+        self.set_upload("111", "u5", self.meta("Bare Mod", "2.0", identifier="111.BareMod"),
+                        utoc=with_cover("Bare Mod", "2.0", png), payload=b"P5")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        self.assertEqual(self.stored("111.BareMod", "Bare-Mod-2.0.zip")[1]["image"], png)
+        self.assertIn("cover", self.catalog_mods()["111.BareMod"])
+        # rebuild reproduces it from the stored packages
+        live = json.loads(self.catalog.read_text(encoding="utf-8"))
+        self.catalog.unlink()
+        build.rebuild(self.client, OWNER, REPO, self.catalog)
+        rebuilt = json.loads(self.catalog.read_text(encoding="utf-8"))
+        for doc in (live, rebuilt):
+            for m in doc["mods"]:
+                m.pop("updated")
+        self.assertEqual(rebuilt, live)
+
+    def test_rebuild_reproduces_identity_ownership_and_covers(self):
+        png = make_image("png")
+        data = base64.b64encode(png["data"]).decode("ascii")
+        self.set_upload("111", "a", self.meta("Cool Mod", "1.0", image={"mime": "image/png", "data": data}),
+                        username="alice")
+        self.run_process()
+        self.set_upload("111", "b", self.meta("New Name", "2.0", identifier="111.coolmod"), payload=b"P2",
+                        username="alice")
+        self.set_upload("222", "c", self.meta("Bob Mod", "1.0"), payload=b"P3", username="bob")
+        self.run_process()
+        self.set_upload(ADMIN, "d", self.meta("Bob Mod", "1.1", identifier="222.BobMod"), payload=b"P4",
+                        username="boss")
+        self.set_upload("111", "e", self.meta("Third", "1.0"), payload=b"P5", username="alice2")
+        self.run_process()
+        live = json.loads(self.catalog.read_text(encoding="utf-8"))
+        by_id = {m["id"]: m for m in live["mods"]}
+        self.assertEqual(sorted(by_id), ["111.CoolMod", "111.Third", "222.BobMod"])
+        self.assertEqual([(by_id[i]["uploader"], by_id[i]["author"]) for i in sorted(by_id)],
+                         [("111", "alice2"), ("111", "alice2"), ("222", "bob")])
+        self.assertEqual(by_id["111.CoolMod"]["name"], "New Name")
+        self.assertIn("cover", by_id["111.CoolMod"])
+        self.catalog.unlink()
+        build.rebuild(self.client, OWNER, REPO, self.catalog)
+        rebuilt = json.loads(self.catalog.read_text(encoding="utf-8"))
+        for doc in (live, rebuilt):
+            for m in doc["mods"]:
+                m.pop("updated")
+        self.assertEqual(rebuilt, live)
+
+    def test_rebuild_skips_packages_of_another_identifier(self):
+        self.set_upload("111", "a", self.meta("Cool Mod", "1.0"))
+        self.run_process()
+        live = self.catalog.read_bytes()
+        # a package whose identifier belongs to another release, planted in this one
+        tag = build.mod_tag("111.CoolMod")
+        make_package(self.root / "x.zip", title="Stray", identifier="111.Stray")
+        self.client.upload_asset(tag, self.root / "x.zip", "Stray-1.0.0.zip")
+        build.rebuild(self.client, OWNER, REPO, self.catalog)  # newest invalid -> whole release skipped
+        self.assertEqual(json.loads(self.catalog.read_text(encoding="utf-8"))["mods"], [])
+        self.client.delete_asset(tag, "Stray-1.0.0.zip")
+        build.rebuild(self.client, OWNER, REPO, self.catalog)
+        self.assertEqual(self._minus_updated(self.catalog.read_bytes()), self._minus_updated(live))
+
+    @staticmethod
+    def _minus_updated(raw: bytes) -> dict:
+        doc = json.loads(raw)
+        for m in doc["mods"]:
+            m.pop("updated")
+        return doc
 
 
 class TestOwnership(Base):
@@ -252,34 +744,35 @@ class TestOwnership(Base):
         make_package(self.root / "a.zip", guid=guid)
         self.to_inbox(self.root / "a.zip", "111", f"{S('111')}__1__a.zip")
         self.run_process()
-        self.assertEqual(self.catalog_mods()[guid]["uploader"], "111")
+        self.assertEqual(self.catalog_mods()["111.TestMod"]["uploader"], "111")
 
-        # a different uploader is rejected, even with a new version
-        make_package(self.root / "b.zip", version="2.0.0", guid=guid)
-        self.to_inbox(self.root / "b.zip", "222", f"{S('222')}__2__b.zip")
-        self.assertEqual(self.run_process(), {"ok": 0, "rejected": 1})
-        self.assertEqual(self.catalog_mods()[guid]["uploader"], "111")
-
-        # an admin (ADMIN_DISCORD_IDS) bypasses the check
-        make_package(self.root / "c.zip", version="3.0.0", guid=guid)
-        self.to_inbox(self.root / "c.zip", ADMIN, f"{S(ADMIN)}__3__c.zip")
-        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
-        self.assertEqual(self.catalog_mods()[guid]["uploader"], "111")  # owner kept
-        self.assertEqual(self.catalog_mods()[guid]["version"], "3.0.0")
+        # another uploader's zip carrying the owner's identifier (and the same
+        # GUID) is not an update of it: it becomes that uploader's own new mod
+        for uid, label in (("222", "b"), (ADMIN, "c")):
+            make_package(self.root / f"{label}.zip", version="2.0.0", guid=guid, identifier="111.TestMod",
+                         payload=label)
+            self.to_inbox(self.root / f"{label}.zip", uid)
+            self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
+        mods = self.catalog_mods()
+        self.assertEqual(sorted(mods), sorted(["111.TestMod", "222.TestMod", f"{ADMIN}.TestMod"]))
+        self.assertEqual((mods["111.TestMod"]["uploader"], mods["111.TestMod"]["version"]), ("111", "1.0.0"))
 
     def test_seeding_is_an_upload_by_the_given_user(self):
-        guid = str(uuid.uuid4())
         (self.root / "legacy").mkdir()
-        make_package(self.root / "legacy" / "s.zip", guid=guid, author="Whoever Wrote It")
+        make_package(self.root / "legacy" / "s.zip", author="Whoever Wrote It")
         sources = build.inbox_items_from_dir(self.root / "legacy", build.Uploader("777", "seeder"))
         self.processor.run(sources)
-        e = self.catalog_mods()[guid]
+        e = self.catalog_mods()["777.TestMod"]
         self.assertEqual((e["uploader"], e["author"]), ("777", "seeder"))
-        self.assertEqual(self.stored(guid, "Test-Mod-1.0.0.zip")[1]["identifier"], "777.TestMod")
+        self.assertEqual(self.stored("777.TestMod", "Test-Mod-1.0.0.zip")[1]["identifier"], "777.TestMod")
 
-        make_package(self.root / "d.zip", version="2.0.0", guid=guid)
-        self.to_inbox(self.root / "d.zip", "444", f"{S('444')}__3__d.zip")
-        self.assertEqual(self.run_process(), {"ok": 0, "rejected": 1})  # 777 owns it now
+        # 777 owns it now: an update by 444 is rejected
+        self.assertEqual(build.parse_upload_metadata(b'{"title":"T","author":"a","identifier":"777.TestMod"}')
+                         ["target"], "777.TestMod")
+        target = build.Staged({}, {"target": "777.TestMod"})
+        with self.assertRaisesRegex(build.PackageError, "belongs to 777"):
+            self.processor._target(target, {"title": "T"}, None, "444",
+                                   build.load_catalog(self.catalog)[1])
 
     def test_cli_seeding_needs_an_identity(self):
         d = self.root / "legacy"
@@ -302,15 +795,14 @@ class TestOwnership(Base):
         self.assertEqual([m["author"] for m in self.catalog_mods().values()], ["seeder"])
 
     def test_same_run_first_wins(self):
-        """Two inbox uploads of one new GUID in the same run: the first wins."""
-        guid = str(uuid.uuid4())
-        make_package(self.root / "a.zip", guid=guid, title="Race Mod")
+        """Two new mods of one title by one uploader in the same run: the first wins."""
+        make_package(self.root / "a.zip", title="Race Mod")
         self.to_inbox(self.root / "a.zip", "111", f"{S('111')}__1__a.zip")
-        make_package(self.root / "b.zip", version="2.0.0", guid=guid, title="Race Mod")
-        self.to_inbox(self.root / "b.zip", "222", f"{S('222')}__2__b.zip")
+        make_package(self.root / "b.zip", version="2.0.0", title="race mod")
+        self.to_inbox(self.root / "b.zip", "111", f"{S('111')}__2__b.zip")
         summary = self.run_process()
         self.assertEqual(summary, {"ok": 1, "rejected": 1})
-        self.assertEqual(self.catalog_mods()[guid]["uploader"], "111")
+        self.assertEqual(self.catalog_mods()["111.RaceMod"]["version"], "1.0.0")
 
 
 class TestDrain(Base):
@@ -335,10 +827,11 @@ class TestRebuild(Base):
         make_package(self.root / "v1.zip", title="RB Mod", version="1.0.0", guid=guid)
         self.to_inbox(self.root / "v1.zip", "12345", f"{S('12345')}__1__v1.zip")
         self.run_process()
-        make_package(self.root / "v2.zip", title="RB Mod", version="1.1.0", guid=guid)
+        make_package(self.root / "v2.zip", title="RB Mod", version="1.1.0", guid=guid,
+                     identifier="12345.RBMod")
         self.to_inbox(self.root / "v2.zip", "12345", f"{S('12345')}__2__v2.zip")
         self.run_process()
-        return guid
+        return "12345.RBMod"
 
     @staticmethod
     def _minus_updated(data: dict) -> dict:
@@ -515,10 +1008,10 @@ class TestRawUploads(Base):
         self.raw_set("555", "u-1", self.trailer_utoc(guid), b"UCAS", b"PAK")
         summary = self.run_process()
         self.assertEqual(summary, {"ok": 1, "rejected": 0})
-        e = self.catalog_mods()[guid]
+        e = self.catalog_mods()["555.RawMod"]
         self.assertEqual(e["uploader"], "555")
         self.assertEqual(e["name"], "Raw Mod")
-        tag = f"mod-{guid}"
+        tag = build.mod_tag("555.RawMod")
         zips = [a.name for a in self.client.list_assets(tag) if a.name.endswith(".zip")]
         self.assertEqual(zips, ["Raw-Mod-1.0.0.zip"])
         self.assertEqual(self.inbox_names(), [])  # manifest + parts all deleted
@@ -526,7 +1019,8 @@ class TestRawUploads(Base):
             z = pathlib.Path(td) / "p.zip"
             self.client.download_asset(tag, "Raw-Mod-1.0.0.zip", z)
             meta = build.validate_package(z)
-            self.assertEqual(meta["guid"], guid)
+            self.assertNotEqual(meta["guid"], guid)  # a fresh revision GUID
+            self.assertEqual(meta["identifier"], "555.RawMod")
             with zipfile.ZipFile(z) as zf:
                 self.assertEqual(sorted(zf.namelist()), ["mod.pak", "mod.ucas", "mod.utoc"])
 
@@ -537,7 +1031,7 @@ class TestRawUploads(Base):
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
         with tempfile.TemporaryDirectory() as td:
             z = pathlib.Path(td) / "p.zip"
-            self.client.download_asset(f"mod-{guid}", "Raw-Mod-1.0.0.zip", z)
+            self.client.download_asset(build.mod_tag("555.RawMod"), "Raw-Mod-1.0.0.zip", z)
             with zipfile.ZipFile(z) as zf:
                 self.assertEqual(zf.read("mod.ucas"), big_ucas)
 
@@ -549,7 +1043,7 @@ class TestRawUploads(Base):
         self.add_manifest("555", "u-2", files)
         self.assertEqual(self.run_process(), {"ok": 0, "rejected": 1})
         self.assertEqual(self.inbox_names(), [])  # whole group deleted
-        self.assertIsNone(self.client.get_release(f"mod-{guid}"))
+        self.assertEqual(self.client.list_tags(build.MOD_TAG_PREFIX), [])
 
     def test_incomplete_group_waits(self):
         guid = str(uuid.uuid4())
@@ -568,7 +1062,7 @@ class TestRawUploads(Base):
             _os.utime(p, (old, old))
         self.assertEqual(self.run_process(), {"ok": 0, "rejected": 0})
         self.assertEqual(self.inbox_names(), [])  # swept
-        self.assertIsNone(self.client.get_release(f"mod-{guid}"))
+        self.assertEqual(self.client.list_tags(build.MOD_TAG_PREFIX), [])
 
     def test_zip_and_raw_coexist_in_one_run(self):
         zguid, rguid = str(uuid.uuid4()), str(uuid.uuid4())
@@ -624,10 +1118,10 @@ class TestUploadSets(Base):
     def loose(self, utoc: bytes) -> list:
         return [("mod.pak", b"PAK"), ("mod.ucas", b"UCAS"), ("mod.utoc", utoc)]
 
-    def stored_package(self, guid: str, name: str) -> tuple:
+    def stored_package(self, identifier: str, name: str) -> tuple:
         with tempfile.TemporaryDirectory() as td:
             z = pathlib.Path(td) / "p.zip"
-            self.client.download_asset(f"mod-{guid}", name, z)
+            self.client.download_asset(build.mod_tag(identifier), name, z)
             with zipfile.ZipFile(z) as zf:
                 names = zf.namelist()
                 return names, build.validate_package(z), zf.read(next(n for n in names if n.endswith(".utoc")))
@@ -646,15 +1140,15 @@ class TestUploadSets(Base):
     def test_loose_set_without_trailer_gets_metadata(self):
         self.set_upload("555", "m-1", self.loose(fake_toc()), self.meta_json())
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
-        (guid, e), = self.catalog_mods().items()
+        (ident, e), = self.catalog_mods().items()
         self.assertEqual((e["name"], e["author"], e["version"], e["gameVersion"], e["tags"]),
                          ("Edited Title", "user555", "2.0.0", "5.6", ["Skin"]))
-        names, meta, _ = self.stored_package(guid, "Edited-Title-2.0.0.zip")
+        names, meta, _ = self.stored_package(ident, "Edited-Title-2.0.0.zip")
         self.assertEqual(sorted(names), ["mod.pak", "mod.ucas", "mod.utoc"])
         self.assertEqual((meta["author"], meta["identifier"]), ("user555", "555.EditedTitle"))
         self.assertEqual(self.inbox_names(), [])
 
-    def test_loose_set_with_trailer_keeps_guid_and_cover(self):
+    def test_loose_set_with_trailer_keeps_its_cover_but_not_its_guid(self):
         guid = str(uuid.uuid4())
         image = make_image("png")
         utoc = build.trailer.write_trailer(fake_toc(), {
@@ -662,11 +1156,12 @@ class TestUploadSets(Base):
             "guid": guid, "image": image, "tags": []})[0]
         self.set_upload("555", "m-2", self.loose(utoc), self.meta_json())
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
-        e = self.catalog_mods()[guid]
+        e = self.catalog_mods()["555.EditedTitle"]
         self.assertEqual(e["name"], "Edited Title")
-        self.assertIn("-cover-", e["cover"])  # image key absent: the package's cover is kept
-        _, meta, _ = self.stored_package(guid, "Edited-Title-2.0.0.zip")
+        self.assertIn("/cover-", e["cover"])  # image key absent: the package's cover is kept
+        _, meta, _ = self.stored_package("555.EditedTitle", "Edited-Title-2.0.0.zip")
         self.assertEqual(meta["image"]["data"], image["data"])
+        self.assertNotEqual(meta["guid"], guid)
 
     def test_metadata_removes_and_adds_a_cover(self):
         guid = str(uuid.uuid4())
@@ -675,17 +1170,17 @@ class TestUploadSets(Base):
             "guid": guid, "image": make_image("png"), "tags": []})[0]
         self.set_upload("555", "m-3", self.loose(utoc), self.meta_json(image=None))
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
-        self.assertNotIn("cover", self.catalog_mods()[guid])
-        _, meta, _ = self.stored_package(guid, "Edited-Title-2.0.0.zip")
+        self.assertNotIn("cover", self.catalog_mods()["555.EditedTitle"])
+        _, meta, _ = self.stored_package("555.EditedTitle", "Edited-Title-2.0.0.zip")
         self.assertIsNone(meta["image"])
 
         jpeg = make_image("jpeg")
         data = base64.b64encode(jpeg["data"]).decode("ascii")
         self.set_upload("555", "m-4", self.loose(utoc), self.meta_json(
-            version="3.0.0", guid=guid, image={"mime": "image/jpeg", "data": data}))
+            version="3.0.0", identifier="555.EditedTitle", image={"mime": "image/jpeg", "data": data}))
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
-        self.assertTrue(self.catalog_mods()[guid]["cover"].endswith(".jpg"))
-        _, meta, _ = self.stored_package(guid, "Edited-Title-3.0.0.zip")
+        self.assertTrue(self.catalog_mods()["555.EditedTitle"]["cover"].endswith(".jpg"))
+        _, meta, _ = self.stored_package("555.EditedTitle", "Edited-Title-3.0.0.zip")
         self.assertEqual(meta["image"], jpeg)
 
     def test_zip_set_with_metadata_is_rewritten_and_drops_unrelated_members(self):
@@ -696,10 +1191,10 @@ class TestUploadSets(Base):
         blob = self.zip_bytes(utoc, nested=True, extra=True)
         self.set_upload("555", "m-5", [("Pack.zip", blob)], self.meta_json())
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
-        self.assertEqual(self.catalog_mods()[guid]["name"], "Edited Title")
-        names, meta, _ = self.stored_package(guid, "Edited-Title-2.0.0.zip")
+        self.assertEqual(self.catalog_mods()["555.EditedTitle"]["name"], "Edited Title")
+        names, meta, _ = self.stored_package("555.EditedTitle", "Edited-Title-2.0.0.zip")
         self.assertEqual(sorted(names), ["Content/Paks/mod.pak", "Content/Paks/mod.ucas", "Content/Paks/mod.utoc"])
-        self.assertEqual(meta["guid"], guid)
+        self.assertNotEqual(meta["guid"], guid)
 
     def test_zip_set_without_metadata_is_rezipped_with_forced_fields(self):
         guid = str(uuid.uuid4())
@@ -707,7 +1202,7 @@ class TestUploadSets(Base):
         blob = self.zip_bytes(utoc, extra=True)
         self.set_upload("555", "m-6", [("Pack.zip", blob)])
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
-        names, meta, _ = self.stored_package(guid, "Plain-Zip-1.0.0.zip")
+        names, meta, _ = self.stored_package("555.PlainZip", "Plain-Zip-1.0.0.zip")
         self.assertEqual(sorted(names), ["mod.pak", "mod.ucas", "mod.utoc"])  # readme.txt dropped
         self.assertEqual((meta["author"], meta["identifier"]), ("user555", "555.PlainZip"))
 
@@ -716,32 +1211,28 @@ class TestUploadSets(Base):
         utoc = self.trailer_utoc(guid, "As Is")
         self.set_upload("555", "m-7", self.loose(utoc))
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
-        names, meta, stored_utoc = self.stored_package(guid, "As-Is-1.0.0.zip")
-        self.assertEqual((meta["title"], meta["version"], meta["description"], meta["guid"]),
-                         ("As Is", "1.0.0", "raw", guid))
+        names, meta, stored_utoc = self.stored_package("555.AsIs", "As-Is-1.0.0.zip")
+        self.assertEqual((meta["title"], meta["version"], meta["description"]), ("As Is", "1.0.0", "raw"))
+        self.assertNotEqual(meta["guid"], guid)
         self.assertEqual((meta["author"], meta["identifier"]), ("user555", "555.AsIs"))
         self.assertEqual(stored_utoc[:build.trailer.toc_end(build.trailer.parse_toc_header(utoc), utoc)],
                          utoc[:build.trailer.toc_end(build.trailer.parse_toc_header(utoc), utoc)])
-        self.assertEqual(self.catalog_mods()[guid]["author"], "user555")
+        self.assertEqual(self.catalog_mods()["555.AsIs"]["author"], "user555")
 
     def test_set_without_any_trailer_and_without_metadata_is_rejected(self):
         self.set_upload("555", "m-7b", self.loose(fake_toc()))
         self.assertEqual(self.run_process(), {"ok": 0, "rejected": 1})
         self.assertEqual(self.inbox_names(), [])
 
-    def test_mismatched_guid_is_rejected_and_the_run_continues(self):
+    def test_metadata_guid_is_ignored_and_a_bad_set_does_not_block_the_run(self):
         guid = str(uuid.uuid4())
         utoc = self.trailer_utoc(guid, "Has Guid")
         self.set_upload("555", "m-8", self.loose(utoc), self.meta_json(guid=str(uuid.uuid4())))
-        good = str(uuid.uuid4())
-        self.set_upload("556", "m-9", self.loose(self.trailer_utoc(good, "Good One")))
-        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 1})
-        self.assertEqual(list(self.catalog_mods()), [good])
-        self.assertEqual(self.inbox_names(), [])
-
-    def test_guid_on_a_package_without_trailer_is_rejected(self):
-        self.set_upload("555", "m-10", self.loose(fake_toc()), self.meta_json(guid=str(uuid.uuid4())))
-        self.assertEqual(self.run_process(), {"ok": 0, "rejected": 1})
+        self.set_upload("556", "m-9", self.loose(fake_toc()), self.meta_json(title=""))  # invalid
+        self.set_upload("557", "m-10", [("mod.pak", b"PAK-557"), ("mod.ucas", b"UCAS"), ("mod.utoc", fake_toc())],
+                        self.meta_json(guid="not a guid"))
+        self.assertEqual(self.run_process(), {"ok": 2, "rejected": 1})
+        self.assertEqual(sorted(self.catalog_mods()), ["555.EditedTitle", "557.EditedTitle"])
         self.assertEqual(self.inbox_names(), [])
 
     def test_invalid_metadata_is_rejected_and_assets_deleted(self):
@@ -770,7 +1261,7 @@ class TestUploadSets(Base):
         self.set_upload("555", "m-13", self.loose(self.trailer_utoc(guid, "Untouched")),
                         self.meta_json(), declare_metadata=False)
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
-        self.assertEqual(self.catalog_mods()[guid]["name"], "Untouched")
+        self.assertEqual(self.catalog_mods()["555.Untouched"]["name"], "Untouched")
         self.assertEqual(self.inbox_names(), [])
 
     def test_zip_with_other_files_is_rejected(self):
@@ -793,22 +1284,50 @@ class TestUploadSets(Base):
                          {"kind": "metadata", "uploader": build.Uploader("555", "user555"), "upload_id": "u-1"})
 
     def test_apply_metadata_unit(self):
-        who = build.Uploader("555", "alice")
         meta = build.parse_upload_metadata(self.meta_json(guid=None))
-        out = build.apply_metadata(fake_toc(), meta, None, who)
+        out = build.apply_metadata(fake_toc(), meta, None, author="alice", identifier="555.EditedTitle")
         got = build.trailer.read_trailer(out)
         self.assertEqual((got["title"], got["author"], got["identifier"], got["tags"]),
                          ("Edited Title", "alice", "555.EditedTitle", ["Skin"]))
         again = build.apply_metadata(out, build.parse_upload_metadata(self.meta_json(title="Second")),
-                                     build.existing_trailer(out), who)
-        self.assertEqual(build.trailer.read_trailer(again)["guid"], got["guid"])
+                                     build.existing_trailer(out), author="alice", identifier="555.EditedTitle")
+        a = build.trailer.read_trailer(again)
+        self.assertNotEqual(a["guid"], got["guid"])  # a fresh revision GUID on every write
+        self.assertEqual((a["title"], a["identifier"]), ("Second", "555.EditedTitle"))  # identifier as given
         # no metadata: the package's own fields survive, author/identifier are forced
-        forced = build.apply_metadata(out, None, build.existing_trailer(out), build.Uploader("9", "bob"))
+        forced = build.apply_metadata(out, None, build.existing_trailer(out), author="bob", identifier="9.X")
         f = build.trailer.read_trailer(forced)
-        self.assertEqual((f["title"], f["guid"], f["author"], f["identifier"]),
-                         ("Edited Title", got["guid"], "bob", "9.EditedTitle"))
+        self.assertEqual((f["title"], f["author"], f["identifier"]), ("Edited Title", "bob", "9.X"))
+        # the fallback cover is used only when neither metadata nor the package has one
+        png = make_image("png")
+        calls = []
+        def fallback():
+            calls.append(1)
+            return png
+        with_cover = build.apply_metadata(out, None, build.existing_trailer(out), author="a", identifier="1.X",
+                                          fallback_cover=fallback)
+        self.assertEqual(build.trailer.read_trailer(with_cover)["image"], png)
+        removed = build.apply_metadata(with_cover, {**meta, "image": None}, build.existing_trailer(with_cover),
+                                       author="a", identifier="1.X", fallback_cover=fallback)
+        self.assertIsNone(build.trailer.read_trailer(removed)["image"])
+        self.assertEqual(len(calls), 1)
+        # an explicit update (metadata `identifier` -> target), image absent: the
+        # current cover beats the package's own; the package's is the fallback
+        jpeg = make_image("jpeg")
+        upd = {k: v for k, v in meta.items() if k != "image"}
+        upd["target"] = "1.X"
+        current = build.apply_metadata(with_cover, upd, build.existing_trailer(with_cover),
+                                       author="a", identifier="1.X", fallback_cover=lambda: jpeg)
+        self.assertEqual(build.trailer.read_trailer(current)["image"], jpeg)
+        kept = build.apply_metadata(with_cover, upd, build.existing_trailer(with_cover),
+                                    author="a", identifier="1.X", fallback_cover=lambda: None)
+        self.assertEqual(build.trailer.read_trailer(kept)["image"], png)
+        # no metadata: the package's own cover still wins
+        own = build.apply_metadata(with_cover, None, build.existing_trailer(with_cover),
+                                   author="a", identifier="1.X", fallback_cover=lambda: jpeg)
+        self.assertEqual(build.trailer.read_trailer(own)["image"], png)
         with self.assertRaises(build.PackageError):
-            build.apply_metadata(fake_toc(), None, None, who)
+            build.apply_metadata(fake_toc(), None, None, author="a", identifier="1.X")
 
 
 class TestVerifiedAuthors(Base):
@@ -816,41 +1335,48 @@ class TestVerifiedAuthors(Base):
     package or metadata.json says."""
 
     def upload(self, uid: str, name: str, *, username: str | None = None, title: str = "Verified Mod",
-               version: str = "1.0.0", guid: str | None = None, author: str = "Self Declared") -> str:
-        guid = guid or str(uuid.uuid4())
-        make_package(self.root / f"{name}.zip", title=title, version=version, guid=guid, author=author)
+               version: str = "1.0.0", identifier: str | None = None, author: str = "Self Declared") -> str:
+        """A zip-mode upload; returns the mod's identifier (`identifier` = an update of it)."""
+        make_package(self.root / f"{name}.zip", title=title, version=version, author=author,
+                     identifier=identifier)
         self.to_inbox(self.root / f"{name}.zip", uid, f"{S(uid, username)}__{self.next_ts()}__{name}.zip")
-        return guid
+        return identifier or build.mint_identifier(uid, title)
 
     def test_zip_mode_forces_author_and_identifier(self):
-        guid = self.upload("111", "a", username="Alice.B")
+        ident = self.upload("111", "a", username="Alice.B")
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
-        e = self.catalog_mods()[guid]
+        e = self.catalog_mods()[ident]
         self.assertEqual((e["author"], e["uploader"]), ("Alice.B", "111"))
-        meta = self.stored(guid, "Verified-Mod-1.0.0.zip")[1]
+        meta = self.stored(ident, "Verified-Mod-1.0.0.zip")[1]
         self.assertEqual((meta["author"], meta["identifier"]), ("Alice.B", "111.VerifiedMod"))
 
     def test_identifier_strips_all_whitespace_of_the_title(self):
-        guid = self.upload("111", "a", title="  A \t Spaced\u00a0Title ")
+        self.upload("111", "a", title="  A 	 Spaced Title ")
         self.run_process()
-        self.assertEqual(self.stored(guid, "A-Spaced-Title-1.0.0.zip")[1]["identifier"], "111.ASpacedTitle")
+        self.assertEqual(self.stored("111.ASpacedTitle", "A-Spaced-Title-1.0.0.zip")[1]["identifier"],
+                         "111.ASpacedTitle")
 
     def test_admin_is_forced_too(self):
-        guid = self.upload(ADMIN, "a", username="boss", author="Somebody Else")
+        ident = self.upload(ADMIN, "a", username="boss", author="Somebody Else")
         self.run_process()
-        e = self.catalog_mods()[guid]
+        e = self.catalog_mods()[ident]
         self.assertEqual((e["author"], e["uploader"]), ("boss", ADMIN))
-        meta = self.stored(guid, "Verified-Mod-1.0.0.zip")[1]
+        meta = self.stored(ident, "Verified-Mod-1.0.0.zip")[1]
         self.assertEqual((meta["author"], meta["identifier"]), ("boss", f"{ADMIN}.VerifiedMod"))
 
     def test_admin_updating_another_users_mod_keeps_the_owners_name(self):
-        guid = self.upload("111", "a", username="alice")
+        ident = self.upload("111", "a", username="alice")
         self.run_process()
-        self.upload(ADMIN, "b", username="boss", version="2.0.0", guid=guid)
+        helper = TestIdentity("test_mint_identifier")
+        helper.client = self.client
+        helper.set_upload(ADMIN, "adm", helper.meta("Verified Mod", "2.0.0", identifier=ident), username="boss")
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
-        e = self.catalog_mods()[guid]
+        e = self.catalog_mods()[ident]
         self.assertEqual((e["version"], e["uploader"], e["author"]), ("2.0.0", "111", "alice"))
-        self.assertEqual(self.stored(guid, "Verified-Mod-2.0.0.zip")[1]["author"], "boss")
+        # the stored package carries the owner's name too (so rebuild cannot mistake it)
+        self.assertEqual(self.stored(ident, "Verified-Mod-2.0.0.zip")[1]["author"], "alice")
+        # the admin's own entries are renamed by the upload, nobody else's
+        self.assertEqual([m["author"] for m in self.catalog_mods().values()], ["alice"])
 
     def test_a_rename_updates_every_entry_of_that_user_and_nobody_elses(self):
         g1 = self.upload("111", "a", username="alice", title="One")
@@ -859,7 +1385,7 @@ class TestVerifiedAuthors(Base):
         self.run_process()
         self.assertEqual({self.catalog_mods()[g]["author"] for g in (g1, g2)}, {"alice"})
         # alice renames herself and uploads a new version of only one of her mods
-        self.upload("111", "d", username="alice2", title="One", version="2.0.0", guid=g1)
+        self.upload("111", "d", username="alice2", title="One", version="2.0.0", identifier=g1)
         self.run_process()
         mods = self.catalog_mods()
         self.assertEqual([mods[g]["author"] for g in (g1, g2, g3)], ["alice2", "alice2", "bob"])
@@ -868,12 +1394,12 @@ class TestVerifiedAuthors(Base):
 
     def test_leaving_keeps_the_old_name(self):
         g = self.upload("111", "a", username="alice")
-        self.upload("222", "b", username="bob", title="Other")
+        other = self.upload("222", "b", username="bob", title="Other")
         self.run_process()
-        self.upload("222", "c", username="bob2", title="Other", version="2.0.0",
-                    guid=next(i for i, m in self.catalog_mods().items() if m["name"] == "Other"))
+        self.upload("222", "c", username="bob2", title="Other", version="2.0.0", identifier=other)
         self.run_process()
         self.assertEqual(self.catalog_mods()[g]["author"], "alice")
+        self.assertEqual(self.catalog_mods()[other]["author"], "bob2")
 
     def test_username_with_unicode_roundtrips(self):
         g = self.upload("111", "a", username="Zoë 日本__x")
@@ -917,19 +1443,21 @@ class TestVerifiedAuthors(Base):
 
 
 class TestRebuildVerified(Base):
-    def upload(self, uid, name, username, title="RB Mod", version="1.0.0", guid=None):
-        guid = guid or str(uuid.uuid4())
-        make_package(self.root / f"{name}.zip", title=title, version=version, guid=guid)
+    def upload(self, uid, name, username, title="RB Mod", version="1.0.0", identifier=None):
+        make_package(self.root / f"{name}.zip", title=title, version=version, identifier=identifier)
         self.to_inbox(self.root / f"{name}.zip", uid, f"{S(uid, username)}__{self.next_ts()}__{name}.zip")
         self.run_process()
-        return guid
+        return identifier or build.mint_identifier(uid, title)
 
     def test_rebuild_from_releases_alone_reproduces_the_live_catalog(self):
         g1 = self.upload("111", "a", "alice", title="One")
         g2 = self.upload("111", "b", "alice", title="Two")
         g3 = self.upload("222", "c", "bob", title="Three")
-        self.upload("111", "d", "alice2", title="One", version="2.0.0", guid=g1)
-        self.upload(ADMIN, "e", "boss", title="Three", version="2.0.0", guid=g3)
+        self.upload("111", "d", "alice2", title="One renamed", version="2.0.0", identifier=g1)
+        helper = TestIdentity("test_mint_identifier")
+        helper.client = self.client
+        helper.set_upload(ADMIN, "adm", helper.meta("Three", "2.0.0", identifier=g3), username="boss")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
         live = json.loads(self.catalog.read_text(encoding="utf-8"))
         self.catalog.unlink()  # a lost catalog: nothing to inherit from
         build.rebuild(self.client, OWNER, REPO, self.catalog)
@@ -952,9 +1480,8 @@ class TestRebuildVerified(Base):
         self.assertEqual(self.catalog.read_bytes(), first)
 
     def test_rebuild_skips_packages_not_written_by_the_catalog(self):
-        tag = "mod-" + str(uuid.uuid4())
-        guid = tag[4:]
-        make_package(self.root / "h.zip", guid=guid)  # identifier "Tester.TestMod": no uploader id
+        tag = build.mod_tag("Tester.TestMod")
+        make_package(self.root / "h.zip")  # identifier "Tester.TestMod": no uploader id
         self.client.create_release(tag, "Hand Made")
         self.client.upload_asset(tag, self.root / "h.zip", "Test-Mod-1.0.0.zip")
         build.rebuild(self.client, OWNER, REPO, self.catalog)

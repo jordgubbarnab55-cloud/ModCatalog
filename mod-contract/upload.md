@@ -17,9 +17,12 @@ stored trailer says:
 
 - `author` = the account's name (ModCatalog: the Discord `username`, not the
   display name or a server nickname) **as of this upload**;
-- `identifier` = `{accountId}.{Title}` with all whitespace removed (the
-  trailer's cosmetic identifier, with the account id in place of the author;
-  recomputed on every upload — the GUID stays the real identity).
+- `identifier` = the mod's **permanent identity** (`trailer-spec.md`):
+  minted on the mod's first upload as `{accountId}.{Title}` with all
+  whitespace removed, then **locked** — every later version keeps it, even
+  when the title changes. Identifiers are unique case-insensitively;
+- `guid` = a fresh one on every accepted upload (a revision id, not an
+  identity).
 
 This applies to **every** accepted package: zip mode, a set without
 `metadata.json`, a set with it, and the server's own admins. The package is
@@ -27,6 +30,23 @@ re-written with these fields even when its author already matches. Earlier
 versions' stored packages are immutable and
 keep the name they were uploaded with; a server may update the *catalog*
 entries' `author` when the account is renamed.
+
+### New mod or update
+
+Every upload is either a **new mod** or an **update** of an existing one:
+
+- `metadata.json` with `identifier` → an update of that mod. It must exist
+  (case-insensitive match) and belong to the uploader (a server's admins may
+  update anyone's mod; it stays under its owner, and the stored package
+  carries the owner's name). Otherwise the set is rejected.
+- `metadata.json` without `identifier` → a new mod; its identifier is minted
+  from the title. If the uploader already has a mod with that identifier the
+  set is rejected ("choose Update").
+- No `metadata.json` (a set without it, or zip mode) → an update when the
+  package's trailer `identifier` starts with the uploader's `{accountId}.`
+  and that mod exists; otherwise a new mod (minted, same collision rule).
+
+A rejected upload never appears in the catalog (the 202 does not report it).
 
 ### `GET <endpoint root>/whoami`
 
@@ -85,22 +105,28 @@ trailer (`.utoc` metadata trailer, `trailer-spec.md`).
 {
   "title": "Mod name", "description": "…", "version": "1.2", "game_version": "28.02.0",
   "tags": ["Skin"], "author": "Someone",
-  "guid": "<the package's existing GUID>",
+  "identifier": "123456789.ModName",
   "image": { "mime": "image/png", "data": "<base64>" }
 }
 ```
 
-- The fields and limits are those of the trailer payload (`trailer-spec.md`);
-  `identifier` is derived (`Author.Title`, whitespace removed). The server
-  treats the file as untrusted input and rejects the set when it violates the
-  trailer's metadata schema. A server with verified authors (above) overrides
-  `author` and `identifier`; clients still send the name they show.
-- `guid` is optional. Without it the package keeps its existing GUID (a new
-  one is generated when it has no trailer). A `guid` that is not the
-  package's existing GUID rejects the set: changing a mod's identity is done
-  in ModManager, not through the catalog.
-- `image` absent keeps the package's cover; `"image": null` removes it; an
-  object replaces it (PNG or JPEG, ≤ 4 MiB).
+- The fields and limits are those of the trailer payload (`trailer-spec.md`).
+  The server treats the file as untrusted input and rejects the set when it
+  violates the trailer's metadata schema. A server with verified authors
+  (above) overrides `author`; clients still send the name they show.
+- `identifier` is optional: present (a non-empty string) = **update** of the
+  mod with that identifier, absent (or `null`/`""`) = **new mod** (see "New
+  mod or update"). It never renames a mod.
+- `guid` is no longer meaningful and is **ignored** (older clients may still
+  send it); the server writes a fresh revision GUID.
+- `image` absent: for a **new mod** the package's own cover is kept; for an
+  **update** (`identifier` present) the mod's **current cover** is kept, even
+  when the new package carries its own (written into the stored package) —
+  the package's cover is used only when the mod has no current cover.
+  `"image": null` removes it; an object replaces it (PNG or JPEG, ≤ 4 MiB).
+  An update **without** `metadata.json` keeps the package's own cover (its
+  trailer is the uploader's intent) and reuses the mod's current cover only
+  when the package has none.
 - A set **without** `metadata.json` keeps the package's own trailer fields
   (the package must already carry a valid trailer), apart from the fields a
   server with verified authors overrides.

@@ -35,7 +35,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Drain the inbox: validate each package, re-home it to mod-<guid>,
+      # Drain the inbox: validate each package, re-home it to its mod's release,
       # merge into site/catalog.json. Invalid packages are rejected and
       # removed without blocking the rest of the run.
       - name: Drain the inbox release
