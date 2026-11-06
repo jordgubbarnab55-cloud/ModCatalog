@@ -348,7 +348,16 @@ injected: `handle(request, env, fetch)`.
 external JS.
 It `fetch('catalog.json', {cache:'no-store'})` same-origin at load, reads it
 with `parseCatalog` and renders cards dynamically — **zero mod data in the
-HTML**. ModManager's Browse tab is the reference; the page mirrors it:
+HTML**.
+
+**Icons** are vendored `lucide-static` files in `site/icons/*.svg` (kept
+byte-identical to the pack so a re-download re-syncs them). `<use>` of an
+*external* SVG file does not render in Safari, so `scripts/sync-icons.py`
+generates a hidden inline `<svg>` sprite in `index.html` from them (marked
+`icons:sprite:start/end`; stroke attrs live on each `<symbol>` — the
+`display:none` sprite root is not in the `<use>` inheritance chain), and all
+icons reference it as `<use href="#i-<name>">`. After changing an icon file,
+rerun the script and commit both. ModManager's Browse tab is the reference; the page mirrors it:
 
 - **Cards** (`BrowseModCard`): Adonis dark palette (window `#2A2B34`, card
   `#32323F` / hover `#3D3D4C`, fg `#F0F0F0` @ 75% secondary, accent
