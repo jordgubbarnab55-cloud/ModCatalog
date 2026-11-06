@@ -129,7 +129,7 @@
     },
     {
       "id": "1509993694902878381.RedLegacyNea",
-      "name": "Red Legacy Nea 2",
+      "name": "Red Legacy Nea 3",
       "author": "uncool_1234",
       "version": ".alpha-2",
       "gameVersion": "11.2.1",
@@ -137,11 +137,11 @@
       "tags": [
         "Skin"
       ],
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.redlegacynea-1a41ea7d/Red-Legacy-Nea-2-.alpha-2.zip",
-      "size": 19950009,
-      "sha256": "653548d0c6b1b824762fe928062f017373ee52cfd1996e0a35b88d192e1a3313",
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.redlegacynea-1a41ea7d/Red-Legacy-Nea-3-.alpha-2.zip",
+      "size": 214239101,
+      "sha256": "91a8a3ec88f1d42d51f8cffc50369da9e71c05452e61f2298573ead48cdb1d48",
       "uploader": "1509993694902878381",
-      "updated": "2026-11-06T20:08:58Z",
+      "updated": "2026-11-06T23:14:29Z",
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.redlegacynea-1a41ea7d/cover-17bceb40.png"
     }
   ]
