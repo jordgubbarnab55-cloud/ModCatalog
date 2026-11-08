@@ -504,26 +504,23 @@ flow; nothing is uploaded before the confirm):
    the package's cover. Untouched sends no `image`, a new pick sends it, ✕
    sends `null`.
 6. **Confirm** — "Upload ‹title› v‹version›?" (an update: "Update ‹title›
-   to v‹version›?", result "The update of ‹title› to v‹version› is
-   uploaded") over the editor (Cancel
+   to v‹version›?") over the editor (Cancel
    returns to the editor with the values kept), then the upload: manifest,
    `metadata.json`, the files part-split at 90 MB, through
    `XMLHttpRequest` with a progress bar (not dismissible while sending). A
    failed request leaves the editor open underneath ("Back to the editor" /
    Esc keep the form). Once every request is accepted the editor modal closes
-   and the confirm modal becomes the result ("‹title› v‹version› is
-   uploaded", `uploadedText`), dismissible by Close / Esc / scrim / ✕, while
-   it polls `catalog.json` (`findPublishedMod`, new id or changed
-   file/version) for up to ~3 minutes and then shows `doneText`; dismissing
-   it ends the session and aborts the poll. Statuses come from
+   and the confirm modal becomes a static "Your mod is now processing"
+   result (spinner + `statusMessage(202)`, one Close button) — it does not
+   poll the catalog or update; the mod appears when the next inbox run
+   finishes. Dismissing it ends the session. Statuses come from
    `statusMessage`.
 
 The browser sends the package bytes **unchanged** and never writes a
 trailer; the metadata travels as `metadata.json` (`buildMetadataJson`;
 `image` omitted = keep the package's cover, `null` = remove; never a `guid`;
 `form.targetIdentifier` → `identifier` = an update of that mod, absent = a
-new mod, set by the Update path; the result poll matches the target or
-forced identifier, case-insensitively). The tag chips
+new mod, set by the Update path). The tag chips
 come from `site/tags.json`, which the deploy steps copy from
 `mod-contract/tags.json` (gitignored; the tags section hides when it is
 missing, e.g. a local preview). Pure helpers: `upload-lib.js`, `zip-lib.js`,

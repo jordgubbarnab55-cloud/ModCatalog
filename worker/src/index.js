@@ -89,7 +89,7 @@ function uploaderStamp(discordId, username) {
 }
 
 const STALE_TOKEN_MESSAGE =
-  "this token predates verified author names; mint a new one with /token in Discord";
+  "this token is outdated; mint a new one with /token in Discord";
 
 // Looks the bearer token up: { rec: { discordId, username } } or { response }.
 async function authenticate(request, env, cors) {
@@ -198,10 +198,9 @@ async function handleDiscord(request, env, fetchImpl) {
       type: 4,
       data: {
         content:
-          `Your upload token (shown once, treat it like a password):\n` +
-          `\`${token}\`\n\nMods you upload with it are published under the author name ` +
-          `\`${username}\` (your Discord username).\n\nKeep it secret: it can upload mods as you (10 per day, 100 MB each). ` +
-          `Re-issue with \`/token\` — a new mint invalidates this one (that is the revoke).`,
+          `## :key: Your upload token:\n` + `\`\`\`\n${token}\n\`\`\`\n` +
+          `**This token is only shown once. Copy it before you dismiss this message.**\n` + 
+          `If you need a new token, or want to revoke your existing one, just regenerate a new one. The old one becomes invalid.`,
         flags: 64, // ephemeral: only this user sees it
       },
     }, fetchImpl);
@@ -259,7 +258,7 @@ async function handleUpload(request, env, fetchImpl) {
   const contentLength = parseInt(clHeader, 10);
   if (contentLength > MAX_BODY_BYTES) {
     return json({ error: `upload is ${contentLength} bytes; the limit is 100 MB ` +
-      "(Cloudflare free plan). Split the package or contact the maintainer." }, 413, cors);
+      "Split the package or contact the maintainer." }, 413, cors);
   }
 
   // 3. filename (zip packages vs raw file sets)
@@ -324,8 +323,8 @@ async function handleUpload(request, env, fetchImpl) {
   // 5. the fixed "inbox" release (id cached in KV)
   const inboxId = await getInboxReleaseId(env, fetchImpl);
   if (inboxId == null) {
-    return json({ error: "the 'inbox' release does not exist yet; " +
-      "run the Seed legacy mods (or Process inbox) workflow once" }, 503, cors);
+    return json({ error: "uploads aren't set up yet; the catalog maintainer needs " +
+      "to run the setup workflow once" }, 503, cors);
   }
 
   // 6. stream straight through (do NOT read the body into memory)

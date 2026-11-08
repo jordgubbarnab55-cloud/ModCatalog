@@ -11,7 +11,7 @@ import { el, openModal, focusFirst } from "./modal.js";
 import { createEditor } from "./upload-editor.js";
 import {
   classifySelection, buildManifest, buildMetadataJson, planRequests, sha256Hex, statusMessage,
-  findPublishedMod, confirmText, doneText, uploadedText, titleFromBase, POLL_MAX_MS, forcedFields, authorMismatchNote, whoamiUrl,
+  confirmText, titleFromBase, forcedFields, authorMismatchNote, whoamiUrl,
   checkToken, selectionLabel, ownMods, filterPickerMods, updatePrefill, NO_OWN_MODS_TEXT,
 } from "./upload-lib.js";
 import { readUtocFromZip, shapeProblem, ZipError, MAX_UTOC_BYTES } from "./zip-lib.js";
@@ -20,7 +20,6 @@ import { sanitizeTags, formatBytes, metaParts, placeholder } from "./catalog-lib
 
 const TOKEN_KEY = "modcatalog.uploadToken";
 const FLAG_ONDEMAND = 0x10;
-const POLL_EVERY_MS = 10000;
 
 let memoryToken = "";
 const tokenStore = {
@@ -109,7 +108,7 @@ async function analyze(selection, files, vocabulary) {
     };
   }
   const { kept, dropped } = sanitizeTags(meta.tags, vocabulary);
-  if (dropped.length > 0) notes.push({ kind: "info", text: `Unknown tag(s) dropped: ${dropped.join(", ")}.` });
+  if (dropped.length > 0) notes.push({ kind: "info", text: `These tags aren't part of the catalog and won't be used: ${dropped.join(", ")}.` });
   return {
     byName,
     notes,
@@ -146,7 +145,7 @@ export function createUploadFlow(ctx) {
     const m = openModal({ label: "Upload", returnFocus: opener });
     m.panel.append(
       el("h2", "", "Upload is not configured yet"),
-      el("p", "", "The catalog maintainer needs to deploy the upload service and fill in site/config.json. Please check back later."));
+      el("p", "", "Uploads aren't available yet. Please check back later."));
     const actions = el("div", "actions");
     const ok = el("button", "btn primary", "Close");
     ok.type = "button";
@@ -308,7 +307,7 @@ export function createUploadFlow(ctx) {
       const m = this.open("Choose the mod to update", "");
       m.panel.append(
         el("h2", "", "Choose the mod to update"),
-        el("p", "", "Your package becomes the mod's next version; its identifier stays the same."));
+        el("p", "", "You can change the files and metadata, but the identifier stays the same for backwards compatibility."));
       const search = el("input", "input");
       search.type = "search";
       search.placeholder = "Search your mods…";
@@ -424,9 +423,9 @@ export function createUploadFlow(ctx) {
     stepToken(problem) {
       const m = this.open("Upload token", "");
       m.panel.append(
-        el("h2", "", "Your upload token"),
-        el("p", "", "Uploads use a token from Discord: run /token in the catalog's server and paste the reply here. " +
-          "It is kept in this browser only; treat it like a password. Your mods are published under your Discord username."));
+        el("h2", "", "Uploads use a token from Discord"),
+        el("p", "", "Run /token in the catalog's server and paste the reply here. " +
+          "It's stored in this browser, you will not have to re-enter it unless you clear site data."));
       const problemLine = el("p", "upload-status err", problem || "");
       problemLine.setAttribute("role", "alert");
       problemLine.hidden = !problem;
@@ -477,8 +476,8 @@ export function createUploadFlow(ctx) {
       const m = this.open("Package", "");
       m.panel.append(
         el("h2", "", "Choose your package"),
-        el("p", "", "One .zip, or the loose .utoc / .ucas / .pak files (and the .sig, if you have one) of a single mod. " +
-          "The metadata editor opens as soon as the package checks out; nothing is uploaded yet."));
+        el("p", "", "One .zip, or the loose .utoc / .ucas / .pak files of a single mod."));
+
 
       const zone = el("div", "dropzone");
       zone.tabIndex = 0;
@@ -637,11 +636,7 @@ export function createUploadFlow(ctx) {
       const heading = el("h2", "", confirmText(form.title, form.version, update));
       m.panel.appendChild(heading);
       const body = el("div", "confirm-body");
-      body.appendChild(el("p", "", update
-        ? `The package is uploaded as it is; the catalog then publishes it as the new version of ${form.targetIdentifier} ` +
-          `under the author name “${this.identity.username}”.`
-        : "The package is uploaded as it is; the catalog then adds your metadata and publishes it " +
-          `under the author name “${this.identity.username}”.`));
+      if (update) body.appendChild(el("p", "", "This replaces the current version"));
       const actions = el("div", "actions");
       const cancel = el("button", "btn", "Cancel");
       cancel.type = "button";
@@ -727,21 +722,16 @@ export function createUploadFlow(ctx) {
       }
       this.uploaded = true;
       this.dismissEditor();
-      heading.textContent = uploadedText(form.title, form.version, !!form.targetIdentifier);
+      heading.textContent = "Your mod is now processing";
       bar.remove();
       setStatus(statusMessage(202), "wait");
-      const hint = el("p", "upload-hint", "This window updates once the mod is in the catalog. " +
-        "You can close it at any time; the processing continues.");
-      status.after(hint);
       finish(button("Close", close, true));
-      await this.waitForPublish(form, setStatus, () => hint.remove(), finish, button, close);
     }
 
     async send(form, onFraction, setStatus) {
       const url = ctx.uploadUrl();
       const files = this.pkg.selection.files.map((f) => ({ ...f, file: this.pkg.byName.get(f.name) }));
       const metadataText = buildMetadataJson(form);
-      this.before = await ctx.fetchMods().catch(() => []);
 
       const hashed = [];
       for (const f of files) {
@@ -778,37 +768,6 @@ export function createUploadFlow(ctx) {
       }
     }
 
-    async waitForPublish(form, setStatus, settled, finish, button, close) {
-      // the mod's id is its identifier: the update's target, else the one minted from the title
-      const target = { id: form.targetIdentifier || form.identifier, name: form.title.trim(), version: form.version.trim() };
-      const deadline = Date.now() + POLL_MAX_MS;
-      const signal = this.stop.signal;
-      for (;;) {
-        if (signal.aborted) return;
-        try {
-          const mods = await ctx.fetchMods();
-          if (signal.aborted) return;
-          const mod = findPublishedMod(this.before, mods, target);
-          if (mod) {
-            settled();
-            setStatus(doneText(mod.name, mod.version), "ok");
-            finish(button("Show in the catalog", () => location.reload()), button("Close", close, true));
-            return;
-          }
-        } catch { /* the catalog is briefly redeploying; keep polling */ }
-        if (Date.now() > deadline) {
-          settled();
-          setStatus("Still not in the catalog after about 3 minutes. It may still be processing — check back later; " +
-            "if the package was rejected, it will never appear.", "wait");
-          finish(button("Close", close, true));
-          return;
-        }
-        await new Promise((resolve) => {
-          const timer = setTimeout(resolve, POLL_EVERY_MS);
-          signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
-        });
-      }
-    }
   }
 
   return { start };

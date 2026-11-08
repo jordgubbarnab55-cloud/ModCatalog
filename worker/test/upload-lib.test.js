@@ -22,14 +22,14 @@ test("configOk rejects placeholders, empty, non-http and missing values", () => 
 });
 
 test("statusMessage covers every documented status", () => {
-  assert.match(statusMessage(202), /queued/i);
+  assert.match(statusMessage(202), /processed/i);
   assert.match(statusMessage(401), /token/i);
   assert.match(statusMessage(411), /size/i);
   assert.match(statusMessage(413), /100 MB/i);
   assert.match(statusMessage(429), /daily/i);
   assert.match(statusMessage(400), /\.zip/i);
-  assert.match(statusMessage(502), /github/i);
-  assert.match(statusMessage(503), /inbox/i);
+  assert.match(statusMessage(502), /upload service is down/i);
+  assert.match(statusMessage(503), /aren't set up yet/i);
   assert.match(statusMessage(500), /HTTP 500/);
   assert.match(statusMessage(599), /server error/i);
   assert.match(statusMessage("network"), /network/i);
@@ -148,10 +148,10 @@ test("selectionLabel names the zip, or counts the loose files in package order",
   assert.equal(selectionLabel(loose), "4 files (m.utoc, m.ucas, m.pak, m.sig)");
 });
 
-test("uploadedText mirrors confirmText's title and optional version", () => {
-  assert.equal(uploadedText("  My Mod ", " 1.2 "), "“My Mod” v1.2 is uploaded");
-  assert.equal(uploadedText("My Mod", ""), "“My Mod” is uploaded");
-  assert.equal(uploadedText("My Mod", undefined), "“My Mod” is uploaded");
+test("uploadedText is the static result heading (title only)", () => {
+  assert.equal(uploadedText("  My Mod ", " 1.2 "), "“My Mod” is now uploaded");
+  assert.equal(uploadedText("My Mod", ""), "“My Mod” is now uploaded");
+  assert.equal(uploadedText("My Mod", undefined), "“My Mod” is now uploaded");
   assert.match(confirmText("My Mod", "1.2"), /“My Mod” v1\.2/);
 });
 
@@ -170,7 +170,7 @@ test("ownMods: only the user's entries, by name; none without an id", () => {
   assert.deepEqual(ownMods(mods, ""), []);
   assert.deepEqual(ownMods(mods, null), []);
   assert.deepEqual(ownMods(null, "42"), []);
-  assert.match(NO_OWN_MODS_TEXT, /Update needs a mod you own/);
+  assert.match(NO_OWN_MODS_TEXT, /need to have previously uploaded/);
 });
 
 test("filterPickerMods: every word must match name/author/description/tags or the identifier", () => {
@@ -229,8 +229,8 @@ test("forcedFields: an update's identifier is locked, whatever the title", () =>
 test("confirmText / uploadedText for an update", () => {
   assert.equal(confirmText(" My Mod ", " 1.3 ", true), "Update “My Mod” to v1.3?");
   assert.equal(confirmText("My Mod", "", true), "Update “My Mod”?");
-  assert.equal(uploadedText("My Mod", "1.3", true), "The update of “My Mod” to v1.3 is uploaded");
-  assert.equal(uploadedText("My Mod", "", true), "The update of “My Mod” is uploaded");
+  assert.equal(uploadedText("My Mod", "1.3", true), "The update of “My Mod” is now uploaded");
+  assert.equal(uploadedText("My Mod", "", true), "The update of “My Mod” is now uploaded");
   // and the update's metadata.json names its mod
   const body = JSON.parse(buildMetadataJson({ title: "New Title", author: "alice", version: "1.3", targetIdentifier: "42.OldName" }));
   assert.equal(body.identifier, "42.OldName");

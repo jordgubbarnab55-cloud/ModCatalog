@@ -17,14 +17,14 @@ export function configOk(uploadUrl) {
 /** Human-readable message for an upload HTTP status (or "network"). */
 export function statusMessage(status) {
   switch (status) {
-    case 202: return "Upload queued. Your mod is being processed — check back in a moment.";
-    case 401: return "That token is not valid (missing, unknown, or revoked). Get a fresh one in Discord with /token.";
+    case 202: return "Your mod is being processed. Please check back in a few minutes.";
+    case 401: return "Token is not valid. Get a fresh one in Discord with /token.";
     case 411: return "The browser could not send the file size. Please try again.";
     case 413: return "One upload was over 100 MB. Upload the loose .utoc/.ucas/.pak files instead of a big .zip.";
     case 429: return "You hit the daily upload quota. Try again tomorrow.";
     case 400: return "The server rejected the upload: send one .zip, or the .utoc/.ucas/.pak (+.sig) files of one mod.";
-    case 502: return "GitHub rejected the upload (the Worker's GitHub token is likely expired). Please contact the maintainer.";
-    case 503: return "The catalog inbox does not exist yet. The maintainer needs to run the seed workflow once.";
+    case 502: return "The upload service is down. Please contact the administrators.";
+    case 503: return "Uploads aren't set up yet. Please contact the administrators.";
     default:
       if (status === "network") return "Network error. Check your connection and try again.";
       if (status >= 500) return `Server error (HTTP ${status}). Please try again.`;
@@ -254,8 +254,8 @@ export function confirmText(title, version, update = false) {
 export function uploadedText(title, version, update = false) {
   const v = (version ?? "").trim();
   const t = (title ?? "").trim();
-  if (update) return `The update of “${t}”${v ? ` to v${v}` : ""} is uploaded`;
-  return `“${t}”${v ? ` v${v}` : ""} is uploaded`;
+  if (update) return `The update of “${t}” is now uploaded`;
+  return `“${t}” is now uploaded`;
 }
 
 /** The flow's final line once the mod shows up in the catalog. */
@@ -347,7 +347,7 @@ export function findPublishedMod(before, after, { id, name, version }) {
 // ------------------------------------------------------ upload or update
 
 /** Why Update is unavailable (the choice step's tooltip). */
-export const NO_OWN_MODS_TEXT = "You haven't uploaded any mods yet — Update needs a mod you own.";
+export const NO_OWN_MODS_TEXT = "You haven't uploaded any mods yet. To update a mod you need to have previously uploaded one.";
 
 /** The catalog mods (parseCatalog entries) owned by `discordId`, by name. */
 export function ownMods(mods, discordId) {

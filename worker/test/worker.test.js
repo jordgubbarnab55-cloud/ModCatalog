@@ -75,7 +75,7 @@ async function mintToken(env, kv, fetchImpl, id = "42") {
   const cb = fetchImpl.calls.filter((c) => c.url.includes("/interactions/") && c.url.includes("/callback")).at(-1);
   assert.ok(cb, "reply sent via the callback endpoint");
   const content = JSON.parse(cb.init.body).data.content;
-  const m = content.match(/`(mm_[A-Za-z0-9_-]+)`/);
+  const m = content.match(/(mm_[A-Za-z0-9_-]+)/);
   assert.ok(m, "token in reply");
   return m[1];
 }
@@ -137,7 +137,7 @@ test("/token mints a token; only the hash is stored; reply is ephemeral", async 
   const resp = JSON.parse(cb.init.body);
   assert.equal(resp.type, 4, "CHANNEL_MESSAGE_WITH_SOURCE");
   assert.equal(resp.data.flags, 64);
-  const token = resp.data.content.match(/`(mm_[A-Za-z0-9_-]+)`/)[1];
+  const token = resp.data.content.match(/(mm_[A-Za-z0-9_-]+)/)[1];
   assert.ok(token.startsWith("mm_"));
 
   const vals = kv.all();
@@ -628,7 +628,7 @@ test("every inbox asset name is stamped with the hex of the UTF-8 username", asy
   }), makeEnv(kv, pub), f0);
   assert.equal(res0.status, 202);
   const token = JSON.parse(f0.calls.find((c) => c.url.includes("/callback")).init.body)
-    .data.content.match(/`(mm_[A-Za-z0-9_-]+)`/)[1];
+    .data.content.match(/(mm_[A-Za-z0-9_-]+)/)[1];
 
   const names = [];
   const f = makeFetch((url) => {

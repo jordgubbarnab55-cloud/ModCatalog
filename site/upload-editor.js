@@ -279,7 +279,7 @@ export function createEditor(options) {
       return;
     }
     if (imageVerdict(bytes.length) === "downscale") {
-      say(`Image is ${kib(bytes.length)} KiB (> 512 KiB); it will be downscaled toward ≤ 512 px PNG ≤ 256 KiB before uploading.`);
+      say(`Image is bigger than 512 KiB, it will be downscaled before uploading.`);
     }
     let prepared;
     try {
