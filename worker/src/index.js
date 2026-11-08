@@ -198,7 +198,7 @@ async function handleDiscord(request, env, fetchImpl) {
       type: 4,
       data: {
         content:
-          `## :key: Your upload token:\n` + `\`\`\`\n${token}\n\`\`\`\n` +
+          `## 🔑 Your upload token:\n` + `\`\`\`\n${token}\n\`\`\`\n` +
           `**This token is only shown once. Copy it before you dismiss this message.**\n` + 
           `If you need a new token, or want to revoke your existing one, just regenerate a new one. The old one becomes invalid.`,
         flags: 64, // ephemeral: only this user sees it

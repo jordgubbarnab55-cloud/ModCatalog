@@ -307,7 +307,7 @@ export function createUploadFlow(ctx) {
       const m = this.open("Choose the mod to update", "");
       m.panel.append(
         el("h2", "", "Choose the mod to update"),
-        el("p", "", "You can change the files and metadata, but the identifier stays the same for backwards compatibility."));
+        el("p", "", "You can change the files and metadata, except for the identifier."));
       const search = el("input", "input");
       search.type = "search";
       search.placeholder = "Search your mods…";
