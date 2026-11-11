@@ -39,6 +39,7 @@ class FakeD1 {
       bind(...args) {
         const run = () => self.exec(sql, args);
         return {
+          __exec: run,
           run: async () => ({ meta: { changes: run() } }),
           first: async () => {
             const out = run();
@@ -51,6 +52,11 @@ class FakeD1 {
         };
       },
     };
+  }
+  batch(stmts) {
+    const out = [];
+    for (const st of stmts) out.push({ meta: { changes: st.__exec() } });
+    return out;
   }
   // Returns the changed-row count (or the row/rows for reads).
   exec(sql, a) {
@@ -172,7 +178,7 @@ function makeServices(overrides = {}) {
     threadObjects: new Map(overrides.threadObjects || []),   // tid -> thread object
     messages: new Map(overrides.messages || []),            // tid -> [message]
     users: new Map(overrides.users || []),                 // id -> user
-    guildTags: overrides.guildTags || [],                  // [{id, name}]
+    channelTags: overrides.channelTags || [],              // [{id, name}] (available_tags)
     dispatchStatus: overrides.dispatchStatus ?? 204,
     catalog: overrides.catalog ?? { mods: [] },
     postPromptFail: !!overrides.postPromptFail,
@@ -192,8 +198,6 @@ function makeServices(overrides = {}) {
       { status, headers: { "Content-Type": "application/json", ...(obj && state.etag ? {} : {}) } });
     if (u.startsWith("https://discord.com/api/v10/guilds/") && u.endsWith("/threads/active"))
       return j({ threads: state.activeThreads });
-    if (u.startsWith("https://discord.com/api/v10/guilds/") && u.endsWith("/tags"))
-      return j(state.guildTags);
     const um = u.match(/^https:\/\/discord\.com\/api\/v10\/users\/([\w]+)$/);
     if (um) {
       const usr = state.users.get(um[1]) || { id: um[1], username: `name${um[1]}`, bot: false };
@@ -222,6 +226,9 @@ function makeServices(overrides = {}) {
       return new Response(null, { status: 204 });
     }
     if ((m = u.match(/^https:\/\/discord\.com\/api\/v10\/channels\/(\d+)$/))) {
+      if (m[1] === "c1") return j({ id: "c1", type: 15, name: "forum",
+        available_tags: state.channelTags });
+      if (state.deleted404 && state.threadObjects.has(m[1])) return new Response(null, { status: 404 });
       const t = state.threadObjects.get(m[1]);
       return t ? j(t) : new Response(null, { status: 404 });
     }
@@ -466,6 +473,7 @@ test("the 36h auto path is anchored to the prompt time, not the post time", asyn
   row.created_at = "2025-05-01T00:00:00Z";
   // 1 s before the auto deadline: no dispatch
   const d1 = makeServices({ activeThreads: [t] });
+  setThread(d1, { zip: {} });
   row.auto_due = new Date(NOW.getTime() + 1000).toISOString();
   await forumTick(env, d1.fetchImpl, NOW);
   assert.equal(d1.state.dispatches.length, 0, "before the deadline: nothing");
@@ -586,7 +594,8 @@ test("ingest failure callback: refund + failed + prompt edit; uploaded callback 
       { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
     return Buffer.from(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body))).toString("hex");
   };
-  const body1 = JSON.stringify({ thread_id: "9000", status: "failed", reason: "bad package" });
+  const body1 = JSON.stringify({ thread_id: "9000", status: "failed", reason: "bad package",
+    ts: Math.floor(Date.now() / 1000) });
   const res1 = await post(JSON.parse(body1), await sign(body1));
   assert.equal(res1.status, 204);
   assert.equal(env.FORUM.row("9000").status, "failed");
@@ -599,7 +608,8 @@ test("ingest failure callback: refund + failed + prompt edit; uploaded callback 
   row.pkg_size = null;
   row.pkg_sha256 = null;
   const sha = "ab".repeat(32);
-  const body2 = JSON.stringify({ thread_id: "9000", status: "uploaded", pkg_sha256: sha });
+  const body2 = JSON.stringify({ thread_id: "9000", status: "uploaded", pkg_sha256: sha,
+    ts: Math.floor(Date.now() / 1000) });
   const res2 = await post(JSON.parse(body2), await sign(body2));
   assert.equal(res2.status, 204);
   assert.equal(env.FORUM.row("9000").pkg_sha256, sha);
@@ -610,7 +620,8 @@ test("status callback: bad signature is rejected; only processing rows are acted
   const env = makeEnv();
   const d = makeServices();
   awaitingRow(env);
-  const body = JSON.stringify({ thread_id: "9000", status: "failed", reason: "x" });
+  const body = JSON.stringify({ thread_id: "9000", status: "failed", reason: "x",
+    ts: Math.floor(Date.now() / 1000) });
   const res = await handleForumStatus(new Request("https://worker.local/forum/status", {
     method: "POST", body, headers: { "X-Forum-Signature": "aa".repeat(32) },
   }), env, d.fetchImpl);
@@ -770,7 +781,8 @@ test("an archived thread: prompt updates post a fresh message and re-point the r
     return Buffer.from(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body))).toString("hex");
   };
   const sha = "ab".repeat(32);
-  const body = JSON.stringify({ thread_id: "9000", status: "failed", reason: "the ingest failed" });
+  const body = JSON.stringify({ thread_id: "9000", status: "failed", reason: "the ingest failed",
+    ts: Math.floor(Date.now() / 1000) });
   const res = await post(JSON.parse(body), await sign(body));
   assert.equal(res.status, 204);
   assert.equal(env.FORUM.row("9000").status, "failed");
@@ -780,4 +792,90 @@ test("an archived thread: prompt updates post a fresh message and re-point the r
   assert.match(fresh.content, /Couldn't publish/);
   assert.notEqual(fresh.id, firstPrompt, "the row points at the fresh message");
   assert.equal(env.FORUM.row("9000").prompt_msg, fresh.id);
+});
+
+test("status callback: a stale timestamp (replay) is rejected", async () => {
+  const env = makeEnv();
+  const d = makeServices();
+  env.FORUM.insert("9000", "u1", "ownername", "processing", "m1", NOW.toISOString());
+  env.FORUM.row("9000").prompt_msg = "p1";
+  env.FORUM.row("9000").dispatched_at = NOW.toISOString();
+  const sign = async (body) => {
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("s3cret"),
+      { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    return Buffer.from(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body))).toString("hex");
+  };
+  const post = async (obj) => handleForumStatus(new Request("https://worker.local/forum/status", {
+    method: "POST", body: JSON.stringify(obj),
+    headers: { "X-Forum-Signature": await sign(JSON.stringify(obj)) },
+  }), env, d.fetchImpl, NOW);
+  const stale = await post({ thread_id: "9000", status: "failed", reason: "replayed",
+    ts: Math.floor(Date.now() / 1000) - 3600 });
+  assert.equal(stale.status, 400, "stale ts rejected");
+  assert.equal(env.FORUM.row("9000").status, "processing", "no change");
+  const noTs = await post({ thread_id: "9000", status: "failed", reason: "no ts" });
+  assert.equal(noTs.status, 400, "missing ts rejected");
+});
+
+test("budget: a tick stops gracefully when the caps run out (no throw)", async () => {
+  const env = makeEnv();
+  const d = makeServices();
+  // 10 threads, all with a prompt due NOW (auto path): each dispatch costs
+  // several D1 queries + subrequests, so the tick must stop before it
+  // burns both caps, and the rest is left for the next tick.
+  const ids = ["9101", "9102", "9103", "9104", "9105", "9106", "9107", "9108", "9109", "9110"];
+  for (const id of ids) {
+    const t = { id, type: 11, parent_id: "c1", owner_id: "u1",
+      owner: { id: "u1", username: "ownername", bot: false }, name: "M " + id,
+      last_message_id: "m1" };
+    d.state.activeThreads.push(t);
+    d.state.threadObjects.set(id, t);
+    d.state.messages.set(id, [{ id: "m1", author: { id: "u1", bot: false }, content: "hi",
+      attachments: [{ filename: "m.zip", url: "https://cdn.discordapp.com/a.zip?ex=1", size: 100 }] }]);
+    d.state.users.set("u1", { id: "u1", username: "ownername", bot: false });
+    env.FORUM.insert(id, "u1", "ownername", "awaiting", "m1", NOW.toISOString());
+    const row = env.FORUM.row(id);
+    row.prompt_msg = "p" + id;
+    row.prompt_sent_at = NOW.toISOString();
+    row.auto_due = NOW.toISOString();
+  }
+  // all of them are active threads (fresh snowflakes, newest last)
+  const r = await forumTick(env, d.fetchImpl, NOW);
+  assert.ok(r.stopped, "the tick stopped before exhausting the caps");
+  assert.ok(r.dispatches > 0 && r.dispatches < ids.length,
+    "some (not all) dispatched: " + r.dispatches);
+  const remaining = ids.filter((id) => env.FORUM.row(id).status === "awaiting");
+  assert.ok(remaining.length > 0, "the rest stays awaiting for the next tick");
+});
+
+test("unchanged threads are skipped before the cap (no starvation)", async () => {
+  const env = makeEnv();
+  const d = makeServices();
+  // 12 unchanged zip-less threads (below the 10-slot cap's reach) + 2 new
+  // threads with zips: the new ones must still get prompts this tick.
+  for (let i = 1; i <= 12; i++) {
+    const id = "920" + i;
+    d.state.threadObjects.set(id, { id, type: 11, parent_id: "c1", owner_id: "u2",
+      owner: { id: "u2", username: "n" + i, bot: false }, name: "N " + id,
+      last_message_id: "m1" });
+    d.state.messages.set(id, []);
+    d.state.users.set("u2", { id: "u2", username: "u2", bot: false });
+    env.FORUM.insert(id, "u2", "n" + i, "awaiting_package", "m1", NOW.toISOString());
+  }
+  const n1 = thread("9301", { owner: "u3", zip: {} });
+  const n2 = thread("9302", { owner: "u3", zip: {} });
+  d.state.activeThreads = [...d.state.activeThreads, n1[0], n2[0]];
+  d.state.messages.set("9301", n1[1]);
+  d.state.messages.set("9302", n2[1]);
+  d.state.users.set("u3", { id: "u3", username: "u3", bot: false });
+  const r = await forumTick(env, d.fetchImpl, NOW);
+  assert.equal(r.prompts, 2, "both new threads prompted despite the 12 unchanged ones");
+  assert.equal(env.FORUM.row("9301").status, "awaiting");
+  assert.equal(env.FORUM.row("9302").status, "awaiting");
+  // the unchanged ones were NOT re-processed: no messages fetch for them
+  const msgFetches = d.state.captured
+    ? 0 : 0; // (the fake does not record URLs; assert via D1 instead:)
+  for (let i = 1; i <= 12; i++) {
+    assert.equal(env.FORUM.row("920" + i).status, "awaiting_package", "untouched");
+  }
 });

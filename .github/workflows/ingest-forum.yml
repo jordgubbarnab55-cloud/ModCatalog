@@ -113,14 +113,15 @@ jobs:
           FORUM_CALLBACK_SECRET: ${{ secrets.FORUM_CALLBACK_SECRET }}
         run: |
           set +e
+          ts=$(date +%s)
           if grep -q "RESULT uploaded" ingest.result 2>/dev/null; then
             sha=$(grep "RESULT uploaded" ingest.result | sed 's/.*pkg_sha256=//')
-            body="{\"thread_id\":\"$IN_THREAD_ID\",\"status\":\"uploaded\",\"pkg_sha256\":\"$sha\"}"
+            body="{\"thread_id\":\"$IN_THREAD_ID\",\"status\":\"uploaded\",\"pkg_sha256\":\"$sha\",\"ts\":$ts}"
           else
             reason=$(grep "RESULT failed" ingest.result 2>/dev/null | head -1 | sed 's/.*reason=//')
             [ -z "$reason" ] && reason="the ingest workflow failed before reporting"
             reason=$(printf '%s' "$reason" | tr -d '"\\' | tr -d '\n' | cut -c1-200)
-            body="{\"thread_id\":\"$IN_THREAD_ID\",\"status\":\"failed\",\"reason\":\"$reason\"}"
+            body="{\"thread_id\":\"$IN_THREAD_ID\",\"status\":\"failed\",\"reason\":\"$reason\",\"ts\":$ts}"
           fi
           sig=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$FORUM_CALLBACK_SECRET" | awk '{print $NF}')
           curl -s --max-time 30 -X POST "$FORUM_CALLBACK_URL/forum/status" \

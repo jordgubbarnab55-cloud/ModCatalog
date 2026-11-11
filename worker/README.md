@@ -104,14 +104,26 @@ terminal `failed` (no per-tick retry), and our-side failures are refunded.
 **Live-verified Discord behaviors this design relies on** (test server,
 2025-06): thread list objects (`threads/active`, `archived/public`)
 carry **no `owner` object** (only `owner_id`) and `applied_tags` as raw
-ids — so the owner user (`GET /users/{id}`, which also gives the `bot`
-flag used to skip bot threads) and the guild's tag names
-(`GET /guilds/{id}/tags`) are fetched separately; **editing a message in
-an archived thread is a 400 (code 50083) while posting a new message in
-an archived thread works** — so every prompt/status edit falls back to a
+**ids** — so the owner user (`GET /users/{id}`, which also gives the
+`bot` flag used to skip bot threads) is fetched separately, and the tag
+names come from the forum channel object's `available_tags`
+(`GET /channels/{forum_channel_id}`; there is **no** guild-level
+tag-list endpoint — it 404s). **Editing a message in an archived
+thread is a 400 (code 50083) while posting a new message in an
+archived thread works** — so every prompt/status edit falls back to a
 fresh message (the row's `prompt_msg` is re-pointed at it). Attachment
 URLs are signed `https://cdn.discordapp.com/...?ex=<expiry>&signature=…`
 and are never stored — only re-fetched from the thread at dispatch time.
+
+**Free-plan budgets (per tick, per invocation):** 50 subrequests and 50
+D1 queries (Cloudflare docs; `db.batch()` counts as one). The tick
+budgets itself: unchanged threads are skipped **before** the 10-slot
+cap (one cheap D1 read + a 404 probe each, so a pile of zip-less
+`awaiting_package` threads cannot starve new posts), the per-thread
+work is reserved against both caps, and when the budget runs out — or
+D1 enforces its cap — the tick stops cleanly (`out.stopped`); the
+guarded transitions make the next tick a safe continuation. The three
+cleanup DELETEs run as one batch.
 
 **Setup (owner, in order):**
 
@@ -156,7 +168,20 @@ runner only when a WebP cover is present) so the trailer contract never
 sees WebP; the exact `process-inbox` rejection reason is not surfaced in
 Phase 1 (the owner sees `unconfirmed` / the ingest-stage failures).
 
-**Testing:** `node test/forum.test.js` (25 cases: prompt creation +
+**Pinned post copy (paste into the forum channel):**
+
+> **How to share a mod here**
+> • One mod per post — the post title becomes the mod title.
+> • Keep the title **unique** (a post whose title + package match an
+>   existing mod is rejected, and the prompt will stay "not
+>   confirmed").
+> • Attach exactly **one** `.zip` (the most recent one wins) and,
+>   optionally, one cover image (PNG / JPEG / WebP).
+> • The bot will ask you to confirm; if you don't answer, the package
+>   is published **36 h** after the prompt. "No thanks" cancels.
+> • Publishing takes a few minutes; the prompt updates when it's done.
+
+**Testing:** `node test/forum.test.js` (28 cases: prompt creation +
 duplicate-tick idempotency, the INSERT-OR-IGNORE race, owner-only
 attachments, bot-thread skip, cutoff, non-owner rejection, double-click
 and tick/click race, the 36 h auto path, decline, the archived-thread

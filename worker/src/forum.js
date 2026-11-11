@@ -31,6 +31,13 @@ const TERMINAL_AFTER_MS = 48 * 3600 * 1000;    // terminal rows deleted
 const AWAITING_PACKAGE_AFTER_MS = 36 * 3600 * 1000;
 const MAX_THREADS_PER_TICK = 10;
 const MAX_DISPATCH_ATTEMPTS = 3;
+// Free-plan per-invocation caps (Cloudflare docs): 50 subrequests and 50
+// D1 queries. The tick budgets itself and stops gracefully (the state
+// machine is per-transition guarded, so the next tick picks up).
+const D1_CAP = 50;
+const SUB_CAP = 50;
+const D1_PER_THREAD = 8;   // worst case per thread (conservative reservation)
+const SUB_PER_THREAD = 7;
 const ARCHIVED_CURSOR = "forum:archived_before"; // the one small KV key
 const CATALOG_KEY = "forum:catalog";             // ETag + compact snapshot
 const DEFAULT_DAILY_BYTES = 2147483648;
@@ -105,11 +112,33 @@ async function ownerUser(env, fetchImpl, uid) {
   return discord(env, fetchImpl, "GET", `/users/${uid}`);
 }
 
-async function guildTagNames(env, fetchImpl) {
-  const tags = await discord(env, fetchImpl, "GET", `/guilds/${env.FORUM_GUILD_ID}/tags`);
+async function channelTagNames(env, fetchImpl) {
+  // The forum channel object carries `available_tags` [{id, name, …}];
+  // thread objects' `applied_tags` are raw ids (verified live). There is
+  // no guild-level tag-list endpoint (it 404s).
+  const c = await discord(env, fetchImpl, "GET", `/channels/${env.FORUM_CHANNEL_ID}`);
   const out = {};
-  for (const t of (tags || [])) if (t && t.id && t.name) out[t.id] = t.name;
+  for (const t of (c && c.available_tags) || []) if (t && t.id && t.name) out[t.id] = t.name;
   return out;
+}
+
+// Budget wrapper: counts D1 statements (a batch = 1, matching the docs)
+// and outbound subrequests; the tick checks it before each unit of work.
+function budgetedD1(d1, budget) {
+  const mk = (stmt) => ({
+    run: async () => { budget.d1 += 1; return stmt.run(); },
+    first: async () => { budget.d1 += 1; return stmt.first(); },
+    all: async () => { budget.d1 += 1; return stmt.all(); },
+    __raw: stmt,   // for d1.batch() (a batch = 1 query against the cap)
+  });
+  return {
+    prepare: (sql) => ({ bind: (...a) => mk(d1.prepare(sql).bind(...a)) }),
+    batch: async (stmts) => { budget.d1 += 1; return d1.batch(stmts.map((st) => st.__raw || st)); },
+  };
+}
+
+function withinBudget(budget) {
+  return budget.d1 + D1_PER_THREAD < D1_CAP && budget.sub + SUB_PER_THREAD < SUB_CAP;
 }
 
 function tagNamesOf(appliedTags, byId) {
@@ -241,7 +270,7 @@ async function fetchCatalog(env, fetchImpl, now) {
 
 export async function forumTick(env, fetchImpl, now = new Date()) {
   const out = { skipped: false, candidates: 0, prompts: 0, dispatches: 0,
-    published: 0, unconfirmed: 0, deleted: 0, backoff: false };
+    published: 0, unconfirmed: 0, deleted: 0, backoff: false, stopped: false };
   if (!env.FORUM_GUILD_ID || !env.FORUM_CHANNEL_ID || !env.FORUM) return { ...out, skipped: true };
   const d1 = env.FORUM;
   const cutoff = BigInt(env.FORUM_CUTOFF_THREAD_ID || "0");
@@ -274,44 +303,113 @@ export async function forumTick(env, fetchImpl, now = new Date()) {
     }
   }
 
-  // 2. candidates: above the cutoff, chronological order (the owner's bot
-// flag is checked per candidate via the user endpoint — the thread lists
-// carry no owner object).
+  // 2. candidates: above the cutoff, chronological (oldest) order. The
+  // 10-slot cap is applied in the loop to the threads that NEED work —
+  // unchanged threads are skipped first (one cheap D1 read each), so a
+  // pile of zip-less `awaiting_package` threads cannot starve new posts.
   const cands = [...threads.values()]
     .filter((t) => t && t.owner_id && BigInt(t.id) > cutoff)
-    .sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1))
-    .slice(0, MAX_THREADS_PER_TICK);
+    .sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
   out.candidates = cands.length;
 
-  // 3. per-thread state machine.
+  // 3. per-thread state machine, budgeted against the free-plan caps
+  // (50 subrequests / 50 D1 queries per invocation). When the budget runs
+  // out — or D1 enforces its cap — the tick stops cleanly; the guarded
+  // transitions make the next tick a safe continuation.
+  const budget = { d1: 0, sub: 0 };
+  const d1b = budgetedD1(d1, budget);
+  const f = (url, init) => { budget.sub += 1; return fetchImpl(url, init); };
+  const capErr = (e) => /too many/i.test(String((e || {}).message));
   let catalog = null;
-  const catalogFor = async () => { if (!catalog) catalog = await fetchCatalog(env, fetchImpl, now); return catalog; };
+  const catalogFor = async () => { if (!catalog) catalog = await fetchCatalog(env, f, now); return catalog; };
+  let processed = 0;
   for (const t of cands) {
+    let row = null;
     try {
-      await processThread(env, fetchImpl, d1, t, tagMap, now, catalogFor, out);
-    } catch (e) { if (e.retryable) { out.backoff = true; return out; } }
+      row = (await q(d1b, "getRow", t.id)).row;
+    } catch (e) {
+      if (e.retryable) { out.backoff = true; return out; }
+      if (capErr(e)) { out.stopped = true; break; }
+      throw e;
+    }
+    const msgChanged = row ? (t.last_message_id != null && t.last_message_id !== row.last_msg_id) : true;
+    const autoDue = !!(row && row.status === "awaiting" && row.auto_due &&
+                       now.getTime() >= Date.parse(row.auto_due));
+    const stuck = !!(row && row.status === "prompting" && !row.prompt_msg &&
+                     now.getTime() - Date.parse(row.created_at) > PROMPT_STUCK_MS);
+    if (row && !msgChanged && !autoDue && !stuck) {
+      // unchanged: still probe thread deletion (one cheap thread-object
+      // fetch; 404 when the post was deleted) so such rows get cleaned
+      let tobj;
+      try { tobj = await discord(env, f, "GET", `/channels/${t.id}`); }
+      catch (e) {
+        if (e.retryable) { out.backoff = true; return out; }
+        if (capErr(e)) { out.stopped = true; break; }
+        throw e;
+      }
+      if (tobj === null && (await q(d1b, "deleteRow", t.id)).changes) out.deleted++;
+      continue;
+    }
+    if (row && (row.status === "published" || row.status === "declined" ||
+                row.status === "failed")) {
+      // terminal: a cheap touch at most (no subrequests, no cap slot)
+      if (msgChanged) {
+        try { await q(d1b, "touchLastMsg", t.id, t.last_message_id); }
+        catch (e) {
+          if (e.retryable) { out.backoff = true; return out; }
+          if (capErr(e)) { out.stopped = true; break; }
+          throw e;
+        }
+      }
+      continue;
+    }
+    if (processed >= MAX_THREADS_PER_TICK) { out.stopped = true; break; }
+    if (!withinBudget(budget)) { out.stopped = true; break; }
+    processed++;
+    try {
+      if (!msgChanged && autoDue) {
+        // unchanged but due: straight to the dispatch (it re-fetches fresh
+        // URLs / the owner user / the messages itself)
+        const r = await startDispatch(env, f, d1b, row, now);
+        if (r === "dispatched") out.dispatches++;
+      } else {
+        await processThread(env, f, d1b, t, row, tagMap, now, catalogFor, out);
+      }
+    } catch (e) {
+      if (e.retryable) { out.backoff = true; return out; }
+      if (capErr(e)) { out.stopped = true; break; }
+      throw e;
+    }
   }
 
   // 4. reconcile processing/unconfirmed rows against the catalog.
-  const pending = [
-    ...(await q(d1, "listStatus", "processing")).rows,
-    ...(await q(d1, "listStatus", "unconfirmed")).rows,
-  ];
+  let pending = [];
+  try {
+    pending = [
+      ...(await q(d1b, "listStatus", "processing")).rows,
+      ...(await q(d1b, "listStatus", "unconfirmed")).rows,
+    ];
+  } catch (e) {
+    if (e.retryable) { out.backoff = true; return out; }
+    if (!capErr(e)) throw e;
+    out.stopped = true;
+  }
   if (pending.length) {
     const cat = await catalogFor();
     for (const row of pending) {
+      if (!withinBudget(budget)) { out.stopped = true; break; }
       const entry = row.ident_key ? cat.get(row.ident_key) : null;
       if (entry && row.dispatched_at && Date.parse(entry.updated) >= Date.parse(row.dispatched_at)) {
-        if ((await q(d1, "markPublished", row.thread_id)).changes) {
+        if ((await q(d1b, "markPublished", row.thread_id)).changes) {
           out.published++;
-          await editPrompt(env, fetchImpl, d1, row.thread_id, row.prompt_msg,
+          await editPrompt(env, f, d1b, row.thread_id, row.prompt_msg,
             `✅ **Published** — *${row.owner_name}*\'s package is in the catalog. ${CATALOG_LINK(env)}`);
         }
       } else if (row.status === "processing" &&
                  now.getTime() - Date.parse(row.dispatched_at) > WATCHDOG_MS) {
-        if ((await q(d1, "markUnconfirmed", row.thread_id)).changes) {
+        if ((await q(d1b, "markUnconfirmed", row.thread_id)).changes) {
           out.unconfirmed++;
-          await editPrompt(env, fetchImpl, d1, row.thread_id, row.prompt_msg,
+          await editPrompt(env, f, d1b, row.thread_id, row.prompt_msg,
             `⚠️ **No confirmation yet** — the package was sent to the pipeline, but the ` +
             `catalog has not confirmed it (it may have been rejected, e.g. as a duplicate ` +
             `of an existing mod). We keep watching for 48 h; check this thread if it ` +
@@ -322,22 +420,31 @@ export async function forumTick(env, fetchImpl, now = new Date()) {
   }
 
   // 5. cleanup: awaiting_package > 36 h; terminal rows > 48 h; unconfirmed > 48 h.
+  // Three independent DELETEs in one batch = ONE D1 query against the cap.
   const cut = new Date(now.getTime() - AWAITING_PACKAGE_AFTER_MS).toISOString();
-  out.deleted += (await q(d1, "cleanupAwaitingPackage", cut)).changes;
   const cut48 = new Date(now.getTime() - TERMINAL_AFTER_MS).toISOString();
-  out.deleted += (await q(d1, "cleanupTerminal", cut48)).changes;
-  out.deleted += (await q(d1, "cleanupUnconfirmed", cut48)).changes;
+  try {
+    const res = await d1b.batch([
+      d1b.prepare(FSQL.cleanupAwaitingPackage).bind(cut),
+      d1b.prepare(FSQL.cleanupTerminal).bind(cut48),
+      d1b.prepare(FSQL.cleanupUnconfirmed).bind(cut48),
+    ]);
+    for (const r of res || []) out.deleted += (r.meta && r.meta.changes) || 0;
+  } catch (e) {
+    if (e.retryable) { out.backoff = true; return out; }
+    if (!capErr(e)) throw e;
+    out.stopped = true;
+  }
   return out;
 }
 
-async function processThread(env, fetchImpl, d1, t, tagMap, now, catalogFor, out) {
+async function processThread(env, fetchImpl, d1, t, row, tagMap, now, catalogFor, out) {
   const tid = t.id;
   // The owner (fresh username + the bot flag; the thread objects carry
   // no owner object).
   const owner = await ownerUser(env, fetchImpl, t.owner_id);
   if (!owner || owner.bot) return; // bot-authored threads are skipped
   const ownerName = owner.username || "";
-  const { row } = await q(d1, "getRow", tid);
 
   // Fresh messages (also the 404 = thread-deleted detection).
   const msgs = await discord(env, fetchImpl, "GET", `/channels/${tid}/messages?limit=50`);
@@ -416,7 +523,11 @@ export async function startDispatch(env, fetchImpl, d1, row, now) {
     if (!e.retryable) return "failed:thread gone";
     throw e;
   }
-  if (t === null) return failDispatch(env, fetchImpl, d1, row, "the thread was deleted before dispatch");
+  if (t === null) {
+    // the post was deleted: the prompt is gone with it — drop the row
+    if ((await q(d1, "deleteRow", tid)).changes) return "deleted";
+    return "failed:thread gone";
+  }
   if (t.parent_id !== env.FORUM_CHANNEL_ID) return "failed:not in the forum channel";
   const owner = await ownerUser(env, fetchImpl, row.owner_id);
   if (!owner || owner.bot) return failDispatch(env, fetchImpl, d1, row, "the thread is no longer usable");
@@ -447,7 +558,7 @@ export async function startDispatch(env, fetchImpl, d1, row, now) {
   let tagMap = {};
   try { tagMap = JSON.parse(env.FORUM_TAG_MAP || "{}"); } catch { tagMap = {}; }
   const firstOwnerMsg = list.find((m) => m.author?.id === t.owner_id && m.content);
-  const byTagId = await guildTagNames(env, fetchImpl); // a 429 propagates (back off)
+  const byTagId = await channelTagNames(env, fetchImpl); // a 429 propagates (back off)
   const tagNames = tagNamesOf(t.applied_tags, byTagId);
   const metadata = {
     title: t.name,
@@ -580,6 +691,12 @@ export async function handleForumStatus(request, env, fetchImpl, now = new Date(
   }
   let body;
   try { body = JSON.parse(raw); } catch { return new Response("bad json", { status: 400 }); }
+  // Replay protection: the timestamp is part of the signed payload and
+  // must be recent (10 min absorbs runner/CF clock skew).
+  const ts = Number(body.ts);
+  if (!Number.isFinite(ts) || Math.abs(Date.now() / 1000 - ts) > 600) {
+    return new Response("stale callback", { status: 400 });
+  }
   const tid = String(body.thread_id || "");
   if (!/^\d{1,32}$/.test(tid)) return new Response("bad thread_id", { status: 400 });
   if (body.status !== "uploaded" && body.status !== "failed") return new Response("bad status", { status: 400 });
