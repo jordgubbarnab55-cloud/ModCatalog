@@ -25,10 +25,10 @@ UPLOAD_DAILY_BYTES = "2147483648"
 #                          ever considered (set it right before the first live
 #                          deploy so existing posts are not prompted)
 #   CATALOG_URL      the public catalog.json (used to reconcile published rows)
-FORUM_GUILD_ID = ""
-FORUM_CHANNEL_ID = ""
+FORUM_GUILD_ID = "1565286417968398356"
+FORUM_CHANNEL_ID = "1570021563602829374"
 FORUM_TAG_MAP = "{}"
-FORUM_CUTOFF_THREAD_ID = ""
+FORUM_CUTOFF_THREAD_ID = "1570099638336356443"
 CATALOG_URL = "https://jordgubbarnab55-cloud.github.io/ModCatalog/catalog.json"
 
 # Secrets -- set with `npx wrangler secret put NAME`, never committed:
@@ -43,8 +43,7 @@ CATALOG_URL = "https://jordgubbarnab55-cloud.github.io/ModCatalog/catalog.json"
 
 # The forum ingestion poller: one tick every 5 minutes (free-plan scheduled
 # trigger; the tick makes at most ~12 subrequests, well inside the budget).
-[[triggers]]
-cron = "*/5 * * * *"
+triggers = { cron = "*/5 * * * *" }
 
 [[kv_namespaces]]
 binding = "TOKENS"
@@ -57,6 +56,6 @@ id = "a0739f0e764f41d69db0345c8c3d7a6f"
 [[d1_databases]]
 binding = "FORUM"
 database_name = "modcatalog-forum"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "780fb9ed-e5ca-4f8b-a528-9494c701f249"
 
 # Secrets for the forum flow (above) are set with `npx wrangler secret put`.
