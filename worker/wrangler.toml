@@ -17,11 +17,46 @@ ALLOWED_ORIGIN = "https://jordgubbarnab55-cloud.github.io"
 # Optional: upload bytes per Discord user per UTC day (default 2 GiB)
 UPLOAD_DAILY_BYTES = "2147483648"
 
+# Forum ingestion configuration (the poller no-ops while these are blank):
+#   FORUM_GUILD_ID / FORUM_CHANNEL_ID  the dedicated forum channel (type 15)
+#   FORUM_TAG_MAP    a JSON object mapping the forum's applied-tag names to the
+#                   catalog tag vocabulary ({} = no tags are ever published)
+#   FORUM_CUTOFF_THREAD_ID  only threads with a snowflake NEWER than this are
+#                          ever considered (set it right before the first live
+#                          deploy so existing posts are not prompted)
+#   CATALOG_URL      the public catalog.json (used to reconcile published rows)
+FORUM_GUILD_ID = ""
+FORUM_CHANNEL_ID = ""
+FORUM_TAG_MAP = "{}"
+FORUM_CUTOFF_THREAD_ID = ""
+CATALOG_URL = "https://jordgubbarnab55-cloud.github.io/ModCatalog/catalog.json"
+
 # Secrets -- set with `npx wrangler secret put NAME`, never committed:
 #   DISCORD_PUBLIC_KEY  base64 public key from the Discord application
 #   GITHUB_TOKEN        fine-grained token: this repo only,
 #                       Contents: Read and write + Actions: Read and write
+#   DISCORD_BOT_TOKEN   the bot token (forum ingestion; MESSAGE_CONTENT intent
+#                       enabled on the app, the bot has View Channel / Read
+#                       Message History / Send Messages in Threads in the forum)
+#   FORUM_CALLBACK_SECRET  shared HMAC secret the ingest workflow signs
+#                       /forum/status with (also a GitHub Actions secret)
+
+# The forum ingestion poller: one tick every 5 minutes (free-plan scheduled
+# trigger; the tick makes at most ~12 subrequests, well inside the budget).
+[[triggers]]
+cron = "*/5 * * * *"
 
 [[kv_namespaces]]
 binding = "TOKENS"
 id = "a0739f0e764f41d69db0345c8c3d7a6f"
+
+# Forum ingestion state. Create it first:
+#   npx wrangler d1 create modcatalog-forum      (copy the database_id below)
+# then apply the migration:
+#   npx wrangler d1 migrations apply modcatalog-forum
+[[d1_databases]]
+binding = "FORUM"
+database_name = "modcatalog-forum"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# Secrets for the forum flow (above) are set with `npx wrangler secret put`.

@@ -1,0 +1,128 @@
+name: Ingest forum package
+
+# Dispatched by the Cloudflare Worker (the Discord forum flow, Phase 1).
+# Downloads the thread owner's zip (and an optional cover) from the Discord
+# CDN, converts a WebP cover to PNG, uploads the three inbox assets
+# (manifest -> package -> metadata LAST, the same order the web upload flow
+# uses, so process-inbox never sees a partial set), then dispatches
+# process-inbox.yml.
+#
+# The signed CDN URLs are fresh, expiring, and the files are being published
+# by design; the runner never prints them (masked) and only ever accepts
+# https cdn.discordapp.com URLs (build.py enforces the host allow-list and
+# validates every input; inputs travel via env vars, never shell-expanded).
+#
+# Concurrency: a per-thread group (NOT the shared `catalog` group — GitHub
+# cancels a group's pending run when a newer one queues, even with
+# cancel-in-progress: false; process-inbox tolerates dropped runs because it
+# drains the whole inbox, this workflow would not).
+
+on:
+  workflow_dispatch:
+    inputs:
+      thread_id:
+        description: "Discord thread id (numeric)"
+        required: true
+      upload_id:
+        description: "forum-<thread_id>"
+        required: true
+      stamp:
+        description: "the Worker's <discordId>-<hex username> uploader stamp"
+        required: true
+      package_url:
+        description: "fresh signed CDN URL of the owner's zip"
+        required: true
+      package_name:
+        description: "the zip's file name (safe charset)"
+        required: true
+      package_size:
+        description: "expected size in bytes"
+        required: true
+      cover_url:
+        description: "fresh signed CDN URL of the cover (optional)"
+        required: false
+      cover_name:
+        description: "the cover's file name (optional)"
+        required: false
+      cover_mime:
+        description: "image/png | image/jpeg | image/webp (optional)"
+        required: false
+      metadata:
+        description: "the Worker-built metadata JSON string"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ingest-${{ github.event.inputs.thread_id }}
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    env:
+      IN_THREAD_ID: ${{ inputs.thread_id }}
+      IN_UPLOAD_ID: ${{ inputs.upload_id }}
+      IN_STAMP: ${{ inputs.stamp }}
+      IN_PACKAGE_URL: ${{ inputs.package_url }}
+      IN_PACKAGE_NAME: ${{ inputs.package_name }}
+      IN_PACKAGE_SIZE: ${{ inputs.package_size }}
+      IN_COVER_URL: ${{ inputs.cover_url }}
+      IN_COVER_NAME: ${{ inputs.cover_name }}
+      IN_COVER_MIME: ${{ inputs.cover_mime }}
+      IN_METADATA: ${{ inputs.metadata }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Mask the signed CDN URLs
+        run: |
+          [ -n "$IN_PACKAGE_URL" ] && echo "::add-mask::$IN_PACKAGE_URL"
+          [ -n "$IN_COVER_URL" ] && echo "::add-mask::$IN_COVER_URL"
+
+      # Only when needed (a WebP cover): Pillow is not preinstalled.
+      - name: Pillow (WebP covers)
+        if: inputs.cover_mime == 'image/webp'
+        run: python -c "import PIL.Image" 2>/dev/null || pip install --quiet Pillow || true
+
+      - name: Ingest (download, convert, upload, dispatch)
+        run: |
+          set -o pipefail
+          python build.py ingest-forum \
+            --thread-id "$IN_THREAD_ID" \
+            --upload-id "$IN_UPLOAD_ID" \
+            --stamp "$IN_STAMP" \
+            --package-url "$IN_PACKAGE_URL" \
+            --package-name "$IN_PACKAGE_NAME" \
+            --package-size "$IN_PACKAGE_SIZE" \
+            --cover-url "$IN_COVER_URL" \
+            --cover-name "$IN_COVER_NAME" \
+            --cover-mime "$IN_COVER_MIME" \
+            --metadata "$IN_METADATA" 2>&1 | tee ingest.result
+          exit "${PIPESTATUS[0]}"
+
+      - name: Report status to the Worker (HMAC-signed)
+        if: always()
+        env:
+          FORUM_CALLBACK_URL: ${{ secrets.FORUM_CALLBACK_URL }}
+          FORUM_CALLBACK_SECRET: ${{ secrets.FORUM_CALLBACK_SECRET }}
+        run: |
+          set +e
+          if grep -q "RESULT uploaded" ingest.result 2>/dev/null; then
+            sha=$(grep "RESULT uploaded" ingest.result | sed 's/.*pkg_sha256=//')
+            body="{\"thread_id\":\"$IN_THREAD_ID\",\"status\":\"uploaded\",\"pkg_sha256\":\"$sha\"}"
+          else
+            reason=$(grep "RESULT failed" ingest.result 2>/dev/null | head -1 | sed 's/.*reason=//')
+            [ -z "$reason" ] && reason="the ingest workflow failed before reporting"
+            reason=$(printf '%s' "$reason" | tr -d '"\\' | tr -d '\n' | cut -c1-200)
+            body="{\"thread_id\":\"$IN_THREAD_ID\",\"status\":\"failed\",\"reason\":\"$reason\"}"
+          fi
+          sig=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$FORUM_CALLBACK_SECRET" | awk '{print $NF}')
+          curl -s --max-time 30 -X POST "$FORUM_CALLBACK_URL/forum/status" \
+            -H "X-Forum-Signature: $sig" -H "Content-Type: application/json" -d "$body" \
+            || echo "note: the status callback failed (the Worker's watchdog covers it)"

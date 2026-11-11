@@ -15,6 +15,13 @@
 //     an optional metadata.json upload, all tagged with the same X-Upload-Id;
 //     the workflow reassembles, applies the metadata and zips on the runner
 //     (this Worker cannot — 10 ms CPU, stateless).
+//
+// Forum ingestion (Phase 1): a scheduled 5-minute tick checks one dedicated
+// forum channel and dispatches owner-attached zips to the catalog pipeline;
+// the poller, state machine and dispatch builder live in forum.js.
+import {
+  forumTick, handleForumClick, handleForumStatus, q,
+} from "./forum.js";
 
 const MAX_BODY_BYTES = 100 * 1024 * 1024; // Cloudflare free-plan request-body limit
 const DEFAULT_DAILY_BYTES = 2147483648; // 2 GiB of uploads per user per UTC day
@@ -82,7 +89,7 @@ async function verifyDiscordSignature(publicKeyB64, timestamp, rawBody, signatur
 // The uploader as the pipeline learns it: an inbox asset name starts with
 // `<discordId>-<hex of the UTF-8 username>`, so the username survives
 // sanitizeFilename and the "__" field split and never comes from the client.
-function uploaderStamp(discordId, username) {
+export function uploaderStamp(discordId, username) {
   const hex = [...new TextEncoder().encode(username)]
     .map((b) => b.toString(16).padStart(2, "0")).join("");
   return `${discordId}-${hex}`;
@@ -111,6 +118,11 @@ export default {
   async fetch(request, env) {
     return handle(request, env, fetch);
   },
+  // The forum poller: one tick every 5 minutes (wrangler cron). The
+  // scheduled handler gets the bindings on `ctx`, not `env`.
+  async scheduled(event, ctx) {
+    return forumTick(ctx, fetch, new Date());
+  },
 };
 
 /**
@@ -126,6 +138,7 @@ export async function handle(request, env, fetchImpl) {
   if (url.pathname === "/discord") return handleDiscord(request, env, fetchImpl);
   if (url.pathname === "/upload") return handleUpload(request, env, fetchImpl);
   if (url.pathname === "/whoami") return handleWhoami(request, env);
+  if (url.pathname === "/forum/status") return handleForumStatus(request, env, fetchImpl);
   return json({ error: "not found" }, 404);
 }
 
@@ -146,6 +159,8 @@ async function handleDiscord(request, env, fetchImpl) {
 
   let body;
   try { body = JSON.parse(rawBody); } catch { return json({ error: "bad json" }, 400); }
+
+  if (body.type === 3) return handleForumInteraction(body, env, fetchImpl);
 
   if (body.type !== 2) {
     // PING is ACKed through the callback endpoint too (type 1 = PONG).
@@ -209,6 +224,39 @@ async function handleDiscord(request, env, fetchImpl) {
   }
 
   return json({ error: `unknown command ${command}` }, 400);
+}
+
+// The forum prompt's buttons (message-component interactions, type 3).
+// Fast path (the 3 s window): signature + one D1 read + one callback.
+// Heavy work (dispatch, prompt edits) runs AFTER the 202 ACK.
+async function handleForumInteraction(body, env, fetchImpl) {
+  const customId = body.data && body.data.custom_id;
+  if (typeof customId !== "string" || !customId.startsWith("forum_")) {
+    return json({ error: "unknown component" }, 400);
+  }
+  if (!env.FORUM) return json({ error: "forum not configured" }, 503);
+  const i = customId.indexOf(":");
+  const tid = i > 0 ? customId.slice(i + 1) : "";
+  if (!/^\d{1,32}$/.test(tid)) return json({ error: "bad component" }, 400);
+  const clickerId =
+    (body.member && (body.member.id || (body.member.user && body.member.user.id))) ||
+    (body.user && body.user.id);
+  if (!clickerId) return json({ error: "missing user id" }, 400);
+  const { row } = await q(env.FORUM, "getRow", tid);
+  if (!row || clickerId !== row.owner_id) {
+    const msg = !row
+      ? "This prompt is no longer active."
+      : "Only the thread's author can respond to this prompt.";
+    const ack = await sendCallback(body, { type: 7, data: { content: msg, flags: 64 } }, fetchImpl);
+    if (!ack) return json({ error: "discord callback failed" }, 502);
+    return new Response(null, { status: 202 }); // ACK: no body
+  }
+  // Owner's click: defer (fast), ACK, then do the heavy work outside the
+  // 3 s window (the Worker keeps running until the async I/O settles).
+  const ack = await sendCallback(body, { type: 6 }, fetchImpl);
+  if (!ack) return json({ error: "discord callback failed" }, 502);
+  void handleForumClick(env, fetchImpl, env.FORUM, { customId, clickerId });
+  return new Response(null, { status: 202 }); // ACK: no body
 }
 
 // The canonical response flow: ACK the original request with a 202 (no

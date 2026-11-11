@@ -84,6 +84,7 @@ CATALOG_SCHEMA_VERSION = 1
 INBOX_TAG = "inbox"
 MOD_TAG_PREFIX = "mod-"
 MAX_RELEASE_ASSET_BYTES = 2 * 1024 * 1024 * 1024  # GitHub release asset cap
+MAX_IMAGE_BYTES = 4 * 1024 * 1024  # the trailer's cover limit (trailer.MAX_IMAGE_BYTES)
 STALE_AFTER = 7 * 24 * 3600  # seconds; incomplete/stalled inbox items are swept
 MANIFEST_PART = "manifest.json"
 METADATA_PART = "metadata.json"
@@ -1415,6 +1416,256 @@ def retitle(catalog_path: pathlib.Path, config_path: pathlib.Path = CONFIG_DEFAU
     print(f"{catalog_path.name}: catalog name set to {name!r}")
 
 
+# ------------------------------------------------------------ ingest-forum
+
+# The `ingest-forum` subcommand: the runner half of the Discord forum flow.
+# Downloads the owner's zip (and optional cover) from the Discord CDN, converts
+# a WebP cover to PNG (Pillow, lazy), builds the set manifest + metadata.json,
+# uploads the three inbox assets (manifest -> package -> metadata LAST, so
+# process-inbox never sees a partial set) and dispatches process-inbox.yml.
+# Never prints signed URLs (only file names / sizes / hosts).
+
+def _check_cdn_url(url: str) -> str | None:
+    """The only allowed download host; None when `url` is empty (optional)."""
+    if not url:
+        return None
+    import urllib.parse
+    p = urllib.parse.urlparse(url)
+    if p.scheme != "https" or (p.hostname or "").lower() != "cdn.discordapp.com":
+        return "the URL must be an https cdn.discordapp.com URL"
+    return None
+
+
+def _download(url: str, dest: pathlib.Path, max_bytes: int) -> None:
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=300) as r, open(dest, "wb") as f:
+        total = 0
+        while chunk := r.read(1 << 20):
+            total += len(chunk)
+            if total > max_bytes:
+                raise PackageError(f"download exceeds the {max_bytes // 1048576} MiB limit")
+            f.write(chunk)
+
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+JPEG_MAGIC = b"\xff\xd8"
+
+
+def _is_webp(data: bytes) -> bool:
+    return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+
+
+def _shrink_png(img, max_bytes: int) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    out = buf.getvalue()
+    while len(out) > max_bytes and img.size[0] > 64:
+        img = img.resize((img.size[0] // 2, max(1, img.size[1] // 2)))
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        out = buf.getvalue()
+    if len(out) > max_bytes:
+        raise PackageError("the cover could not be reduced to 4 MiB")
+    return out
+
+
+def _prepare_cover(data: bytes, mime: str, filename: str) -> tuple[dict | None, str]:
+    """(image dict or None, note). A WebP cover is converted to PNG (Pillow,
+    lazy); an oversized PNG/JPEG is shrunk when Pillow is present, dropped
+    (with a note) when it is not. `None` = keep the package's own cover."""
+    try:
+        from PIL import Image
+    except ImportError:
+        Image = None
+    if mime == "image/webp" or (mime not in ("image/png", "image/jpeg") and _is_webp(data)):
+        if Image is None:
+            return None, "note: webp cover skipped (Pillow unavailable); the package's own cover is kept"
+        img = Image.open(io.BytesIO(data))
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
+        if img.mode == "RGBA":
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[3])
+            img = bg
+        return {"mime": "image/png", "data": _shrink_png(img, MAX_IMAGE_BYTES)}, ""
+    if mime == "image/png" and not data.startswith(PNG_MAGIC):
+        return None, "note: cover is not a valid PNG; dropped"
+    if mime == "image/jpeg" and not data.startswith(JPEG_MAGIC):
+        return None, "note: cover is not a valid JPEG; dropped"
+    if len(data) <= MAX_IMAGE_BYTES:
+        return {"mime": mime, "data": data}, ""
+    if Image is None:
+        return None, "note: cover is over 4 MiB and Pillow is unavailable; dropped"
+    try:
+        img = Image.open(io.BytesIO(data))
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
+        if img.mode == "RGBA":
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[3])
+            img = bg
+        out = _shrink_png(img, MAX_IMAGE_BYTES)
+        return {"mime": "image/png", "data": out}, ""
+    except PackageError:
+        raise
+    except Exception as ex:
+        return None, f"note: cover could not be shrunk ({ex.__class__.__name__}); dropped"
+
+
+def parse_forum_metadata(raw: str) -> dict:
+    """The Worker-built metadata JSON, validated like upload metadata.
+    `identifier` is never accepted (Phase 1: a new post is always a new mod)."""
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        raise PackageError("metadata is not valid JSON") from None
+    if not isinstance(obj, dict):
+        raise PackageError("metadata is not a JSON object")
+    if obj.get("identifier") not in (None, ""):
+        raise PackageError("metadata must not carry an identifier (a new post is a new mod)")
+    meta: dict = {}
+    for key in ("title", "description", "version", "game_version", "author"):
+        value = obj.get(key, "")
+        if not isinstance(value, str):
+            raise PackageError(f"metadata \"{key}\" must be a string")
+        meta[key] = value
+    tags = obj.get("tags", [])
+    if not isinstance(tags, list) or any(not isinstance(t, str) for t in tags):
+        raise PackageError("metadata \"tags\" must be an array of strings")
+    meta["tags"] = tags
+    meta["image"] = None  # filled in from the cover, or absent
+    return meta
+
+
+def dispatch_workflow(owner: str, repo: str, workflow: str) -> None:
+    import urllib.request
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise PackageError("no GH_TOKEN/GITHUB_TOKEN for the workflow dispatch")
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches",
+        data=b'{"ref": "main"}', method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                 "User-Agent": "ModCatalog"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        if r.status not in (200, 201, 204):
+            raise PackageError(f"workflow dispatch failed: HTTP {r.status}")
+
+
+def ingest_forum(client: PackageClient, owner: str, repo: str, args) -> int:
+    # 1. validate every input (never trust the dispatch payload)
+    if not re.fullmatch(r"\d{1,32}", args.thread_id):
+        raise SystemExit("error: bad --thread-id")
+    if args.upload_id != f"forum-{args.thread_id}":
+        raise SystemExit("error: --upload-id must be forum-<thread-id>")
+    uploader = parse_uploader(args.stamp)
+    if uploader is None:
+        raise SystemExit("error: bad --stamp")
+    for name, url in (("--package-url", args.package_url), ("--cover-url", args.cover_url or "")):
+        err = _check_cdn_url(url)
+        if err:
+            raise SystemExit(f"error: {name}: {err}")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,200}", args.package_name) \
+            or not args.package_name.lower().endswith(".zip"):
+        raise SystemExit("error: bad --package-name")
+    if args.cover_name and not re.fullmatch(r"[A-Za-z0-9._-]{1,200}", args.cover_name):
+        raise SystemExit("error: bad --cover-name")
+    if args.cover_mime not in ("", "image/png", "image/jpeg", "image/webp"):
+        raise SystemExit("error: bad --cover-mime")
+    if args.cover_url != "" and args.cover_mime == "":
+        raise SystemExit("error: --cover-url needs --cover-mime")
+    try:
+        meta = parse_forum_metadata(args.metadata)
+    except PackageError as ex:
+        raise SystemExit(f"error: {ex}")
+
+    stamp = args.stamp
+    uid = args.upload_id
+    with tempfile.TemporaryDirectory() as td:
+        pkg_path = pathlib.Path(td) / "package.zip"
+        try:
+            _download(args.package_url, pkg_path, MAX_RELEASE_ASSET_BYTES)
+        except Exception:
+            # never print the exception message: it carries the signed URL
+            print("RESULT failed reason=download-failed", file=sys.stderr)
+            return 1
+        if pkg_path.stat().st_size == 0:
+            print("RESULT failed reason=download-failed (empty file)", file=sys.stderr)
+            return 1
+        if args.package_size and pkg_path.stat().st_size != int(args.package_size):
+            print("RESULT failed reason=download-failed (size mismatch)", file=sys.stderr)
+            return 1
+
+        image = None
+        note = ""
+        if args.cover_url:
+            cover_path = pathlib.Path(td) / "cover.bin"
+            try:
+                _download(args.cover_url, cover_path, 8 * 1024 * 1024)
+                image, note = _prepare_cover(cover_path.read_bytes(), args.cover_mime, args.cover_name)
+            except PackageError as ex:
+                print(f"note: cover unusable ({ex.__class__.__name__}); the package's own cover is kept")
+                image = None
+            except Exception:
+                print("note: cover download failed; the package's own cover is kept")
+                image = None
+            if note:
+                print(note)
+
+        final = {k: meta[k] for k in ("title", "description", "version", "game_version", "author")}
+        final["tags"] = meta["tags"]
+        if image is not None:
+            final["image"] = {"mime": image["mime"], "data": image["data"]}
+        try:
+            trailer.validate_metadata(final)
+        except trailer.TrailerError as ex:
+            print(f"RESULT failed reason=metadata-failed ({ex})", file=sys.stderr)
+            return 1
+        # the metadata.json form: the image data is base64 (the trailer form
+        # above uses raw bytes)
+        serialized = dict(final)
+        if serialized.get("image") is not None:
+            serialized["image"] = {"mime": serialized["image"]["mime"],
+                                  "data": base64.b64encode(serialized["image"]["data"]).decode("ascii")}
+        meta_bytes = json.dumps(serialized, ensure_ascii=False).encode("utf-8")
+
+        pkg_hex = hashlib.sha256(pkg_path.read_bytes()).hexdigest()
+        meta_hex = hashlib.sha256(meta_bytes).hexdigest()
+        pkg_name = sanitize_name(args.package_name)
+        manifest = {"files": [{"name": pkg_name, "sha256": pkg_hex, "parts": 1}],
+                   "metadata": {"sha256": meta_hex}}
+
+        # 2. idempotent retry: delete a stale partial set of this upload_id
+        prefix = f"{stamp}__{uid}__"
+        for a in client.list_assets(INBOX_TAG):
+            if a.name.startswith(prefix):
+                client.delete_asset(INBOX_TAG, a.name)
+                print(f"  removed stale inbox asset {a.name}")
+
+        # 3. upload in the set order: manifest -> package -> metadata LAST
+        manifest_path = pathlib.Path(td) / "manifest.json"
+        manifest_path.write_bytes(json.dumps(manifest).encode("utf-8"))
+        meta_path = pathlib.Path(td) / "metadata.json"
+        meta_path.write_bytes(meta_bytes)
+        try:
+            client.upload_asset(INBOX_TAG, manifest_path, f"{stamp}__{uid}__manifest.json")
+            client.upload_asset(INBOX_TAG, pkg_path, f"{stamp}__{uid}__f0__p0of1__{pkg_name}")
+            client.upload_asset(INBOX_TAG, meta_path, f"{stamp}__{uid}__metadata.json")
+        except Exception:
+            print("RESULT failed reason=upload-failed", file=sys.stderr)
+            return 1
+
+        # 4. wake the pipeline (the local client is offline: no dispatch)
+        if not args.no_dispatch and args.client != "local":
+            try:
+                dispatch_workflow(owner, repo, "process-inbox.yml")
+            except Exception:
+                print("RESULT failed reason=dispatch-failed", file=sys.stderr)
+                return 1
+    print(f"RESULT uploaded pkg_sha256={pkg_hex}")
+    return 0
+
+
 # ------------------------------------------------------------------ cli
 
 
@@ -1462,8 +1713,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--catalog", default=str(CATALOG_DEFAULT))
     p.add_argument("--config", default=str(CONFIG_DEFAULT))
 
+    p = sub.add_parser("ingest-forum", help="ingest one forum post's package into the inbox")
+    p.add_argument("--thread-id", required=True)
+    p.add_argument("--upload-id", required=True)
+    p.add_argument("--stamp", required=True, help="the Worker's <discordId>-<hex username> stamp")
+    p.add_argument("--package-url", required=True, help="https cdn.discordapp.com URL of the owner's zip")
+    p.add_argument("--package-name", required=True, help="the zip's file name (safe charset)")
+    p.add_argument("--package-size", default="", help="expected size in bytes (checked when set)")
+    p.add_argument("--cover-url", default="", help="https cdn.discordapp.com URL of the cover (optional)")
+    p.add_argument("--cover-name", default="", help="the cover's file name (optional)")
+    p.add_argument("--cover-mime", default="", choices=("", "image/png", "image/jpeg", "image/webp"))
+    p.add_argument("--metadata", required=True, help="the Worker-built metadata JSON string")
+    p.add_argument("--no-dispatch", action="store_true", help="do not dispatch process-inbox.yml")
+    p.add_argument("--client", choices=("local", "gh"), default="gh")
+    p.add_argument("--root", help="root dir for the local client")
+    p.add_argument("--owner", default=os.environ.get("GITHUB_OWNER"))
+    p.add_argument("--repo", default=os.environ.get("GITHUB_REPO"))
+
     args = ap.parse_args(argv)
-    config = pathlib.Path(args.config)
+    config = pathlib.Path(args.config) if hasattr(args, "config") else None
     if args.cmd == "retitle":
         retitle(pathlib.Path(args.catalog), config)
         return 0
@@ -1477,7 +1745,11 @@ def main(argv: list[str] | None = None) -> int:
     admins = {s.strip() for s in os.environ.get("ADMIN_DISCORD_IDS", "").split(",") if s.strip()}
 
     client = make_client(args, owner, repo)
-    catalog = pathlib.Path(args.catalog)
+    catalog = pathlib.Path(args.catalog) if hasattr(args, "catalog") else None
+    if args.cmd == "ingest-forum":
+        if not owner or not repo:
+            raise SystemExit("error: owner/repo unknown (set GITHUB_REPOSITORY or pass --owner/--repo)")
+        return ingest_forum(client, owner, repo, args)
     if args.cmd == "rebuild":
         rebuild(client, owner, repo, catalog, config, full=args.full)
         return 0
