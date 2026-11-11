@@ -43,7 +43,8 @@ CATALOG_URL = "https://jordgubbarnab55-cloud.github.io/ModCatalog/catalog.json"
 
 # The forum ingestion poller: one tick every 5 minutes (free-plan scheduled
 # trigger; the tick makes at most ~12 subrequests, well inside the budget).
-triggers = { cron = "*/5 * * * *" }
+[triggers]
+crons = [ "* * * * *" ]   # testing cadence; back to "*/5 * * * *" after
 
 [[kv_namespaces]]
 binding = "TOKENS"

@@ -286,8 +286,11 @@ export async function forumTick(env, fetchImpl, now = new Date()) {
   for (const t of (active && active.threads) || []) {
     if (t.parent_id === env.FORUM_CHANNEL_ID) threads.set(t.id, t);
   }
-  let before = await env.TOKENS.get(ARCHIVED_CURSOR);
-  if (!before) before = env.FORUM_CUTOFF_THREAD_ID;   // start at the cutoff
+  const cursor = await env.TOKENS.get(ARCHIVED_CURSOR);
+  let before = cursor;
+  if (!before && env.FORUM_CUTOFF_THREAD_ID)
+    // the endpoint's `before` is an ISO8601 timestamp, not a snowflake:
+    before = new Date(Number((BigInt(env.FORUM_CUTOFF_THREAD_ID) >> 22n) + 1420070400000n)).toISOString();
   if (before) {
     let archived;
     try {
@@ -297,8 +300,11 @@ export async function forumTick(env, fetchImpl, now = new Date()) {
     const list = (archived && archived.threads) || [];
     for (const t of list) if (t.parent_id === env.FORUM_CHANNEL_ID) threads.set(t.id, t);
     if (archived && archived.has_more && list.length) {
-      await env.TOKENS.put(ARCHIVED_CURSOR, list[list.length - 1].id); // continue next tick
-    } else if (before !== env.FORUM_CUTOFF_THREAD_ID) {
+      const last = list[list.length - 1];
+      const tm = last.thread_metadata || {};
+      // the pagination cursor is the last thread's archive timestamp
+      await env.TOKENS.put(ARCHIVED_CURSOR, tm.archive_timestamp || tm.create_timestamp);
+    } else if (cursor) {
       await env.TOKENS.delete(ARCHIVED_CURSOR);
     }
   }
