@@ -5,17 +5,22 @@
 
 import { FSQL } from "../../src/forum.js";
 import { ASQL } from "../../src/auth.js";
+import { MSQL } from "../../src/mirror.js";
 
 export class FakeD1 {
   constructor() {
     this.rows = new Map();      // forum_posts: tid -> row
     this.tokens = new Map();    // tokens: hash -> row
     this.codes = new Map();     // login_codes: hash -> row
+    this.threads = new Map();   // mod_threads: mod_key -> row
+    this.seen = new Map();      // seen_events: event_id -> row
   }
   // -- test introspection
   tokenRows() { return [...this.tokens.values()]; }
   codeRows() { return [...this.codes.values()]; }
   row(tid) { return this.rows.get(tid) || null; }
+  modThread(key) { return this.threads.get(key) || null; }
+  seenEvent(id) { return this.seen.get(id) || null; }
   insert(tid, owner_id, owner_name, status, last_msg_id, created_at) {
     if (this.rows.has(tid)) return 0;
     this.rows.set(tid, {
@@ -206,6 +211,23 @@ export class FakeD1 {
         if (r && !r.used_at && r.expires_at > a[0]) { r.used_at = a[0]; return 1; }
         return 0;
       }
+      // ---- mod_threads + seen_events (MSQL)
+      case MSQL.seenGet:
+        return this.seen.get(a[0]) || null;
+      case MSQL.seenInsert:
+        if (this.seen.has(a[0])) return 0;
+        this.seen.set(a[0], { event_id: a[0], created_at: a[1] });
+        return 1;
+      case MSQL.seenSweep: {
+        let n = 0;
+        for (const [k, r] of [...this.seen]) if (r.created_at < a[0]) { this.seen.delete(k); n++; }
+        return n;
+      }
+      case MSQL.threadGet:
+        return this.threads.get(a[0]) || null;
+      case MSQL.threadSet:
+        this.threads.set(a[0], { mod_key: a[0], thread_id: a[1], created_at: a[2] });
+        return 1;
       default:
         throw new Error(`FakeD1: unknown statement ${sql}`);
     }

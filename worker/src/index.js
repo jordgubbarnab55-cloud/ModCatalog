@@ -26,6 +26,7 @@ import {
   authenticateToken, mintManualToken, peekLoginCode,
   redeemLoginCode, deleteWebToken, mintLoginCode, revokeAllTokens,
 } from "./auth.js";
+import { handleCatalogEvents } from "./mirror.js";
 
 const MAX_BODY_BYTES = 100 * 1024 * 1024; // Cloudflare free-plan request-body limit
 const DEFAULT_DAILY_BYTES = 2147483648; // 2 GiB of uploads per user per UTC day
@@ -143,6 +144,7 @@ export async function handle(request, env, fetchImpl) {
   if (url.pathname === "/auth/peek") return handleAuthPeek(request, env);
   if (url.pathname === "/auth/redeem") return handleAuthRedeem(request, env);
   if (url.pathname === "/auth/logout") return handleAuthLogout(request, env);
+  if (url.pathname === "/catalog/events") return handleCatalogEvents(request, env, fetchImpl);
   if (url.pathname === "/forum/status") return handleForumStatus(request, env, fetchImpl);
   return json({ error: "not found" }, 404);
 }

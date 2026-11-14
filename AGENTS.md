@@ -373,7 +373,31 @@ injected: `handle(request, env, fetch)`.
   as for `/upload` (`GET`, `Authorization` in the preflight).
   `/upload` stamps every inbox asset name with `<discordId>-<hex username>`
   (see the inbox flow).
-- **Auth (D1)** — tokens and one-time login codes live in D1 (binding
+- **`POST /catalog/events`** — the runner's signed outcome events (the
+  `notify` step; `worker/src/mirror.js`): `X-Catalog-Signature` = hex
+  HMAC-SHA256(CATALOG_CALLBACK_SECRET, rawBody), a fresh `ts` in the
+  signed payload (|now - ts| > 300 s → 401), <= 10 events
+  (`{ts, events:[…]}`; published / rejected, the shape `build.py`
+  writes). Mirrors each event into Discord: `published` → one forum
+  thread per mod (D1 `mod_threads` keyed on the lowercased
+  identifier; new thread on first sight — name = title, first message
+  `<@uploader> published **title** vVERSION` + description + site link,
+  cover embed with `mod-id:` footer, catalog tags through the var
+  `FORUM_TAG_IDS` (catalog-tag → forum tag id, unknowns ignored, max 5)
+  — follow-up message in the existing thread on updates; a thread
+  deleted on Discord is re-created and the mapping replaced); `rejected`
+  → a notice in `NOTICES_CHANNEL_ID` (blank = log line only; no DMs).
+  Mirrored event ids go to `seen_events` (redeliveries are no-ops;
+  swept at 30 days). Every payload sets `allowed_mentions` explicitly
+  and user text is truncated with `@`/backticks stripped, so it can
+  never ping @everyone/roles. One failing event is reported
+  `ok: false` (unrecorded, retried by the runner) without aborting the
+  rest; subrequests per event <= 3. 429s are retried once (wait capped
+  at 5 s). The forum is locked so only the bot creates posts (an
+  `@everyone` deny of `SEND_MESSAGES` — "Create Posts" in a forum
+  channel — while allowing `SEND_MESSAGES_IN_THREADS`; the bot keeps an
+  explicit allow overwrite: View, `SEND_MESSAGES`,
+  `SEND_MESSAGES_IN_THREADS`, `EMBED_LINKS`).- **Auth (D1)** — tokens and one-time login codes live in D1 (binding
   `DB`, database `modcatalog-forum`, `worker/src/auth.js`), so one user
   can hold many tokens: kind `manual` (`/token`; one per user, re-mint
   replaces, never expires) and kind `web` (a redeemed login code;

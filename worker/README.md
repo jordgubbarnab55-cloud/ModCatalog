@@ -388,6 +388,52 @@ Notes:
 - Fine-grained tokens **expire** (max 1 year). When this token expires,
   uploads start failing with `502` — set a calendar reminder at creation.
 
+## Catalog outcome events (`/catalog/events`)
+
+
+`build.py notify` (the `process-inbox` / `rebuild` workflows) POSTs a run's
+outcome events here: `X-Catalog-Signature` = the hex HMAC-SHA256 of the raw
+body keyed with the secret `CATALOG_CALLBACK_SECRET`, plus a fresh `ts` in
+the signed payload, at most 10 events per request. The Worker verifies the
+signature (constant-time) and the timestamp (|now - ts| <= 300 s, else 401)
+and mirrors each event into Discord — one failing event never aborts the
+others: it stays unrecorded and is reported `ok: false` so the runner can
+retry it.
+
+
+- `published` — one forum thread per mod (D1 `mod_threads`, keyed on the
+  lowercased identifier): a **new thread** on first sight (name = the title,
+  first message `<@uploaderId> published **title** vVERSION` + the description
+  + a link to `SITE_URL`, one embed with the cover as `image` when set and
+  the footer `mod-id: <identifier>`, the catalog tags applied through the var
+  `FORUM_TAG_IDS` — a JSON object catalog-tag -> forum tag id, unknown tags
+  ignored, max 5) — and a **follow-up message** in the existing thread for
+  updates. A thread deleted on Discord (404/403) is re-created and the
+  mapping replaced.
+- `rejected` — a notice in the var `NOTICES_CHANNEL_ID` (a text channel;
+  blank = a log line only). No DMs.
+
+
+Mirrored event ids go into `seen_events` (a redelivered event is a no-op;
+rows are opportunistically swept at 30 days old). Every outgoing payload
+sets `allowed_mentions: {parse: [], users: [uploaderId]}` and user-supplied
+text (title, version, description, reason) is truncated and has its backticks
+and `@` stripped, so user text can never ping @everyone/roles. Subrequests per
+event are <= 3, so a full 10-event request stays inside the free-plan cap of
+50. A 429 from Discord is retried once, honouring `retry_after` (wait capped
+at 5 s).
+
+
+Required bot permissions: **View Channel, Create Posts, Send Messages in
+Posts, Embed Links** in the forum channel (and in the notices channel:
+Send Messages + Embed Links). The forum should be locked so *only the bot*
+creates posts: an `@everyone` overwrite that denies `SEND_MESSAGES` (1<<11 —
+that is "Create Posts" in a forum channel) while allowing
+`SEND_MESSAGES_IN_THREADS` (1<<38) + View/Read, and an explicit bot-user
+overwrite allowing View Channel, `SEND_MESSAGES`, `SEND_MESSAGES_IN_THREADS`
+and `EMBED_LINKS` (1<<14). (Changing those overwrites needs
+Manage Channels — a human, or the bot if it has it.)
+
 ## Test status
 
 `node --test` is fully green offline: Discord signature
@@ -401,7 +447,12 @@ ephemeral link-button reply + the minted code's validity via peek + the
 `forum_*`/unknown-custom_id routing, `loginLinkUrl`), the upload path
 (401/411/413/400/429/503, upload sets incl. `.zip` and `metadata.json`, happy path with the **same stream object**
 forwarded to GitHub, 502-without-dispatch on GitHub failure, CORS
-preflight), and the command-registration script (bulk-PUT payload shape,
+preflight), and the `/catalog/events` mirror (bad/missing signature, tampered body,
+stale/future `ts` -> 401, >10 events / bad shape / over-size body -> 400,
+thread create + mapping + seen recording, update-in-thread, deleted-thread
+404 re-create, duplicate-delivery no-op, one-failing-event isolation +
+redelivery, rejected notices, NOTICES-unset no-call, @everyone
+neutralisation, 429 retry-once), and the command-registration script (bulk-PUT payload shape,
 per-guild 403 isolation, `--retire-global` ordering, delete-404
 tolerance, auto-discovery, dry-run) plus the #mods message script (payload
 shape, POST/PATCH, dry-run, error detail). Live behavior (deploy, real Discord, real GitHub, the free-plan
