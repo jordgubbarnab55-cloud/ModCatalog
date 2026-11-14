@@ -7,6 +7,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { handle } from "../src/index.js";
+import { sha256Hex } from "../src/auth.js";
+import { FakeD1 } from "./helpers/fake-d1.js";
 
 // ------------------------------------------------------------- fakes
 
@@ -83,6 +85,7 @@ async function mintToken(env, kv, fetchImpl, id = "42") {
 function makeEnv(kv, pub, overrides = {}) {
   return {
     TOKENS: kv,
+    DB: overrides.DB || (kv.DB ||= new FakeD1()),
     DISCORD_PUBLIC_KEY: pub,
     GITHUB_TOKEN: "gh_test_token",
     GITHUB_OWNER: "octo",
@@ -128,9 +131,10 @@ test("wrong public key is rejected 401", async () => {
 
 test("/token mints a token; only the hash is stored; reply is ephemeral", async () => {
   const kv = new FakeKV();
+  const db = new FakeD1();
   const fetchImpl = makeFetch();
   const res = await handle(await discordRequest({ type: 2, data: { name: "token" }, member: { id: "42", user: { id: "42", username: "alice" } } }),
-    makeEnv(kv, await publicKeyB64()), fetchImpl);
+    makeEnv(kv, await publicKeyB64(), { DB: db }), fetchImpl);
   assert.equal(res.status, 202);
   assert.equal(await res.text(), "", "ACK has no body");
   const cb = fetchImpl.calls.find((c) => c.url.includes("/interactions/") && c.url.includes("/callback"));
@@ -140,55 +144,44 @@ test("/token mints a token; only the hash is stored; reply is ephemeral", async 
   const token = resp.data.content.match(/(mm_[A-Za-z0-9_-]+)/)[1];
   assert.ok(token.startsWith("mm_"));
 
-  const vals = kv.all();
-  const userKey = vals.find(([k]) => k === "user:42");
-  assert.ok(userKey, "user key stored");
-  const tokKey = vals.find(([k]) => k === `tok:${userKey[1]}`);
-  assert.ok(tokKey, "tok key stored");
-  assert.equal(JSON.parse(tokKey[1]).discordId, "42");
-  assert.equal(JSON.parse(tokKey[1]).username, "alice");
-  for (const [, v] of vals) assert.ok(!v.includes(token), "plaintext token never in KV");
+  const rows = db.tokenRows();
+  assert.equal(rows.length, 1, "one token row");
+  assert.equal(rows[0].discord_id, "42");
+  assert.equal(rows[0].username, "alice");
+  assert.equal(rows[0].kind, "manual");
+  assert.equal(rows[0].expires_at, null, "a manual token never expires");
+  for (const k of Object.keys(rows[0]))
+    assert.ok(!String(rows[0][k]).includes(token), "plaintext token never stored");
   assert.equal(fetchImpl.calls.length, 1, "only the Discord callback call (no GitHub)");
 });
 
 test("a second /token invalidates the first", async () => {
   const kv = new FakeKV();
-  const env = makeEnv(kv, await publicKeyB64());
+  const db = new FakeD1();
+  const env = makeEnv(kv, await publicKeyB64(), { DB: db });
   const fetchImpl = makeFetch();
   const t1 = await mintToken(env, kv, fetchImpl);
-  const h1 = (await kv.get("user:42"));
-  assert.ok(await kv.get(`tok:${h1}`), "first token live");
+  const h1 = await sha256Hex(t1);
+  assert.ok(db.tokenRows().some((r) => r.hash === h1), "first token live");
 
   const t2 = await mintToken(env, kv, fetchImpl);
   assert.notEqual(t1, t2);
-  assert.equal(await kv.get(`tok:${h1}`), null, "first token revoked");
-  const h2 = await kv.get("user:42");
-  assert.notEqual(h2, h1);
-  assert.ok(await kv.get(`tok:${h2}`), "second token live");
-});
-
-test("/token revoke deletes both keys", async () => {
-  const kv = new FakeKV();
-  const env = makeEnv(kv, await publicKeyB64());
-  await mintToken(env, kv, makeFetch());
-  const res = await handle(await discordRequest({
-    type: 2,
-    data: { name: "token", options: [{ type: 2, name: "revoke" }] },
-    member: { id: "42", user: { id: "42", username: "alice" } },
-  }), env, makeFetch());
-  assert.equal(res.status, 202);
-  assert.equal(await kv.get("user:42"), null);
+  assert.equal(db.tokenRows().find((r) => r.hash === h1), undefined, "first token replaced");
+  const h2 = await sha256Hex(t2);
+  assert.ok(db.tokenRows().some((r) => r.hash === h2), "second token live");
+  assert.equal(db.tokenRows().length, 1, "one row after the replacement");
 });
 
 test("guild identity: a member object without a top-level id (nested user.id) is accepted", async () => {
   const kv = new FakeKV();
+  const db = new FakeD1();
   const res = await handle(await discordRequest({
     type: 2,
     data: { name: "token" },
     member: { user: { id: "77", username: "bob" }, nick: null, roles: [] }, // no top-level `id`
-  }), makeEnv(kv, await publicKeyB64()), makeFetch());
+  }), makeEnv(kv, await publicKeyB64(), { DB: db }), makeFetch());
   assert.equal(res.status, 202);
-  assert.ok(await kv.get("user:77"), "keyed by the nested user id");
+  assert.ok(db.tokenRows().some((r) => r.discord_id === "77"), "keyed by the nested user id");
 });
 
 // -------------------------------------------------------- upload endpoint
@@ -521,35 +514,36 @@ test("CORS preflight answers with the allowed origin and headers", async () => {
 
 test("/token stores the account username, not the display name or nickname", async () => {
   const kv = new FakeKV();
+  const db = new FakeD1();
   const res = await handle(await discordRequest({
     type: 2,
     data: { name: "token" },
     member: { nick: "Server Nick", user: { id: "77", username: "carol", global_name: "Carol The Great" } },
-  }), makeEnv(kv, await publicKeyB64()), makeFetch());
+  }), makeEnv(kv, await publicKeyB64(), { DB: db }), makeFetch());
   assert.equal(res.status, 202);
-  const hash = await kv.get("user:77");
   assert.deepEqual(
-    (({ discordId, username }) => ({ discordId, username }))(JSON.parse(await kv.get(`tok:${hash}`))),
+    (({ discord_id, username }) => ({ discordId: discord_id, username }))(db.tokenRows()[0]),
     { discordId: "77", username: "carol" });
 });
 
 test("/token in a DM: the username comes from the top-level user object", async () => {
   const kv = new FakeKV();
+  const db = new FakeD1();
   const res = await handle(await discordRequest({
     type: 2, data: { name: "token" }, user: { id: "88", username: "dave" },
-  }), makeEnv(kv, await publicKeyB64()), makeFetch());
+  }), makeEnv(kv, await publicKeyB64(), { DB: db }), makeFetch());
   assert.equal(res.status, 202);
-  const hash = await kv.get("user:88");
-  assert.equal(JSON.parse(await kv.get(`tok:${hash}`)).username, "dave");
+  assert.equal(db.tokenRows()[0].username, "dave");
 });
 
 test("/token without a username is refused and mints nothing", async () => {
   const kv = new FakeKV();
+  const db = new FakeD1();
   const res = await handle(await discordRequest({
     type: 2, data: { name: "token" }, member: { user: { id: "99" } },
-  }), makeEnv(kv, await publicKeyB64()), makeFetch());
+  }), makeEnv(kv, await publicKeyB64(), { DB: db }), makeFetch());
   assert.equal(res.status, 400);
-  assert.equal(kv.all().length, 0);
+  assert.equal(db.tokenRows().length, 0);
 });
 
 function whoamiRequest(token, method = "GET") {
@@ -581,30 +575,6 @@ test("GET /whoami: no, unknown or revoked token is 401", async () => {
   assert.equal(res.status, 401);
   assert.equal(res.headers.get("Access-Control-Allow-Origin"), "https://pages.example.com");
   assert.equal(f.calls.filter((c) => !c.url.includes("/callback")).length, 0, "no GitHub calls");
-});
-
-async function legacyToken(kv) {
-  const token = "mm_legacytoken";
-  await kv.put(`tok:${await sha256Hex(token)}`, JSON.stringify({ discordId: "42", createdAt: "2026-01-01T00:00:00Z" }));
-  return token;
-}
-async function sha256Hex(s) {
-  return Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))).toString("hex");
-}
-
-test("a token minted before usernames were recorded is 401 on whoami and upload", async () => {
-  const kv = new FakeKV();
-  const pub = await publicKeyB64();
-  const token = await legacyToken(kv);
-  const who = await handle(whoamiRequest(token), makeEnv(kv, pub), makeFetch());
-  assert.equal(who.status, 401);
-  assert.match((await who.json()).error, /mint a new one with \/token/);
-  const f = makeFetch();
-  const up = await handle(uploadRequest({ token, contentLength: 10, filename: "a.zip", body: "0123456789" }),
-    makeEnv(kv, pub), f);
-  assert.equal(up.status, 401);
-  assert.match((await up.json()).error, /mint a new one with \/token/);
-  assert.equal(f.calls.length, 0);
 });
 
 test("CORS preflight for /whoami allows GET and the Authorization header", async () => {

@@ -5,16 +5,16 @@ Cloudflare Worker (free plan) that does two things:
 1. **Discord token commands** — `POST /discord` (Interactions endpoint,
    slash commands over HTTPS; no gateway/WebSocket bot). `/token` is
    registered **per guild** (guild commands appear in Discord
-   immediately) and mints a bearer token for the user (shown once,
-   ephemerally). One active token per user: minting again invalidates
-   the previous one — that is also the revoke path. The command is
-   intentionally parameter-free (see step 8); the Worker still accepts a
-   legacy `token revoke` subcommand. The response uses Discord's
-   canonical flow: an immediate **202 ACK (no body)** to the
-   interaction, then a `POST /interactions/{id}/{token}/callback`
+   immediately) and mints a **`manual`** token for the user (shown once,
+   ephemerally). One manual token per user: minting again replaces the
+   previous one — that is also the revoke path (the legacy `token revoke`
+   subcommand is gone; the command is parameter-free, see step 8). The
+   response uses Discord's canonical flow: an immediate **202 ACK (no
+   body)** to the interaction, then a `POST /interactions/{id}/{token}/callback`
    with `{type: 4, data: {content, flags}}` (the 3 s budget covers the
    ACK only; the callback token is valid 15 min). Only the SHA-256 of
-   the token is stored (in Workers KV), next to the account's Discord id and
+   the token is stored (in D1, binding `DB`, table `tokens` — see the
+   *Auth* section below), next to the account's Discord id and
    **`username`** (the account name — not the display name or the server
    nickname — read from the interaction's `member.user`, or `user` in a DM).
    The catalog publishes mods under that username (verified authors, below).
@@ -24,9 +24,49 @@ Cloudflare Worker (free plan) that does two things:
    dispatches the `process-inbox` workflow as a wake-up.
 3. **`GET /whoami`** — bearer token → `200 {"discordId", "username"}`; the web
    page uses it to validate a token and to show the author name the upload
-   will carry. `401 {"error"}` for a missing / unknown / revoked token **and**
-   for a token minted before usernames were recorded (message: mint a new one
-   with `/token`); such a token is also rejected on `/upload`.
+   will carry. `401 {"error"}` for a missing / unknown / revoked / expired
+   token (rejected the same way on `/upload`).
+
+## Auth: D1 tokens and login codes
+
+Tokens live in **D1** (binding `DB`, database `modcatalog-forum`,
+migration `0002_auth.sql`; the logic is `src/auth.js`) instead of KV, so
+one user can hold many tokens:
+
+* kind `manual` — minted by `/token` (one per user; a re-mint replaces
+  the previous one, which is the revoke path; **never expires**).
+* kind `web` — minted by redeeming a one-time **login code** (many per
+  user; **90-day expiry**).
+
+Only the sha256 of a secret string is ever stored. Secret shapes: manual
+`mm_…`, web `ms_…`, login code `lc_…` (prefix + base64url of 32 random
+bytes). KV (`TOKENS`) keeps only the upload quota (`quota:<id>`) and the
+inbox release-id cache.
+
+Login codes (table `login_codes`) are **5-minute TTL, single-use**:
+minting one invalidates the user's older unused codes, a user can mint
+at most 5 per 60 s, and rows older than 24 h are swept
+opportunistically. The burn is atomic — `UPDATE login_codes SET
+used_at = now WHERE hash = ? AND used_at IS NULL AND expires_at > now`,
+succeeding only when exactly one row changed — then a 90-day `web`
+token is inserted.
+
+Endpoints (same CORS pattern as `/whoami`: `Access-Control-Allow-Origin`
+= `ALLOWED_ORIGIN`, `Content-Type, Authorization` in the preflight;
+non-JSON or >1 KB bodies are 400; codes are never logged):
+
+* `POST /auth/peek` `{"code"}` — a read-only check (page load / link
+  prefetch must never burn the code): `200 {"discordId", "username",
+  "expiresAt"}` | `404 {"error", reason: "unknown"}` | `410 {"error",
+  reason: "expired" | "used"}`.
+* `POST /auth/redeem` `{"code"}` — the atomic single-use burn: `200
+  {"token", "discordId", "username", "expiresAt"}` (the `ms_…` web
+  token) | the same errors.
+* `POST /auth/logout` — bearer token → `204`; deletes the token only when
+  it is a `web` one (a `manual` one is left alone; an unknown token is a
+  no-op).
+
+`/upload` and `/whoami` authenticate through the same store.
 
 Plain JavaScript ES modules, **zero runtime dependencies**. Tests run with
 bare Node (no install needed):
@@ -252,7 +292,7 @@ fields, except that `author`, `identifier` and `guid` are always forced.
 | Status | Meaning |
 |--------|---------|
 | `202`  | Queued. Body was streamed to the `inbox` release and the processing workflow was woken. The mod appears in `catalog.json` within a few minutes (raw sets: after all parts arrive). |
-| `401`  | Missing / unknown / revoked token, or one minted before usernames were recorded (mint a new one). |
+| `401`  | Missing / unknown / revoked / expired token. |
 | `411`  | `Content-Length` header missing (required). |
 | `413`  | A single upload over 100 MB (Cloudflare free-plan request-body limit) — split the file into parts. |
 | `429`  | Daily per-user byte quota exceeded (default 2 GiB/day, UTC). |
@@ -304,8 +344,11 @@ Notes:
 ## Test status
 
 `node --test` is fully green offline: Discord signature
-verification (valid/invalid/missing/wrong key), PING/PONG, token minting /
-replacement / revocation (only hashes stored), the upload path
+verification (valid/invalid/missing/wrong key), PING/PONG, manual-token
+minting / replacement (D1, only hashes stored), login-code mint / peek /
+redeem (TTL, single-use atomic burn incl. a concurrent-redeem race,
+invalidation by a newer code, 5-per-60-s rate limit, 90-day web tokens,
+`/auth/*` handler + CORS + bad bodies), the upload path
 (401/411/413/400/429/503, upload sets incl. `.zip` and `metadata.json`, happy path with the **same stream object**
 forwarded to GitHub, 502-without-dispatch on GitHub failure, CORS
 preflight), and the command-registration script (bulk-PUT payload shape,

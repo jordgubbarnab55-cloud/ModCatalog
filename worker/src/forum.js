@@ -10,7 +10,7 @@
 // inbox/pipeline. THIS WORKER DOES NO FILE TRANSFER; it only ever passes
 // fresh signed CDN URLs (never stored) to the workflow.
 //
-// State lives in D1 (env.FORUM, `forum_posts`); the only KV key is the
+// State lives in D1 (env.DB, `forum_posts`); the only KV key is the
 // archived-thread pagination cursor. Quota reuses the /upload KV key
 // (`quota:<discordId>`, bytes per UTC day).
 //
@@ -271,8 +271,8 @@ async function fetchCatalog(env, fetchImpl, now) {
 export async function forumTick(env, fetchImpl, now = new Date()) {
   const out = { skipped: false, candidates: 0, prompts: 0, dispatches: 0,
     published: 0, unconfirmed: 0, deleted: 0, backoff: false, stopped: false };
-  if (!env.FORUM_GUILD_ID || !env.FORUM_CHANNEL_ID || !env.FORUM) return { ...out, skipped: true };
-  const d1 = env.FORUM;
+  if (!env.FORUM_GUILD_ID || !env.FORUM_CHANNEL_ID || !env.DB) return { ...out, skipped: true };
+  const d1 = env.DB;
   const cutoff = BigInt(env.FORUM_CUTOFF_THREAD_ID || "0");
   let tagMap = {};
   try { tagMap = JSON.parse(env.FORUM_TAG_MAP || "{}"); } catch { tagMap = {}; }
@@ -706,16 +706,16 @@ export async function handleForumStatus(request, env, fetchImpl, now = new Date(
   const tid = String(body.thread_id || "");
   if (!/^\d{1,32}$/.test(tid)) return new Response("bad thread_id", { status: 400 });
   if (body.status !== "uploaded" && body.status !== "failed") return new Response("bad status", { status: 400 });
-  const { row } = await q(env.FORUM, "getRow", tid);
+  const { row } = await q(env.DB, "getRow", tid);
   if (!row || row.status !== "processing") return new Response(null, { status: 204 });
   if (body.status === "uploaded") {
     const sha = String(body.pkg_sha256 || "").toLowerCase();
-    if (/^[0-9a-f]{64}$/.test(sha)) await q(env.FORUM, "setUploaded", tid, sha);
+    if (/^[0-9a-f]{64}$/.test(sha)) await q(env.DB, "setUploaded", tid, sha);
   } else {
     const reason = String(body.reason || "the ingest failed").slice(0, 300);
-    if ((await q(env.FORUM, "markFailedProcessing", tid, reason)).changes) {
+    if ((await q(env.DB, "markFailedProcessing", tid, reason)).changes) {
       await refundQuota(env, row.owner_id, row.pkg_size, now);
-      await editPrompt(env, fetchImpl, env.FORUM, tid, row.prompt_msg,
+      await editPrompt(env, fetchImpl, env.DB, tid, row.prompt_msg,
         `❌ **Couldn't publish:** ${reason}`);
     }
   }

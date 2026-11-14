@@ -46,16 +46,19 @@ CATALOG_URL = "https://jordgubbarnab55-cloud.github.io/ModCatalog/catalog.json"
 [triggers]
 crons = [ "* * * * *" ]   # testing cadence; back to "*/5 * * * *" after
 
+# Upload quotas (`quota:<id>`) and the inbox release-id cache only;
+# tokens and login codes live in D1 (binding `DB`, below).
 [[kv_namespaces]]
 binding = "TOKENS"
 id = "a0739f0e764f41d69db0345c8c3d7a6f"
 
-# Forum ingestion state. Create it first:
+# D1 (binding `DB`, renamed from `FORUM` by migration 0002): forum
+# ingestion state (0001) + tokens / login codes (0002). Create it first:
 #   npx wrangler d1 create modcatalog-forum      (copy the database_id below)
-# then apply the migration:
-#   npx wrangler d1 migrations apply modcatalog-forum
+# then apply the migrations:
+#   npx wrangler d1 migrations apply modcatalog-forum --remote
 [[d1_databases]]
-binding = "FORUM"
+binding = "DB"
 database_name = "modcatalog-forum"
 database_id = "780fb9ed-e5ca-4f8b-a528-9494c701f249"
 

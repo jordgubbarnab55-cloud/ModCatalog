@@ -2,7 +2,7 @@
 // API. Plain JS ES module, zero dependencies.
 //
 // Everything that talks to a service is injectable: the handler takes `env`
-// (KV binding + secrets + vars) and a `fetch` function, so tests can supply
+// (KV + D1 bindings + secrets + vars) and a `fetch` function, so tests can supply
 // fakes. The Worker never stores file bytes: the upload body is streamed
 // straight through to GitHub releases (no buffering, no cold storage).
 //
@@ -22,6 +22,10 @@
 import {
   forumTick, handleForumClick, handleForumStatus, q,
 } from "./forum.js";
+import {
+  authenticateToken, mintManualToken, peekLoginCode,
+  redeemLoginCode, deleteWebToken,
+} from "./auth.js";
 
 const MAX_BODY_BYTES = 100 * 1024 * 1024; // Cloudflare free-plan request-body limit
 const DEFAULT_DAILY_BYTES = 2147483648; // 2 GiB of uploads per user per UTC day
@@ -44,24 +48,6 @@ function json(obj, status = 200, extra = {}) {
     status,
     headers: { "Content-Type": "application/json", ...extra },
   });
-}
-
-async function sha256Hex(input) {
-  const data = typeof input === "string" ? new TextEncoder().encode(input) : input;
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function base64url(bytes) {
-  let bin = "";
-  bytes.forEach((b) => { bin += String.fromCharCode(b); });
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function newToken() {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return "mm_" + base64url(bytes);
 }
 
 // "__" separates the fields of an inbox asset name, so a file name never
@@ -95,18 +81,13 @@ export function uploaderStamp(discordId, username) {
   return `${discordId}-${hex}`;
 }
 
-const STALE_TOKEN_MESSAGE =
-  "this token is outdated; mint a new one with /token in Discord";
-
-// Looks the bearer token up: { rec: { discordId, username } } or { response }.
+// Looks the bearer token up in D1 (auth.js):
+// { rec: { discordId, username, kind } } or { response }.
 async function authenticate(request, env, cors) {
   const auth = request.headers.get("Authorization") || "";
   if (!auth.startsWith("Bearer ")) return { response: json({ error: "missing bearer token" }, 401, cors) };
-  const tokenHash = await sha256Hex(auth.slice("Bearer ".length));
-  const raw = await env.TOKENS.get(`tok:${tokenHash}`);
-  if (!raw) return { response: json({ error: "unknown or revoked token" }, 401, cors) };
-  const rec = JSON.parse(raw);
-  if (!rec.username) return { response: json({ error: STALE_TOKEN_MESSAGE }, 401, cors) };
+  const rec = await authenticateToken(env.DB, auth.slice("Bearer ".length), new Date());
+  if (!rec) return { response: json({ error: "unknown or revoked token" }, 401, cors) };
   return { rec };
 }
 
@@ -128,7 +109,7 @@ export default {
 /**
  * Testable handler.
  * @param {Request} request
- * @param {object} env  { TOKENS: kv-like, DISCORD_PUBLIC_KEY, GITHUB_TOKEN,
+ * @param {object} env  { TOKENS: kv-like, DB: D1, DISCORD_PUBLIC_KEY, GITHUB_TOKEN,
  *                       GITHUB_OWNER, GITHUB_REPO, ALLOWED_ORIGIN,
  *                       UPLOAD_DAILY_LIMIT? }
  * @param {(url:string, init?:object)=>Promise<Response>} fetchImpl
@@ -138,6 +119,9 @@ export async function handle(request, env, fetchImpl) {
   if (url.pathname === "/discord") return handleDiscord(request, env, fetchImpl);
   if (url.pathname === "/upload") return handleUpload(request, env, fetchImpl);
   if (url.pathname === "/whoami") return handleWhoami(request, env);
+  if (url.pathname === "/auth/peek") return handleAuthPeek(request, env);
+  if (url.pathname === "/auth/redeem") return handleAuthRedeem(request, env);
+  if (url.pathname === "/auth/logout") return handleAuthLogout(request, env);
   if (url.pathname === "/forum/status") return handleForumStatus(request, env, fetchImpl);
   return json({ error: "not found" }, 404);
 }
@@ -183,32 +167,13 @@ async function handleDiscord(request, env, fetchImpl) {
   const user = (body.member && body.member.user) || body.user;
   const username = user && typeof user.username === "string" ? user.username : "";
 
-  const sub = (body.data && body.data.options || [])
-    .find((o) => o.type === 2); // Subcommand
   const command = (body.data && body.data.name) || "";
-
-  if (command === "token" && sub && sub.name === "revoke") {
-    const hash = await env.TOKENS.get(`user:${discordId}`);
-    if (hash) {
-      await env.TOKENS.delete(`tok:${hash}`);
-      await env.TOKENS.delete(`user:${discordId}`);
-    }
-    const ack = await sendCallback(body, { type: 4, data: { content: "Your upload token has been revoked.", flags: 64 } }, fetchImpl);
-    if (!ack) return json({ error: "discord callback failed" }, 502);
-    return new Response(null, { status: 202 }); // ACK: no body
-  }
 
   if (command === "token") {
     if (!username) return json({ error: "missing username" }, 400);
-    // One active token per user: invalidate the previous one.
-    const oldHash = await env.TOKENS.get(`user:${discordId}`);
-    if (oldHash) await env.TOKENS.delete(`tok:${oldHash}`);
-
-    const token = newToken();
-    const hash = await sha256Hex(token); // only the hash is stored, ever
-    await env.TOKENS.put(`tok:${hash}`,
-      JSON.stringify({ discordId, username, createdAt: new Date().toISOString() }));
-    await env.TOKENS.put(`user:${discordId}`, hash);
+    // One `manual` token per user: minting replaces the previous one
+    // (re-minting is also the revoke path); web tokens are left alone.
+    const token = await mintManualToken(env.DB, { discordId, username, now: new Date() });
     const ack = await sendCallback(body, {
       type: 4,
       data: {
@@ -234,7 +199,7 @@ async function handleForumInteraction(body, env, fetchImpl) {
   if (typeof customId !== "string" || !customId.startsWith("forum_")) {
     return json({ error: "unknown component" }, 400);
   }
-  if (!env.FORUM) return json({ error: "forum not configured" }, 503);
+  if (!env.DB) return json({ error: "forum not configured" }, 503);
   const i = customId.indexOf(":");
   const tid = i > 0 ? customId.slice(i + 1) : "";
   if (!/^\d{1,32}$/.test(tid)) return json({ error: "bad component" }, 400);
@@ -242,7 +207,7 @@ async function handleForumInteraction(body, env, fetchImpl) {
     (body.member && (body.member.id || (body.member.user && body.member.user.id))) ||
     (body.user && body.user.id);
   if (!clickerId) return json({ error: "missing user id" }, 400);
-  const { row } = await q(env.FORUM, "getRow", tid);
+  const { row } = await q(env.DB, "getRow", tid);
   if (!row || clickerId !== row.owner_id) {
     const msg = !row
       ? "This prompt is no longer active."
@@ -255,7 +220,7 @@ async function handleForumInteraction(body, env, fetchImpl) {
   // 3 s window (the Worker keeps running until the async I/O settles).
   const ack = await sendCallback(body, { type: 6 }, fetchImpl);
   if (!ack) return json({ error: "discord callback failed" }, 502);
-  void handleForumClick(env, fetchImpl, env.FORUM, { customId, clickerId });
+  void handleForumClick(env, fetchImpl, env.DB, { customId, clickerId });
   return new Response(null, { status: 202 }); // ACK: no body
 }
 
@@ -443,6 +408,80 @@ async function handleWhoami(request, env) {
   const auth = await authenticate(request, env, cors);
   if (auth.response) return auth.response;
   return json({ discordId: auth.rec.discordId, username: auth.rec.username }, 200, cors);
+}
+
+// ------------------------------------------------------- POST /auth/*
+// The one-time login-code flow (the site link `#login=<code>` redeems it
+// for a long-lived web token): peek = read-only check (page load / link
+// prefetch must never burn the code), redeem = the atomic single-use burn,
+// logout = delete the web token (a manual token is left alone). Same CORS
+// pattern as /whoami. Codes and tokens are never logged.
+
+const AUTH_MAX_BODY = 1024;
+
+function authCors(env) {
+  return { "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN };
+}
+
+function authPreflight(env) {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      ...authCors(env),
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    },
+  });
+}
+
+// { code } or { response } (405/400). Rejects non-JSON and >1 KB bodies.
+async function readCodeBody(request, env) {
+  const cors = authCors(env);
+  if (request.method === "OPTIONS") return { response: authPreflight(env) };
+  if (request.method !== "POST") return { response: json({ error: "POST only" }, 405, cors) };
+  const raw = await request.text();
+  if (raw.length > AUTH_MAX_BODY) return { response: json({ error: "body too large" }, 400, cors) };
+  let body;
+  try { body = JSON.parse(raw); } catch { return { response: json({ error: "bad json" }, 400, cors) }; }
+  const code = body && typeof body.code === "string" ? body.code : "";
+  if (!code) return { response: json({ error: "missing code" }, 400, cors) };
+  return { code };
+}
+
+function codeError(res, cors) {
+  if (res.reason === "unknown")
+    return json({ error: "unknown code", reason: "unknown" }, 404, cors);
+  return json({ error: `code ${res.reason}`, reason: res.reason }, 410, cors);
+}
+
+async function handleAuthPeek(request, env) {
+  const read = await readCodeBody(request, env);
+  if (read.response) return read.response;
+  const res = await peekLoginCode(env.DB, read.code, new Date());
+  if (res.ok)
+    return json({ discordId: res.discordId, username: res.username, expiresAt: res.expiresAt }, 200, authCors(env));
+  return codeError(res, authCors(env));
+}
+
+async function handleAuthRedeem(request, env) {
+  const read = await readCodeBody(request, env);
+  if (read.response) return read.response;
+  const res = await redeemLoginCode(env.DB, read.code, new Date());
+  if (res.ok)
+    return json({ token: res.token, discordId: res.discordId, username: res.username, expiresAt: res.expiresAt }, 200, authCors(env));
+  return codeError(res, authCors(env));
+}
+
+async function handleAuthLogout(request, env) {
+  const cors = authCors(env);
+  if (request.method === "OPTIONS") return authPreflight(env);
+  if (request.method !== "POST") return json({ error: "POST only" }, 405, cors);
+  const auth = request.headers.get("Authorization") || "";
+  if (auth.startsWith("Bearer ")) {
+    // Only a `web` token is deleted; a `manual` one is left alone.
+    await deleteWebToken(env.DB, auth.slice("Bearer ".length));
+  }
+  return new Response(null, { status: 204, headers: cors });
 }
 
 async function getInboxReleaseId(env, fetchImpl) {

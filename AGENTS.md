@@ -304,16 +304,14 @@ injected: `handle(request, env, fetch)`.
 
 - **`POST /discord`** — Interactions endpoint (slash commands over HTTPS;
   **no gateway/WebSocket bot**). Ed25519 signature check required (401
-  without). PING→PONG. `/token` mints `mm_` + base64url(32 random bytes);
-  only `sha256(token)` is stored (KV `tok:<hash>` → `{discordId, username,
-  createdAt}`, `user:<discordId>`); `username` is the interaction user's
-  account name (`member.user.username`, or `user.username` in a DM — not
-  `global_name`, not the nick);
-  one active token per user (a new one invalidates the old); reply is
-  ephemeral (flags 64). `/token revoke` deletes both keys (the Worker
-  still accepts that subcommand, but the registered command is a bare,
-  parameter-free `/token` — subcommand-bearing commands never rendered
-  for this app — so revoke = mint again and ignore the new token).
+  without). PING→PONG. `/token` mints a **`manual`** token
+  (`mm_` + base64url(32 random bytes)); only `sha256(token)` is stored
+  (a D1 `tokens` row: `discordId`, `username`, `kind`, `createdAt`,
+  `expiresAt`); `username` is the interaction user's account name
+  (`member.user.username`, or `user.username` in a DM — not
+  `global_name`, not the nick); one manual token per user — a re-mint
+  replaces the old one (the command is a bare, parameter-free `/token`;
+  re-minting is the revoke path). Reply is ephemeral (flags 64).
   Response flow: 202 ACK (no body) + `POST
   /interactions/{id}/{token}/callback` (`{type:4, data:{content,
   flags:64}}`; PING ACKs with a PONG callback) — a flat inline 200
@@ -335,11 +333,23 @@ injected: `handle(request, env, fetch)`.
   = `ALLOWED_ORIGIN` only; allowed headers `Authorization, Content-Type,
   X-Filename, X-Upload-Id, X-File-Idx, X-Part-Idx, X-Part-Count`.
 - **`GET /whoami`** — bearer token → `200 {discordId, username}`, else 401; CORS
-  as for `/upload` (`GET`, `Authorization` in the preflight). A token record
-  **without** `username` (minted before verified authors) gets 401 with a
-  "mint a new one with /token" message on `/whoami` **and** `/upload`.
+  as for `/upload` (`GET`, `Authorization` in the preflight).
   `/upload` stamps every inbox asset name with `<discordId>-<hex username>`
   (see the inbox flow).
+- **Auth (D1)** — tokens and one-time login codes live in D1 (binding
+  `DB`, database `modcatalog-forum`, `worker/src/auth.js`), so one user
+  can hold many tokens: kind `manual` (`/token`; one per user, re-mint
+  replaces, never expires) and kind `web` (a redeemed login code;
+  90-day expiry). Login codes (`lc_…`) are 5-minute TTL, single-use,
+  burned atomically; minting one invalidates the user's older unused
+  codes (rate limit 5 per 60 s). Endpoints (same CORS pattern as
+  `/whoami`; `Content-Type, Authorization` in the preflight; non-JSON /
+  >1 KB bodies are 400; codes are never logged): `POST /auth/peek`
+  (read-only `200 {discordId, username, expiresAt}` | 404 unknown | 410
+  expired/used), `POST /auth/redeem` (the atomic burn → `200 {token, …}`,
+  an `ms_…` web token), `POST /auth/logout` (204; deletes the token only
+  when it is a `web` one). KV (`TOKENS`) keeps only the upload quota and
+  the inbox release-id cache.
 - KV is eventually consistent — a slightly late quota count is acceptable.
 - Fine-grained `GITHUB_TOKEN` **expires** (max 1 year); expired token →
   502s. Calendar-reminder at creation.

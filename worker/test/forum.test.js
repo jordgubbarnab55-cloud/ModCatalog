@@ -1,13 +1,14 @@
 // Offline tests for the forum ingestion (node --test, Node 20+).
 //
-// Fake D1 (with transition semantics + changed-row counts), Fake KV,
-// injected fetch (records calls), and a generated Ed25519 keypair.
-// Nothing touches the network.
+// Fake D1 (the shared helper; transition semantics + changed-row
+// counts), Fake KV, injected fetch (records calls), and a generated
+// Ed25519 keypair. Nothing touches the network.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { handle } from "../src/index.js";
-import { forumTick, handleForumClick, handleForumStatus, FSQL } from "../src/forum.js";
+import { forumTick, handleForumClick, handleForumStatus } from "../src/forum.js";
+import { FakeD1 } from "./helpers/fake-d1.js";
 
 // ------------------------------------------------------------- fakes
 
@@ -18,156 +19,6 @@ class FakeKV {
   async delete(k) { this.map.delete(k); }
 }
 
-// A fake D1 that implements exactly the forum statements (FSQL) with
-// SQLite-like transition semantics; run() reports meta.changes.
-class FakeD1 {
-  constructor() { this.rows = new Map(); }
-  row(tid) { return this.rows.get(tid) || null; }
-  insert(tid, owner_id, owner_name, status, last_msg_id, created_at) {
-    if (this.rows.has(tid)) return 0;
-    this.rows.set(tid, {
-      thread_id: tid, owner_id, owner_name, status,
-      prompt_msg: null, last_msg_id, created_at,
-      prompt_sent_at: null, auto_due: null, dispatched_at: null,
-      attempts: 0, detail: null, ident_key: null, pkg_sha256: null, pkg_size: null,
-    });
-    return 1;
-  }
-  prepare(sql) {
-    const self = this;
-    return {
-      bind(...args) {
-        const run = () => self.exec(sql, args);
-        return {
-          __exec: run,
-          run: async () => ({ meta: { changes: run() } }),
-          first: async () => {
-            const out = run();
-            return Array.isArray(out) ? (out[0] || null) : out;
-          },
-          all: async () => {
-            const out = run();
-            return { results: Array.isArray(out) ? out : (out ? [out] : []) };
-          },
-        };
-      },
-    };
-  }
-  batch(stmts) {
-    const out = [];
-    for (const st of stmts) out.push({ meta: { changes: st.__exec() } });
-    return out;
-  }
-  // Returns the changed-row count (or the row/rows for reads).
-  exec(sql, a) {
-    const R = (tid) => this.rows.get(tid);
-    const set = (tid, patch) => { if (R(tid)) Object.assign(R(tid), patch); };
-    switch (sql) {
-      case FSQL.insertRow:
-        return this.insert(a[0], a[1], a[2], a[3], a[4], a[5]);
-      case FSQL.getRow:
-        return R(a[0]) || null;
-      case FSQL.listStatus:
-        return [...this.rows.values()].filter((r) => r.status === a[0]);
-      case FSQL.deleteRow: {
-        const n = this.rows.delete(a[0]) ? 1 : 0;
-        return n;
-      }
-      case FSQL.setPrompted: {
-        const r = R(a[0]);
-        if (r && r.status === "prompting") {
-          set(a[0], { status: "awaiting", prompt_msg: a[1], prompt_sent_at: a[2], auto_due: a[3], last_msg_id: a[4] });
-          return 1;
-        }
-        return 0;
-      }
-      case FSQL.packageAppeared: {
-        const r = R(a[0]);
-        if (r && r.status === "awaiting_package") { set(a[0], { status: "prompting", last_msg_id: a[1] }); return 1; }
-        return 0;
-      }
-      case FSQL.startProcessing: {
-        const r = R(a[0]);
-        if (r && r.status === "awaiting") {
-          set(a[0], { status: "processing", dispatched_at: a[1], attempts: r.attempts + 1 });
-          return 1;
-        }
-        return 0;
-      }
-      case FSQL.revertToAwaiting: {
-        const r = R(a[0]);
-        if (r && r.status === "processing") { set(a[0], { status: "awaiting", dispatched_at: null }); return 1; }
-        return 0;
-      }
-      case FSQL.setDispatched: {
-        const r = R(a[0]);
-        if (r && r.status === "processing") { set(a[0], { pkg_size: a[1], detail: "dispatched" }); return 1; }
-        return 0;
-      }
-      case FSQL.markDeclined: {
-        const r = R(a[0]);
-        if (r && r.status === "awaiting") { set(a[0], { status: "declined" }); return 1; }
-        return 0;
-      }
-      case FSQL.markUnconfirmed: {
-        const r = R(a[0]);
-        if (r && r.status === "processing") { set(a[0], { status: "unconfirmed" }); return 1; }
-        return 0;
-      }
-      case FSQL.markPublished: {
-        const r = R(a[0]);
-        if (r && (r.status === "processing" || r.status === "unconfirmed")) { set(a[0], { status: "published" }); return 1; }
-        return 0;
-      }
-      case FSQL.markFailed: {
-        const r = R(a[0]);
-        if (r && r.status === "awaiting") { set(a[0], { status: "failed", detail: a[1] }); return 1; }
-        return 0;
-      }
-      case FSQL.markFailedProcessing: {
-        const r = R(a[0]);
-        if (r && r.status === "processing") { set(a[0], { status: "failed", detail: a[1] }); return 1; }
-        return 0;
-      }
-      case FSQL.setUploaded: {
-        const r = R(a[0]);
-        if (r && r.status === "processing") { set(a[0], { pkg_sha256: a[1], detail: "uploaded" }); return 1; }
-        return 0;
-      }
-      case FSQL.touchLastMsg: {
-        const r = R(a[0]);
-        if (r) { set(a[0], { last_msg_id: a[1] }); return 1; }
-        return 0;
-      }
-      case FSQL.setIdentKey: {
-        const r = R(a[0]);
-        if (r && r.status === "processing") { set(a[0], { ident_key: a[1] }); return 1; }
-        return 0;
-      }
-      case FSQL.setPromptMsg: {
-        const r = R(a[0]);
-        if (r) { r.prompt_msg = a[1]; return 1; }
-        return 0;
-      }
-      case FSQL.cleanupTerminal:
-      case FSQL.cleanupAwaitingPackage:
-      case FSQL.cleanupUnconfirmed: {
-        let n = 0;
-        for (const r of [...this.rows.values()]) {
-          const hit =
-            (sql === FSQL.cleanupTerminal &&
-              ["published", "declined", "failed"].includes(r.status)) ||
-            (sql === FSQL.cleanupAwaitingPackage && r.status === "awaiting_package") ||
-            (sql === FSQL.cleanupUnconfirmed && r.status === "unconfirmed");
-          if (hit && r.created_at < a[0]) { this.rows.delete(r.thread_id); n++; }
-        }
-        return n;
-      }
-      default:
-        throw new Error(`FakeD1: unknown statement ${sql}`);
-    }
-  }
-}
 
 // The Discord/GitHub/catalog stand-in: URL-routed fake fetch.
 function makeServices(overrides = {}) {
@@ -258,7 +109,7 @@ function makeServices(overrides = {}) {
 function makeEnv(overrides = {}) {
   return {
     TOKENS: new FakeKV(),
-    FORUM: new FakeD1(),
+    DB: new FakeD1(),
     DISCORD_BOT_TOKEN: "bot-token",
     GITHUB_OWNER: "o", GITHUB_REPO: "r", GITHUB_TOKEN: "gh-token",
     FORUM_GUILD_ID: "g1", FORUM_CHANNEL_ID: "c1",
@@ -303,8 +154,8 @@ function setThread(d, { owner = "u1", bot = false, name = "My Mod", zip = null, 
 
 // A D1 row in `awaiting` (prompt already posted) — the state a click finds.
 function awaitingRow(env, { attempts = 0, status = "awaiting" } = {}) {
-  env.FORUM.insert("9000", "u1", "ownername", status, "m1", NOW.toISOString());
-  const row = env.FORUM.row("9000");
+  env.DB.insert("9000", "u1", "ownername", status, "m1", NOW.toISOString());
+  const row = env.DB.row("9000");
   row.prompt_msg = "p1";
   row.prompt_sent_at = NOW.toISOString();
   row.auto_due = NOW.toISOString();
@@ -313,7 +164,7 @@ function awaitingRow(env, { attempts = 0, status = "awaiting" } = {}) {
 }
 
 async function click(env, d, customId, clickerId) {
-  return handleForumClick(env, d.fetchImpl, env.FORUM, { customId, clickerId }, NOW);
+  return handleForumClick(env, d.fetchImpl, env.DB, { customId, clickerId }, NOW);
 }
 
 async function interaction(env, d, customId, clickerId) {
@@ -356,9 +207,9 @@ test("new thread with an owner zip gets a prompt; a duplicate tick prompts once"
   const d = makeServices({ activeThreads: [t], messages: [["2001", msgs]] });
   const r1 = await forumTick(env, d.fetchImpl, NOW);
   assert.equal(r1.prompts, 1, "prompt posted");
-  assert.equal(env.FORUM.row("2001").status, "awaiting");
+  assert.equal(env.DB.row("2001").status, "awaiting");
   const auto = new Date(NOW.getTime() + 36 * 3600 * 1000).toISOString();
-  assert.equal(env.FORUM.row("2001").auto_due, auto, "auto_due anchored to prompt time");
+  assert.equal(env.DB.row("2001").auto_due, auto, "auto_due anchored to prompt time");
   // second tick, same state: no new prompt
   const r2 = await forumTick(env, d.fetchImpl, NOW);
   assert.equal(r2.prompts, 0, "no second prompt");
@@ -373,7 +224,7 @@ test("two concurrent ticks: exactly one prompt (INSERT OR IGNORE)", async () => 
   const d = makeServices({ activeThreads: [t], messages: [["2002", msgs]] });
   await Promise.all([forumTick(env, d.fetchImpl, NOW), forumTick(env, d.fetchImpl, NOW)]);
   assert.equal(d.state.posts.length, 1, "exactly one prompt");
-  assert.equal(env.FORUM.row("2002").status, "awaiting");
+  assert.equal(env.DB.row("2002").status, "awaiting");
 });
 
 test("owner-only attachments: a third party's zip is ignored", async () => {
@@ -384,7 +235,7 @@ test("owner-only attachments: a third party's zip is ignored", async () => {
   const env = makeEnv();
   const d = makeServices({ activeThreads: [t], messages: [["2003", msgs]] });
   await forumTick(env, d.fetchImpl, NOW);
-  assert.equal(env.FORUM.row("2003").status, "awaiting_package", "no owner zip -> awaiting_package, no prompt");
+  assert.equal(env.DB.row("2003").status, "awaiting_package", "no owner zip -> awaiting_package, no prompt");
   assert.equal(d.state.posts.length, 0);
 
   // the owner later attaches a zip (a new message): the next tick prompts
@@ -393,7 +244,7 @@ test("owner-only attachments: a third party's zip is ignored", async () => {
   t.last_message_id = "m3";
   const d2 = makeServices({ activeThreads: [t], messages: [["2003", msgs]] });
   await forumTick(env, d2.fetchImpl, NOW);
-  assert.equal(env.FORUM.row("2003").status, "awaiting", "zip appeared -> prompt -> awaiting");
+  assert.equal(env.DB.row("2003").status, "awaiting", "zip appeared -> prompt -> awaiting");
   assert.equal(d2.state.posts.length, 1);
 });
 
@@ -402,7 +253,7 @@ test("bot-authored threads are skipped", async () => {
   const env = makeEnv();
   const d = makeServices({ activeThreads: [t], messages: [["2004", msgs]] });
   await forumTick(env, d.fetchImpl, NOW);
-  assert.equal(env.FORUM.row("2004"), null, "no row for a bot thread");
+  assert.equal(env.DB.row("2004"), null, "no row for a bot thread");
 });
 
 test("threads at/below the cutoff are never considered", async () => {
@@ -410,7 +261,7 @@ test("threads at/below the cutoff are never considered", async () => {
   const env = makeEnv();
   const d = makeServices({ activeThreads: [t], messages: [["1000", msgs]] });
   await forumTick(env, d.fetchImpl, NOW);
-  assert.equal(env.FORUM.row("1000"), null);
+  assert.equal(env.DB.row("1000"), null);
 });
 
 test("a click by a non-owner is rejected ephemerally; no state change", async () => {
@@ -423,7 +274,7 @@ test("a click by a non-owner is rejected ephemerally; no state change", async ()
   const cb = d.state.callbacks.at(-1);
   assert.equal(cb.type, 7, "ephemeral reply");
   assert.match(cb.data.content, /Only the thread's author/);
-  assert.equal(env.FORUM.row("9000").status, "awaiting", "unchanged");
+  assert.equal(env.DB.row("9000").status, "awaiting", "unchanged");
   assert.equal(d.state.dispatches.length, 0);
 });
 
@@ -439,8 +290,8 @@ test("a click by the owner dispatches exactly once; a double click and a tick ra
     forumTick(env, d.fetchImpl, NOW),
   ]);
   assert.equal(d.state.dispatches.length, 1, "exactly one dispatch");
-  assert.equal(env.FORUM.row("9000").status, "processing");
-  assert.equal(env.FORUM.row("9000").attempts, 1);
+  assert.equal(env.DB.row("9000").status, "processing");
+  assert.equal(env.DB.row("9000").attempts, 1);
 
   // a late second click: no second dispatch
   await click(env, d, "forum_publish:9000", "u1");
@@ -456,7 +307,7 @@ test("a click by the owner dispatches exactly once; a double click and a tick ra
   assert.equal(meta.version, "");
   assert.equal(meta.author, "ownername");
   assert.equal(inputs.package_url, "https://cdn.discordapp.com/a.zip?ex=1");
-  assert.equal(env.FORUM.row("9000").ident_key, "u1.mymod", "ident_key computed at dispatch");
+  assert.equal(env.DB.row("9000").ident_key, "u1.mymod", "ident_key computed at dispatch");
   // the prompt was edited to processing (buttons removed)
   const edit = d.state.edits.at(-1);
   assert.match(edit.content, /Processing/);
@@ -492,7 +343,7 @@ test("decline is terminal and suppresses the auto-publish", async () => {
   awaitingRow(env);
   const res = await click(env, d, "forum_decline:9000", "u1");
   assert.equal(res, null);
-  assert.equal(env.FORUM.row("9000").status, "declined");
+  assert.equal(env.DB.row("9000").status, "declined");
   const edit = d.state.edits.at(-1);
   assert.match(edit.content, /Declined/);
   assert.deepEqual(edit.components, []);
@@ -522,7 +373,7 @@ test("a deleted thread (404) deletes the row; no upload", async () => {
   d2.state.deleted404 = true;
   d2.state.messages.set("9000", []);
   await forumTick(env, d2.fetchImpl, NOW);
-  assert.equal(env.FORUM.row("9000"), null, "row deleted");
+  assert.equal(env.DB.row("9000"), null, "row deleted");
   assert.equal(d2.state.dispatches.length, 0);
 });
 
@@ -532,8 +383,8 @@ test("dispatch failure: revert to awaiting + retry; after 3 attempts -> failed",
   setThread(d, { zip: {} });
   awaitingRow(env);
   await click(env, d, "forum_publish:9000", "u1");
-  assert.equal(env.FORUM.row("9000").status, "awaiting", "reverted");
-  assert.equal(env.FORUM.row("9000").attempts, 1);
+  assert.equal(env.DB.row("9000").status, "awaiting", "reverted");
+  assert.equal(env.DB.row("9000").attempts, 1);
   const retryEdit = d.state.edits.at(-1);
   assert.match(retryEdit.content, /retried automatically/);
   assert.ok(retryEdit.components.length === 1, "buttons restored for the retry");
@@ -542,8 +393,8 @@ test("dispatch failure: revert to awaiting + retry; after 3 attempts -> failed",
   for (let i = 0; i < 2; i++) {
     await click(env, d, "forum_publish:9000", "u1");
   }
-  assert.equal(env.FORUM.row("9000").attempts, 3);
-  assert.equal(env.FORUM.row("9000").status, "failed", "failed after 3 attempts");
+  assert.equal(env.DB.row("9000").attempts, 3);
+  assert.equal(env.DB.row("9000").status, "failed", "failed after 3 attempts");
   assert.match(d.state.edits.at(-1).content, /3 times/);
   // three failed attempts total (all 500); the prompt says failed
   assert.equal(d.state.dispatches.length, 3, "three attempts, all failed");
@@ -557,7 +408,7 @@ test("a row with 3 prior attempts fails without dispatching", async () => {
   setThread(d, { zip: {} });
   awaitingRow(env, { attempts: 3 });
   await click(env, d, "forum_publish:9000", "u1");
-  assert.equal(env.FORUM.row("9000").status, "failed");
+  assert.equal(env.DB.row("9000").status, "failed");
   assert.equal(d.state.dispatches.length, 0);
 });
 
@@ -568,8 +419,8 @@ test("quota: exceeded -> terminal failed with a clear message, no dispatch", asy
   setThread(d, { zip: { size: 100 } }); // 100 + 100 > 150
   awaitingRow(env);
   await click(env, d, "forum_publish:9000", "u1");
-  assert.equal(env.FORUM.row("9000").status, "failed", "terminal: no per-tick retry spam");
-  assert.match(env.FORUM.row("9000").detail, /daily upload limit reached/);
+  assert.equal(env.DB.row("9000").status, "failed", "terminal: no per-tick retry spam");
+  assert.match(env.DB.row("9000").detail, /daily upload limit reached/);
   assert.equal(d.state.dispatches.length, 0);
   assert.match(d.state.edits.at(-1).content, /daily upload limit reached/);
 });
@@ -578,8 +429,8 @@ test("ingest failure callback: refund + failed + prompt edit; uploaded callback 
   const env = makeEnv();
   const d = makeServices();
   // a processed row: processing, pkg_size charged
-  env.FORUM.insert("9000", "u1", "ownername", "processing", "m1", NOW.toISOString());
-  const row = env.FORUM.row("9000");
+  env.DB.insert("9000", "u1", "ownername", "processing", "m1", NOW.toISOString());
+  const row = env.DB.row("9000");
   row.prompt_msg = "p1";
   row.dispatched_at = NOW.toISOString();
   row.pkg_size = 100;
@@ -598,8 +449,8 @@ test("ingest failure callback: refund + failed + prompt edit; uploaded callback 
     ts: Math.floor(Date.now() / 1000) });
   const res1 = await post(JSON.parse(body1), await sign(body1));
   assert.equal(res1.status, 204);
-  assert.equal(env.FORUM.row("9000").status, "failed");
-  assert.equal(env.FORUM.row("9000").detail, "bad package");
+  assert.equal(env.DB.row("9000").status, "failed");
+  assert.equal(env.DB.row("9000").detail, "bad package");
   assert.equal(JSON.parse(await env.TOKENS.get("quota:u1")).bytes, 0, "quota refunded");
   assert.match(d.state.edits.at(-1).content, /bad package/);
 
@@ -612,8 +463,8 @@ test("ingest failure callback: refund + failed + prompt edit; uploaded callback 
     ts: Math.floor(Date.now() / 1000) });
   const res2 = await post(JSON.parse(body2), await sign(body2));
   assert.equal(res2.status, 204);
-  assert.equal(env.FORUM.row("9000").pkg_sha256, sha);
-  assert.equal(env.FORUM.row("9000").detail, "uploaded");
+  assert.equal(env.DB.row("9000").pkg_sha256, sha);
+  assert.equal(env.DB.row("9000").detail, "uploaded");
 });
 
 test("status callback: bad signature is rejected; only processing rows are acted on", async () => {
@@ -626,48 +477,48 @@ test("status callback: bad signature is rejected; only processing rows are acted
     method: "POST", body, headers: { "X-Forum-Signature": "aa".repeat(32) },
   }), env, d.fetchImpl);
   assert.equal(res.status, 401, "bad signature");
-  assert.equal(env.FORUM.row("9000").status, "awaiting", "no change");
+  assert.equal(env.DB.row("9000").status, "awaiting", "no change");
 });
 
 test("watchdog: processing without confirmation -> unconfirmed; later catalog appearance -> published", async () => {
   const env = makeEnv();
   const d = makeServices({ catalog: { mods: [] } });
-  env.FORUM.insert("9000", "u1", "ownername", "processing", "m1", NOW.toISOString());
-  const row = env.FORUM.row("9000");
+  env.DB.insert("9000", "u1", "ownername", "processing", "m1", NOW.toISOString());
+  const row = env.DB.row("9000");
   row.prompt_msg = "p1";
   row.dispatched_at = new Date(NOW.getTime() - 31 * 60 * 1000).toISOString();
   row.ident_key = "u1.mymod";
   await forumTick(env, d.fetchImpl, NOW);
-  assert.equal(env.FORUM.row("9000").status, "unconfirmed", "watchdog fired");
+  assert.equal(env.DB.row("9000").status, "unconfirmed", "watchdog fired");
   assert.match(d.state.edits.at(-1).content, /No confirmation yet/);
   // a fresh row (still processing, recent) is NOT touched
   row.status = "processing";
   row.dispatched_at = NOW.toISOString();
   await forumTick(env, d.fetchImpl, NOW);
-  assert.equal(env.FORUM.row("9000").status, "processing", "recent processing untouched");
+  assert.equal(env.DB.row("9000").status, "processing", "recent processing untouched");
   // the mod appears in the catalog (updated >= dispatched_at)
   d.state.catalog = { mods: [{ id: "u1.MyMod", updated: NOW.toISOString() }] };
   await forumTick(env, d.fetchImpl, NOW);
-  assert.equal(env.FORUM.row("9000").status, "published");
+  assert.equal(env.DB.row("9000").status, "published");
   assert.match(d.state.edits.at(-1).content, /Published/);
   // an OLD catalog entry (updated < dispatched_at) must NOT count (collision case)
   row.status = "processing";
   row.dispatched_at = NOW.toISOString();
   d.state.catalog = { mods: [{ id: "u1.MyMod", updated: "2025-01-01T00:00:00Z" }] };
   await forumTick(env, d.fetchImpl, NOW);
-  assert.equal(env.FORUM.row("9000").status, "processing", "stale entry: not published");
+  assert.equal(env.DB.row("9000").status, "processing", "stale entry: not published");
 });
 
 test("an unconfirmed row flips to published when the mod appears later", async () => {
   const env = makeEnv();
   const d = makeServices({ catalog: { mods: [{ id: "u1.MyMod", updated: NOW.toISOString() }] } });
-  env.FORUM.insert("9000", "u1", "ownername", "unconfirmed", "m1", NOW.toISOString());
-  const row = env.FORUM.row("9000");
+  env.DB.insert("9000", "u1", "ownername", "unconfirmed", "m1", NOW.toISOString());
+  const row = env.DB.row("9000");
   row.prompt_msg = "p1";
   row.dispatched_at = new Date(NOW.getTime() - 2 * 3600 * 1000).toISOString();
   row.ident_key = "u1.mymod";
   await forumTick(env, d.fetchImpl, NOW);
-  assert.equal(env.FORUM.row("9000").status, "published", "late confirmation wins");
+  assert.equal(env.DB.row("9000").status, "published", "late confirmation wins");
 });
 
 test("cleanup: awaiting_package > 36h, terminal rows > 48h, unconfirmed > 48h", async () => {
@@ -675,7 +526,7 @@ test("cleanup: awaiting_package > 36h, terminal rows > 48h, unconfirmed > 48h", 
   const d = makeServices();
   const old36 = new Date(NOW.getTime() - 37 * 3600 * 1000).toISOString();
   const old48 = new Date(NOW.getTime() - 49 * 3600 * 1000).toISOString();
-  const mk = (tid, status, created) => env.FORUM.insert(tid, "u1", "n", status, "m1", created);
+  const mk = (tid, status, created) => env.DB.insert(tid, "u1", "n", status, "m1", created);
   mk("3001", "awaiting_package", old36);
   mk("3002", "awaiting_package", NOW.toISOString());
   mk("3003", "published", old48);
@@ -684,13 +535,13 @@ test("cleanup: awaiting_package > 36h, terminal rows > 48h, unconfirmed > 48h", 
   mk("3006", "unconfirmed", old48);
   mk("3007", "unconfirmed", NOW.toISOString());
   await forumTick(env, d.fetchImpl, NOW);
-  assert.equal(env.FORUM.row("3001"), null, "awaiting_package swept");
-  assert.ok(env.FORUM.row("3002"), "recent awaiting_package kept");
-  assert.equal(env.FORUM.row("3003"), null, "published swept");
-  assert.equal(env.FORUM.row("3004"), null, "declined swept");
-  assert.equal(env.FORUM.row("3005"), null, "failed swept");
-  assert.equal(env.FORUM.row("3006"), null, "unconfirmed swept at 48h");
-  assert.ok(env.FORUM.row("3007"), "recent unconfirmed kept (still reconciling)");
+  assert.equal(env.DB.row("3001"), null, "awaiting_package swept");
+  assert.ok(env.DB.row("3002"), "recent awaiting_package kept");
+  assert.equal(env.DB.row("3003"), null, "published swept");
+  assert.equal(env.DB.row("3004"), null, "declined swept");
+  assert.equal(env.DB.row("3005"), null, "failed swept");
+  assert.equal(env.DB.row("3006"), null, "unconfirmed swept at 48h");
+  assert.ok(env.DB.row("3007"), "recent unconfirmed kept (still reconciling)");
 });
 
 test("a stuck prompting row (prompt post failed) is retried on a later tick", async () => {
@@ -698,14 +549,14 @@ test("a stuck prompting row (prompt post failed) is retried on a later tick", as
   const [t, msgs] = thread("2005", { zip: {} });
   const d = makeServices({ activeThreads: [t], postPromptFail: true, messages: [["2005", msgs]] });
   await forumTick(env, d.fetchImpl, NOW);
-  assert.equal(env.FORUM.row("2005").status, "prompting", "stuck: post failed");
-  assert.equal(env.FORUM.row("2005").prompt_msg, null);
+  assert.equal(env.DB.row("2005").status, "prompting", "stuck: post failed");
+  assert.equal(env.DB.row("2005").prompt_msg, null);
   // 20 minutes later the Discord post succeeds
-  env.FORUM.row("2005").created_at = new Date(NOW.getTime() - 20 * 60 * 1000).toISOString();
+  env.DB.row("2005").created_at = new Date(NOW.getTime() - 20 * 60 * 1000).toISOString();
   const d2 = makeServices({ activeThreads: [t], messages: [["2005", msgs]] });
   const r = await forumTick(env, d2.fetchImpl, NOW);
   assert.equal(r.prompts, 1, "retried and posted");
-  assert.equal(env.FORUM.row("2005").status, "awaiting");
+  assert.equal(env.DB.row("2005").status, "awaiting");
 });
 
 test("the catalog is fetched only when needed, with ETag", async () => {
@@ -715,8 +566,8 @@ test("the catalog is fetched only when needed, with ETag", async () => {
   await forumTick(env, d.fetchImpl, NOW);
   assert.equal(d.state.catalogFetches.length, 0, "no catalog fetch without need");
   // a pending row: fetched, and the second tick uses the ETag
-  env.FORUM.insert("9000", "u1", "ownername", "processing", "m1", NOW.toISOString());
-  const row = env.FORUM.row("9000");
+  env.DB.insert("9000", "u1", "ownername", "processing", "m1", NOW.toISOString());
+  const row = env.DB.row("9000");
   row.prompt_msg = "p1";
   row.dispatched_at = NOW.toISOString();
   row.ident_key = "u1.mymod";
@@ -753,8 +604,8 @@ test("a zip that vanished before dispatch fails gracefully", async () => {
   setThread(d, {}); // no zip now
   awaitingRow(env);
   await click(env, d, "forum_publish:9000", "u1");
-  assert.equal(env.FORUM.row("9000").status, "failed");
-  assert.match(env.FORUM.row("9000").detail, /no longer attached/);
+  assert.equal(env.DB.row("9000").status, "failed");
+  assert.match(env.DB.row("9000").detail, /no longer attached/);
   assert.match(d.state.edits.at(-1).content, /no longer attached/);
   assert.equal(d.state.dispatches.length, 0);
 });
@@ -764,10 +615,10 @@ test("an archived thread: prompt updates post a fresh message and re-point the r
   const d = makeServices();
   setThread(d, { zip: {} });
   awaitingRow(env);
-  env.FORUM.row("9000").prompt_msg = "px"; // a prompt id with no matching post in the fake
+  env.DB.row("9000").prompt_msg = "px"; // a prompt id with no matching post in the fake
   await click(env, d, "forum_publish:9000", "u1");
-  assert.equal(env.FORUM.row("9000").status, "processing");
-  const firstPrompt = env.FORUM.row("9000").prompt_msg;
+  assert.equal(env.DB.row("9000").status, "processing");
+  const firstPrompt = env.DB.row("9000").prompt_msg;
   // the thread is now archived: PATCH of the prompt message 400s (50083,
   // verified live) — the fallback posts a fresh message and the row
   // points at it
@@ -785,21 +636,21 @@ test("an archived thread: prompt updates post a fresh message and re-point the r
     ts: Math.floor(Date.now() / 1000) });
   const res = await post(JSON.parse(body), await sign(body));
   assert.equal(res.status, 204);
-  assert.equal(env.FORUM.row("9000").status, "failed");
-  assert.match(env.FORUM.row("9000").detail, /the ingest failed/);
+  assert.equal(env.DB.row("9000").status, "failed");
+  assert.match(env.DB.row("9000").detail, /the ingest failed/);
   const fresh = d.state.posts.at(-1);
   assert.ok(fresh, "a fresh message was posted");
   assert.match(fresh.content, /Couldn't publish/);
   assert.notEqual(fresh.id, firstPrompt, "the row points at the fresh message");
-  assert.equal(env.FORUM.row("9000").prompt_msg, fresh.id);
+  assert.equal(env.DB.row("9000").prompt_msg, fresh.id);
 });
 
 test("status callback: a stale timestamp (replay) is rejected", async () => {
   const env = makeEnv();
   const d = makeServices();
-  env.FORUM.insert("9000", "u1", "ownername", "processing", "m1", NOW.toISOString());
-  env.FORUM.row("9000").prompt_msg = "p1";
-  env.FORUM.row("9000").dispatched_at = NOW.toISOString();
+  env.DB.insert("9000", "u1", "ownername", "processing", "m1", NOW.toISOString());
+  env.DB.row("9000").prompt_msg = "p1";
+  env.DB.row("9000").dispatched_at = NOW.toISOString();
   const sign = async (body) => {
     const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("s3cret"),
       { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -812,7 +663,7 @@ test("status callback: a stale timestamp (replay) is rejected", async () => {
   const stale = await post({ thread_id: "9000", status: "failed", reason: "replayed",
     ts: Math.floor(Date.now() / 1000) - 3600 });
   assert.equal(stale.status, 400, "stale ts rejected");
-  assert.equal(env.FORUM.row("9000").status, "processing", "no change");
+  assert.equal(env.DB.row("9000").status, "processing", "no change");
   const noTs = await post({ thread_id: "9000", status: "failed", reason: "no ts" });
   assert.equal(noTs.status, 400, "missing ts rejected");
 });
@@ -833,8 +684,8 @@ test("budget: a tick stops gracefully when the caps run out (no throw)", async (
     d.state.messages.set(id, [{ id: "m1", author: { id: "u1", bot: false }, content: "hi",
       attachments: [{ filename: "m.zip", url: "https://cdn.discordapp.com/a.zip?ex=1", size: 100 }] }]);
     d.state.users.set("u1", { id: "u1", username: "ownername", bot: false });
-    env.FORUM.insert(id, "u1", "ownername", "awaiting", "m1", NOW.toISOString());
-    const row = env.FORUM.row(id);
+    env.DB.insert(id, "u1", "ownername", "awaiting", "m1", NOW.toISOString());
+    const row = env.DB.row(id);
     row.prompt_msg = "p" + id;
     row.prompt_sent_at = NOW.toISOString();
     row.auto_due = NOW.toISOString();
@@ -844,7 +695,7 @@ test("budget: a tick stops gracefully when the caps run out (no throw)", async (
   assert.ok(r.stopped, "the tick stopped before exhausting the caps");
   assert.ok(r.dispatches > 0 && r.dispatches < ids.length,
     "some (not all) dispatched: " + r.dispatches);
-  const remaining = ids.filter((id) => env.FORUM.row(id).status === "awaiting");
+  const remaining = ids.filter((id) => env.DB.row(id).status === "awaiting");
   assert.ok(remaining.length > 0, "the rest stays awaiting for the next tick");
 });
 
@@ -860,7 +711,7 @@ test("unchanged threads are skipped before the cap (no starvation)", async () =>
       last_message_id: "m1" });
     d.state.messages.set(id, []);
     d.state.users.set("u2", { id: "u2", username: "u2", bot: false });
-    env.FORUM.insert(id, "u2", "n" + i, "awaiting_package", "m1", NOW.toISOString());
+    env.DB.insert(id, "u2", "n" + i, "awaiting_package", "m1", NOW.toISOString());
   }
   const n1 = thread("9301", { owner: "u3", zip: {} });
   const n2 = thread("9302", { owner: "u3", zip: {} });
@@ -870,12 +721,12 @@ test("unchanged threads are skipped before the cap (no starvation)", async () =>
   d.state.users.set("u3", { id: "u3", username: "u3", bot: false });
   const r = await forumTick(env, d.fetchImpl, NOW);
   assert.equal(r.prompts, 2, "both new threads prompted despite the 12 unchanged ones");
-  assert.equal(env.FORUM.row("9301").status, "awaiting");
-  assert.equal(env.FORUM.row("9302").status, "awaiting");
+  assert.equal(env.DB.row("9301").status, "awaiting");
+  assert.equal(env.DB.row("9302").status, "awaiting");
   // the unchanged ones were NOT re-processed: no messages fetch for them
   const msgFetches = d.state.captured
     ? 0 : 0; // (the fake does not record URLs; assert via D1 instead:)
   for (let i = 1; i <= 12; i++) {
-    assert.equal(env.FORUM.row("920" + i).status, "awaiting_package", "untouched");
+    assert.equal(env.DB.row("920" + i).status, "awaiting_package", "untouched");
   }
 });
