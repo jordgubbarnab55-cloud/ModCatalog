@@ -1774,9 +1774,10 @@ def ingest_forum(client: PackageClient, owner: str, repo: str, args) -> int:
 
 # `notify` POSTs a results file's events to the Worker's /catalog/events:
 # 10 events per request, X-Catalog-Signature = the hex HMAC-SHA256 of the
-# raw body keyed with the shared secret. One retry, 2 s later, on a network
-# error or 5xx; 4xx is final. The secret is never printed. `build.py notify`
-# never raises and always exits 0 (failures are logged).
+# raw body keyed with the shared secret, and an explicit User-Agent
+# (Cloudflare 403s the default Python-urllib one). One retry, 2 s later,
+# on a network error or 5xx; 4xx is final. The secret is never printed.
+# `build.py notify` never raises and always exits 0 (failures are logged).
 
 def sign_body(secret: str, body: bytes) -> str:
     """X-Catalog-Signature: the hex HMAC-SHA256 of the raw body."""
@@ -1801,7 +1802,8 @@ def post_event(url: str, secret: str, payload: bytes, *, delay: float = 2.0,
         try:
             req = urllib.request.Request(url + "/catalog/events", data=payload, method="POST",
                                         headers={"Content-Type": "application/json",
-                                                 "X-Catalog-Signature": sign_body(secret, payload)})
+                                                 "X-Catalog-Signature": sign_body(secret, payload),
+                                                 "User-Agent": "ModCatalog-Notify"})
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 code = r.status
             if 200 <= code < 300:

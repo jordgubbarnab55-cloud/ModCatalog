@@ -256,10 +256,11 @@ to 64 KiB.
   POST the events to `CATALOG_CALLBACK_URL/catalog/events` (defaults from
   the env of the same names; missing → a one-line note, exit 0): 10
   events per request, `X-Catalog-Signature` = the hex HMAC-SHA256 of the
-  raw body keyed with `CATALOG_CALLBACK_SECRET`, one retry 2 s later on a
-  network error or 5xx (4xx is final); never raises, always exit 0
-  (failures logged), the secret is never printed. A missing results file
-  is a no-op.
+  raw body keyed with `CATALOG_CALLBACK_SECRET` (plus an explicit
+  `User-Agent` — Cloudflare 403s the default `Python-urllib` one), one
+  retry 2 s later on a network error or 5xx (4xx is final); never
+  raises, always exit 0 (failures logged), the secret is never printed.
+  A missing results file is a no-op.
 - **`--client local --root <dir>`** selects the directory-backed fake
   (releases = folders, assets = files, mtime = created-at) so the whole
   pipeline runs offline; the default `gh` client shells out to the
