@@ -157,6 +157,18 @@
       "uploader": "1509993694902878381",
       "updated": "2026-11-06T23:35:52Z",
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.residentevilcharacterssurviors-c77c898f/cover-260fd23e.png"
+    },
+    {
+      "id": "1509993694902878381.ZZTestPlan4",
+      "name": "ZZ Test Plan4",
+      "author": "uncool_1234",
+      "version": "1.0.0",
+      "description": "plan 4 live test package",
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.zztestplan4-99e57c54/ZZ-Test-Plan4-1.0.0.zip",
+      "size": 736,
+      "sha256": "e8b0c278ea3cbddb8798e0d2609495749a1b06dc33fda7233788fdbad18cebf7",
+      "uploader": "1509993694902878381",
+      "updated": "2026-11-14T15:16:33Z"
     }
   ]
 }
