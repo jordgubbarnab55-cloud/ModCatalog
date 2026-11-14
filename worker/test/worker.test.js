@@ -90,6 +90,7 @@ function makeEnv(kv, pub, overrides = {}) {
     TOKENS: kv,
     DB: overrides.DB || (kv.DB ||= new FakeD1()),
     DISCORD_PUBLIC_KEY: pub,
+    DISCORD_BOT_TOKEN: "bot_test_token",
     GITHUB_TOKEN: "gh_test_token",
     GITHUB_OWNER: "octo",
     GITHUB_REPO: "repo",
@@ -111,6 +112,7 @@ test("PING with a valid signature gets PONG via the callback endpoint", async ()
   const cb = f.calls.find((c) => c.url.includes("/interactions/") && c.url.includes("/callback"));
   assert.ok(cb, "PONG sent via the callback endpoint");
   assert.deepEqual(JSON.parse(cb.init.body), { type: 1 });
+  assert.equal(cb.init.headers.Authorization, "Bot bot_test_token", "the callback is authenticated with the bot token");
 });
 
 test("invalid signature is rejected 401", async () => {
@@ -145,6 +147,7 @@ test("/token mints a token; only the hash is stored; reply is ephemeral", async 
   const resp = JSON.parse(cb.init.body);
   assert.equal(resp.type, 4, "CHANNEL_MESSAGE_WITH_SOURCE");
   assert.equal(resp.data.flags, 64);
+  assert.equal(cb.init.headers.Authorization, "Bot bot_test_token", "the callback is authenticated with the bot token");
   const token = resp.data.content.match(/(mm_[A-Za-z0-9_-]+)/)[1];
   assert.ok(token.startsWith("mm_"));
 
@@ -579,6 +582,7 @@ test("mods_upload: 202, one callback with an ephemeral link button; the code is 
   const resp = JSON.parse(cb.init.body);
   assert.equal(resp.type, 4, "CHANNEL_MESSAGE_WITH_SOURCE");
   assert.equal(resp.data.flags, 64, "ephemeral");
+  assert.equal(cb.init.headers.Authorization, "Bot bot_test_token", "the callback is authenticated with the bot token");
   assert.ok(resp.data.content.includes("works once"), "the copy explains the one-time link");
   assert.equal(resp.data.components.length, 1, "one action row");
   const [button] = resp.data.components[0].components;

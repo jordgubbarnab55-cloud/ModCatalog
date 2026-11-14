@@ -63,6 +63,7 @@ async function tokenViaDiscord(env, f, id = "42", username = "alice") {
   }), env, f);
   assert.equal(res.status, 202);
   const cb = f.calls.filter((c) => c.url.includes("/interactions/") && c.url.includes("/callback")).at(-1);
+  assert.equal(cb.init.headers.Authorization, "Bot bot_test_token", "the callback is authenticated with the bot token");
   const m = JSON.parse(cb.init.body).data.content.match(/(mm_[A-Za-z0-9_-]+)/);
   assert.ok(m, "token in reply");
   return m[1];
@@ -73,6 +74,7 @@ function makeEnv(db, overrides = {}) {
     TOKENS: new FakeKV(),
     DB: db,
     DISCORD_PUBLIC_KEY: "",
+    DISCORD_BOT_TOKEN: "bot_test_token",
     GITHUB_TOKEN: "gh_test_token",
     GITHUB_OWNER: "octo",
     GITHUB_REPO: "repo",

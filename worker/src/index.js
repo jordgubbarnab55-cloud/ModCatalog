@@ -164,7 +164,7 @@ async function handleDiscord(request, env, fetchImpl) {
   if (body.type !== 2) {
     // PING is ACKed through the callback endpoint too (type 1 = PONG).
     if (body.type !== 1) return json({ error: "unexpected interaction type" }, 400);
-    const pong = await sendCallback(body, { type: 1 }, fetchImpl);
+    const pong = await sendCallback(body, env, { type: 1 }, fetchImpl);
     if (!pong) return json({ error: "discord callback failed" }, 502);
     return new Response(null, { status: 202 }); // ACK: no body
   }
@@ -180,7 +180,7 @@ async function handleDiscord(request, env, fetchImpl) {
     // One `manual` token per user: minting replaces the previous one
     // (re-minting is also the revoke path); web tokens are left alone.
     const token = await mintManualToken(env.DB, { discordId, username, now: new Date() });
-    const ack = await sendCallback(body, {
+    const ack = await sendCallback(body, env, {
       type: 4,
       data: {
         content:
@@ -209,17 +209,17 @@ async function handleModsUpload(body, env, fetchImpl) {
     // type 4 + flags 64: an ephemeral REPLY. (A type-7 callback on a
     // message-component interaction is applied to the ORIGINAL message —
     // it would edit the public #mods post in place.)
-    const ack = await sendCallback(body, { type: 4, data: { content: "I couldn't find your Discord account name, so I can't sign you in.", flags: 64 } }, fetchImpl);
+    const ack = await sendCallback(body, env, { type: 4, data: { content: "I couldn't find your Discord account name, so I can't sign you in.", flags: 64 } }, fetchImpl);
     if (!ack) return json({ error: "discord callback failed" }, 502);
     return new Response(null, { status: 202 }); // ACK: no body
   }
   const res = await mintLoginCode(env.DB, { discordId, username, now: new Date() });
   if (res.limited) {
-    const ack = await sendCallback(body, { type: 4, data: { content: "You're clicking too fast, try again in a minute.", flags: 64 } }, fetchImpl);
+    const ack = await sendCallback(body, env, { type: 4, data: { content: "You're clicking too fast, try again in a minute.", flags: 64 } }, fetchImpl);
     if (!ack) return json({ error: "discord callback failed" }, 502);
     return new Response(null, { status: 202 }); // ACK: no body
   }
-  const ack = await sendCallback(body, {
+  const ack = await sendCallback(body, env, {
     type: 4,
     data: {
       content:
@@ -247,7 +247,7 @@ async function handleModsSignout(body, env, fetchImpl) {
   const { discordId } = interactionUser(body);
   if (!discordId) return json({ error: "missing user id" }, 400);
   await revokeAllTokens(env.DB, discordId);
-  const ack = await sendCallback(body, { type: 4, data: { content: "Signed out everywhere. Your /token token and all browser sessions are revoked.", flags: 64 } }, fetchImpl);
+  const ack = await sendCallback(body, env, { type: 4, data: { content: "Signed out everywhere. Your /token token and all browser sessions are revoked.", flags: 64 } }, fetchImpl);
   if (!ack) return json({ error: "discord callback failed" }, 502);
   return new Response(null, { status: 202 }); // ACK: no body
 }
@@ -256,10 +256,13 @@ async function handleModsSignout(body, env, fetchImpl) {
 // body), then POST the actual response to the interaction callback
 // endpoint (valid for 15 minutes; the 3 s budget covers the ACK only).
 // Returns true when Discord accepted the callback.
-async function sendCallback(body, responseObj, fetchImpl) {
+async function sendCallback(body, env, responseObj, fetchImpl) {
   const res = await fetchImpl(
     `https://discord.com/api/v10/interactions/${body.id}/${body.token}/callback`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(responseObj) });
+    { method: "POST", headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
+      }, body: JSON.stringify(responseObj) });
   if (res.ok || res.status === 204) return true;
   console.error(`discord callback failed: HTTP ${res.status} ${await res.text().catch(() => "")}`);
   return false;
