@@ -169,6 +169,18 @@
       "sha256": "e8b0c278ea3cbddb8798e0d2609495749a1b06dc33fda7233788fdbad18cebf7",
       "uploader": "1509993694902878381",
       "updated": "2026-11-14T15:16:33Z"
+    },
+    {
+      "id": "1509993694902878381.ZZTestPlan4b",
+      "name": "ZZ Test Plan4b",
+      "author": "uncool_1234",
+      "version": "1.0.0",
+      "description": "plan 4 live test, second package",
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.zztestplan4b-a925e70a/ZZ-Test-Plan4b-1.0.0.zip",
+      "size": 743,
+      "sha256": "6ebc86d3e9c8d8281680eee6442304cc9f09ce5a20cb8489636c7e98c76043a9",
+      "uploader": "1509993694902878381",
+      "updated": "2026-11-14T15:20:27Z"
     }
   ]
 }
