@@ -61,9 +61,9 @@ DISCORD_BOT_TOKEN=... MODS_CHANNEL_ID=... node scripts/post-mods-message.mjs [--
 
 No argument posts a new message; `--edit <messageId>` PATCHes the existing
 one (how to refresh it after a copy or button change); `--dry-run` prints
-the exact request without sending it. **Live message: id `PLACEHOLDER_MSG`
-in channel `PLACEHOLDER_CH` (guild `1565286417968398356`)** — re-edit it with
-`--edit PLACEHOLDER_MSG`.
+the exact request without sending it. **Live message: id `1571116888073703498`
+in channel `1571116545638142025` (guild `1565286417968398356`)** — re-edit it with
+`--edit 1571116888073703498`.
 
 ## Auth: D1 tokens and login codes
 
