@@ -34,6 +34,18 @@
       "uploader": "1509993694902878381",
       "updated": "2026-11-06T23:35:59Z",
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.residentevilcharacterssurviors-c77c898f/cover-260fd23e.png"
+    },
+    {
+      "id": "1571293769163219027.ZZTestFinal",
+      "name": "ZZ Test Final",
+      "author": "berry049516",
+      "version": "1.0.1",
+      "description": "E2E plan-6 test: version bump",
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1571293769163219027.zztestfinal-3163989d/ZZ-Test-Final-1.0.1.zip",
+      "size": 732,
+      "sha256": "cf3acf5fed307a0906312a3019b9eebd4f10ffc1b531b6b54ac5e413b7b990dd",
+      "uploader": "1571293769163219027",
+      "updated": "2026-11-14T23:34:58Z"
     }
   ]
 }
