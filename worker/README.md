@@ -48,6 +48,11 @@ the entry point to the web uploader. Two buttons, one action row, handled by
 * **`forum_*`** custom ids still go to the forum prompt handler; any other
   custom id 400s (as before).
 
+All button replies are **type-4 + `flags: 64`** (ephemeral *replies*). A
+type-7 callback on a message-component interaction is applied to the
+**original message** — it edits the public #mods post in place — so it is
+deliberately never used here.
+
 `SITE_URL` is a `wrangler.toml` var (the Pages site, ends with `/`);
 `loginLinkUrl` normalizes a missing trailing slash.
 

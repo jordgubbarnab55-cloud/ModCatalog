@@ -605,6 +605,7 @@ test("mods_upload: a missing username is an ephemeral error and mints nothing", 
   assert.equal(res.status, 202);
   const cb = fetchImpl.calls[0];
   const resp = JSON.parse(cb.init.body);
+  assert.equal(resp.type, 4, "an ephemeral reply, not a defer (a type-7 callback would EDIT the public message)");
   assert.equal(resp.data.flags, 64, "ephemeral error");
   assert.ok(!resp.data.components, "no link button");
   assert.equal(db.codeRows().length, 0, "nothing minted");
@@ -624,6 +625,7 @@ test("six rapid clicks: the sixth gets the rate-limit message", async () => {
     assert.equal(res.status, 202, `click ${i} ACKs`);
     last = JSON.parse(f.calls[0].init.body);
   }
+  assert.equal(last.type, 4, "the rate-limit reply is an ephemeral reply (never a message edit)");
   assert.equal(last.data.content, "You're clicking too fast, try again in a minute.");
   assert.ok(!last.data.components, "no link button when limited");
   assert.equal(db.codeRows().length, 5, "exactly five codes were minted");
@@ -660,6 +662,7 @@ test("mods_signout: deletes every token of the clicker and invalidates unused co
   // the reply: an ephemeral confirmation, no components
   const cb = fetchImpl.calls[0];
   const resp = JSON.parse(cb.init.body);
+  assert.equal(resp.type, 4, "an ephemeral reply, not a defer (a type-7 callback would EDIT the public message)");
   assert.equal(resp.data.flags, 64);
   assert.ok(resp.data.content.includes("Signed out everywhere"));
 });

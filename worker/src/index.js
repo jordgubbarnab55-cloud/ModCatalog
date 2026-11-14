@@ -219,13 +219,16 @@ async function handleModsUpload(body, env, fetchImpl) {
   const { discordId, username } = interactionUser(body);
   if (!discordId) return json({ error: "missing user id" }, 400);
   if (!username) {
-    const ack = await sendCallback(body, { type: 7, data: { content: "I couldn't find your Discord account name, so I can't sign you in.", flags: 64 } }, fetchImpl);
+    // type 4 + flags 64: an ephemeral REPLY. (A type-7 callback on a
+    // message-component interaction is applied to the ORIGINAL message —
+    // it would edit the public #mods post in place.)
+    const ack = await sendCallback(body, { type: 4, data: { content: "I couldn't find your Discord account name, so I can't sign you in.", flags: 64 } }, fetchImpl);
     if (!ack) return json({ error: "discord callback failed" }, 502);
     return new Response(null, { status: 202 }); // ACK: no body
   }
   const res = await mintLoginCode(env.DB, { discordId, username, now: new Date() });
   if (res.limited) {
-    const ack = await sendCallback(body, { type: 7, data: { content: "You're clicking too fast, try again in a minute.", flags: 64 } }, fetchImpl);
+    const ack = await sendCallback(body, { type: 4, data: { content: "You're clicking too fast, try again in a minute.", flags: 64 } }, fetchImpl);
     if (!ack) return json({ error: "discord callback failed" }, 502);
     return new Response(null, { status: 202 }); // ACK: no body
   }
@@ -250,12 +253,14 @@ async function handleModsUpload(body, env, fetchImpl) {
 }
 
 // The #mods channel's "Sign out everywhere" button: deletes all the
-// clicker's tokens (manual + web) and invalidates unused codes.
+// clicker's tokens (manual + web) and invalidates unused codes. The
+// confirmation is an ephemeral reply (type 4 + flags 64) — never an edit
+// of the public #mods post.
 async function handleModsSignout(body, env, fetchImpl) {
   const { discordId } = interactionUser(body);
   if (!discordId) return json({ error: "missing user id" }, 400);
   await revokeAllTokens(env.DB, discordId);
-  const ack = await sendCallback(body, { type: 7, data: { content: "Signed out everywhere. Your /token token and all browser sessions are revoked.", flags: 64 } }, fetchImpl);
+  const ack = await sendCallback(body, { type: 4, data: { content: "Signed out everywhere. Your /token token and all browser sessions are revoked.", flags: 64 } }, fetchImpl);
   if (!ack) return json({ error: "discord callback failed" }, 502);
   return new Response(null, { status: 202 }); // ACK: no body
 }
