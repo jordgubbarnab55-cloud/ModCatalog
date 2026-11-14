@@ -276,6 +276,29 @@ test("a rejected event with NOTICES unset posts nothing and still succeeds", asy
   assert.equal(f.calls.length, 0, "no Discord call");
 });
 
+test("a 404 on the notices channel fails the event (unrecorded) and a redelivery succeeds", async () => {
+  const env = makeEnv();
+  let noticeAttempts = 0;
+  const f = makeFetch((i, url) => {
+    if (url.endsWith("/channels/88/messages")) {
+      noticeAttempts++;
+      return noticeAttempts === 1 ? new Response("gone", { status: 404 }) : msgOk();
+    }
+    return msgOk();
+  });
+  const r1 = await res(await eventsRequest([rejectedEvent()]), env, f);
+  assert.equal(r1.status, 200);
+  const b1 = await json(r1);
+  assert.equal(b1.results[0].ok, false);
+  assert.match(b1.results[0].error, /404/);
+  assert.ok(!env.DB.seenEvent("rej:42:gid1"), "the failed notice is not recorded (it will be retried)");
+  // redelivery with a working channel: succeeds and is recorded
+  const r2 = await res(await eventsRequest([rejectedEvent()]), env, f);
+  assert.equal(r2.status, 200);
+  assert.deepEqual(await json(r2), { results: [{ eventId: "rej:42:gid1", ok: true }] });
+  assert.ok(env.DB.seenEvent("rej:42:gid1"), "recorded on the successful redelivery");
+});
+
 // ------------------------------------------------ idempotency + retry
 
 test("a duplicate delivery is skipped and makes zero Discord calls", async () => {

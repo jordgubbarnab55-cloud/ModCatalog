@@ -161,10 +161,11 @@ async function postRejection(env, fetchImpl, ev) {
   }
   const title = ev.title ? clean(ev.title, 200) : "unknown";
   const reason = clean(ev.reason || "no reason", 300);
-  await postMessage(env, fetchImpl, env.NOTICES_CHANNEL_ID, {
+  const posted = await postMessage(env, fetchImpl, env.NOTICES_CHANNEL_ID, {
     content: `${MENTION(ev.uploaderId)} your upload of **${title}** was not accepted: ${reason}`.slice(0, 2000),
     allowed_mentions: { parse: [], users: [ev.uploaderId] },
   });
+  if (posted === null) throw new Error("notices channel not found (404)");
   return "posted";
 }
 
