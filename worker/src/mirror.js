@@ -188,7 +188,7 @@ function badEvent(e) {
 export async function handleCatalogEvents(request, env, fetchImpl, now = new Date()) {
   if (request.method !== "POST") return new Response("POST only", { status: 405 });
   const raw = await request.text();
-  if (raw.length > MAX_BODY_BYTES) return new Response("body too large", { status: 400 });
+  if (new TextEncoder().encode(raw).length > MAX_BODY_BYTES) return new Response("body too large", { status: 400 });
   if (!(await hmacMatches(env.CATALOG_CALLBACK_SECRET, raw, request.headers.get("X-Catalog-Signature") || ""))) {
     return new Response("bad signature", { status: 401 });
   }

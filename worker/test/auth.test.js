@@ -297,6 +297,15 @@ test("/auth/* reject non-JSON and oversize bodies with 400, non-POST with 405", 
   assert.equal((await post("/auth/peek", "not json")).status, 400);
   assert.equal((await post("/auth/peek", JSON.stringify({}))).status, 400, "missing code");
   assert.equal((await post("/auth/peek", "x".repeat(1025))).status, 400, "oversize");
+  // 400 '€' = 1,200 bytes (> 1 KB) but only 411 characters: the limit is
+  // in BYTES, not characters
+  const euro = "{" + `\"code\":\"${"€".repeat(400)}\"` + "}";
+  assert.ok(new TextEncoder().encode(euro).length > 1024);
+  assert.ok(euro.length < 1024, "fewer characters than the limit (the old check would have passed)");
+  assert.equal((await post("/auth/peek", euro)).status, 400, "oversize multibyte");
+  const smallEuro = JSON.stringify({ code: "€".repeat(300) }); // 900 bytes: under the limit
+  assert.ok(new TextEncoder().encode(smallEuro).length < 1024);
+  assert.equal((await post("/auth/peek", smallEuro)).status, 404, "ordinary small bodies still pass the size check (unknown code 404)");
   assert.equal((await post("/auth/redeem", "not json")).status, 400);
   assert.equal((await post("/auth/peek", undefined, "GET")).status, 405);
   assert.equal((await post("/auth/redeem", undefined, "GET")).status, 405);

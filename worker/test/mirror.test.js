@@ -137,6 +137,16 @@ test("an over-size body is rejected 400", async () => {
   assert.equal(r.status, 400);
 });
 
+test("an over-size body measured in BYTES (multibyte) is rejected 400", async () => {
+  // 100,000 '€' = 300,000 bytes (> 256 KiB) but < 262,144 characters.
+  const big = JSON.stringify({ ts: Math.floor(Date.now() / 1000), events: [publishedEvent()], pad: "€".repeat(100000) });
+  assert.ok(new TextEncoder().encode(big).length > 256 * 1024);
+  assert.ok(big.length < 256 * 1024, "fewer characters than the byte limit (the old check would have passed)");
+  const headers = { "Content-Type": "application/json", "X-Catalog-Signature": await hmac(SECRET, big) };
+  const r = await res(new Request("https://worker.local/catalog/events", { method: "POST", body: big, headers }), makeEnv(), makeFetch());
+  assert.equal(r.status, 400);
+});
+
 test("a bad event shape is rejected 400", async () => {
   const r = await res(await eventsRequest([publishedEvent({ status: "meh" })]), makeEnv(), makeFetch());
   assert.equal(r.status, 400);

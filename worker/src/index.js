@@ -468,7 +468,7 @@ async function readCodeBody(request, env) {
   if (request.method === "OPTIONS") return { response: authPreflight(env) };
   if (request.method !== "POST") return { response: json({ error: "POST only" }, 405, cors) };
   const raw = await request.text();
-  if (raw.length > AUTH_MAX_BODY) return { response: json({ error: "body too large" }, 400, cors) };
+  if (new TextEncoder().encode(raw).length > AUTH_MAX_BODY) return { response: json({ error: "body too large" }, 400, cors) };
   let body;
   try { body = JSON.parse(raw); } catch { return { response: json({ error: "bad json" }, 400, cors) }; }
   const code = body && typeof body.code === "string" ? body.code : "";
