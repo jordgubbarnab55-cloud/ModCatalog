@@ -1,15 +1,13 @@
 // A fake D1 matching prepared statements by their SQL string, with
 // SQLite-like transition semantics and changed-row counts
-// (`meta.changes`). Covers the forum ingestion statements (FSQL) and the
-// auth statements (ASQL). Nothing touches the network.
+// (`meta.changes`). Covers the auth statements (ASQL) and the mirror
+// statements (MSQL). Nothing touches the network.
 
-import { FSQL } from "../../src/forum.js";
 import { ASQL } from "../../src/auth.js";
 import { MSQL } from "../../src/mirror.js";
 
 export class FakeD1 {
   constructor() {
-    this.rows = new Map();      // forum_posts: tid -> row
     this.tokens = new Map();    // tokens: hash -> row
     this.codes = new Map();     // login_codes: hash -> row
     this.threads = new Map();   // mod_threads: mod_key -> row
@@ -18,19 +16,8 @@ export class FakeD1 {
   // -- test introspection
   tokenRows() { return [...this.tokens.values()]; }
   codeRows() { return [...this.codes.values()]; }
-  row(tid) { return this.rows.get(tid) || null; }
   modThread(key) { return this.threads.get(key) || null; }
   seenEvent(id) { return this.seen.get(id) || null; }
-  insert(tid, owner_id, owner_name, status, last_msg_id, created_at) {
-    if (this.rows.has(tid)) return 0;
-    this.rows.set(tid, {
-      thread_id: tid, owner_id, owner_name, status,
-      prompt_msg: null, last_msg_id, created_at,
-      prompt_sent_at: null, auto_due: null, dispatched_at: null,
-      attempts: 0, detail: null, ident_key: null, pkg_sha256: null, pkg_size: null,
-    });
-    return 1;
-  }
   prepare(sql) {
     const self = this;
     return {
@@ -58,110 +45,7 @@ export class FakeD1 {
   }
   // Returns the changed-row count (or the row/rows for reads).
   exec(sql, a) {
-    const R = (tid) => this.rows.get(tid);
-    const set = (tid, patch) => { if (R(tid)) Object.assign(R(tid), patch); };
     switch (sql) {
-      // ---- forum_posts (FSQL)
-      case FSQL.insertRow:
-        return this.insert(a[0], a[1], a[2], a[3], a[4], a[5]);
-      case FSQL.getRow:
-        return R(a[0]) || null;
-      case FSQL.listStatus:
-        return [...this.rows.values()].filter((r) => r.status === a[0]);
-      case FSQL.deleteRow: {
-        const n = this.rows.delete(a[0]) ? 1 : 0;
-        return n;
-      }
-      case FSQL.setPrompted: {
-        const r = R(a[0]);
-        if (r && r.status === "prompting") {
-          set(a[0], { status: "awaiting", prompt_msg: a[1], prompt_sent_at: a[2], auto_due: a[3], last_msg_id: a[4] });
-          return 1;
-        }
-        return 0;
-      }
-      case FSQL.packageAppeared: {
-        const r = R(a[0]);
-        if (r && r.status === "awaiting_package") { set(a[0], { status: "prompting", last_msg_id: a[1] }); return 1; }
-        return 0;
-      }
-      case FSQL.startProcessing: {
-        const r = R(a[0]);
-        if (r && r.status === "awaiting") {
-          set(a[0], { status: "processing", dispatched_at: a[1], attempts: r.attempts + 1 });
-          return 1;
-        }
-        return 0;
-      }
-      case FSQL.revertToAwaiting: {
-        const r = R(a[0]);
-        if (r && r.status === "processing") { set(a[0], { status: "awaiting", dispatched_at: null }); return 1; }
-        return 0;
-      }
-      case FSQL.setDispatched: {
-        const r = R(a[0]);
-        if (r && r.status === "processing") { set(a[0], { pkg_size: a[1], detail: "dispatched" }); return 1; }
-        return 0;
-      }
-      case FSQL.markDeclined: {
-        const r = R(a[0]);
-        if (r && r.status === "awaiting") { set(a[0], { status: "declined" }); return 1; }
-        return 0;
-      }
-      case FSQL.markUnconfirmed: {
-        const r = R(a[0]);
-        if (r && r.status === "processing") { set(a[0], { status: "unconfirmed" }); return 1; }
-        return 0;
-      }
-      case FSQL.markPublished: {
-        const r = R(a[0]);
-        if (r && (r.status === "processing" || r.status === "unconfirmed")) { set(a[0], { status: "published" }); return 1; }
-        return 0;
-      }
-      case FSQL.markFailed: {
-        const r = R(a[0]);
-        if (r && r.status === "awaiting") { set(a[0], { status: "failed", detail: a[1] }); return 1; }
-        return 0;
-      }
-      case FSQL.markFailedProcessing: {
-        const r = R(a[0]);
-        if (r && r.status === "processing") { set(a[0], { status: "failed", detail: a[1] }); return 1; }
-        return 0;
-      }
-      case FSQL.setUploaded: {
-        const r = R(a[0]);
-        if (r && r.status === "processing") { set(a[0], { pkg_sha256: a[1], detail: "uploaded" }); return 1; }
-        return 0;
-      }
-      case FSQL.touchLastMsg: {
-        const r = R(a[0]);
-        if (r) { set(a[0], { last_msg_id: a[1] }); return 1; }
-        return 0;
-      }
-      case FSQL.setIdentKey: {
-        const r = R(a[0]);
-        if (r && r.status === "processing") { set(a[0], { ident_key: a[1] }); return 1; }
-        return 0;
-      }
-      case FSQL.setPromptMsg: {
-        const r = R(a[0]);
-        if (r) { r.prompt_msg = a[1]; return 1; }
-        return 0;
-      }
-      case FSQL.cleanupTerminal:
-      case FSQL.cleanupAwaitingPackage:
-      case FSQL.cleanupUnconfirmed: {
-        let n = 0;
-        for (const r of [...this.rows.values()]) {
-          const hit =
-            (sql === FSQL.cleanupTerminal &&
-              ["published", "declined", "failed"].includes(r.status)) ||
-            (sql === FSQL.cleanupAwaitingPackage && r.status === "awaiting_package") ||
-            (sql === FSQL.cleanupUnconfirmed && r.status === "unconfirmed");
-          if (hit && r.created_at < a[0]) { this.rows.delete(r.thread_id); n++; }
-        }
-        return n;
-      }
       // ---- tokens + login_codes (ASQL)
       case ASQL.deleteManual: {
         let n = 0;

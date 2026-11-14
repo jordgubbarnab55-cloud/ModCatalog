@@ -354,7 +354,7 @@ injected: `handle(request, env, fetch)`.
   (`SITE_URL` + `#login=<code>`, a fragment, never a query; the 6th click
   in 60 s is rate-limited) and `mods_signout` runs `revokeAllTokens`
   (deletes every token of the clicker, invalidates unused codes);
-  `forum_*` goes to the forum prompt handler, other ids 400.
+  any other custom id 400s.
 - **`POST /upload`** — `Bearer` token → 401; `Content-Length` required →
   411; over 100 MB per part → 413 **before any GitHub call** (the
   free-plan request-body limit); per-user daily **byte** quota (default

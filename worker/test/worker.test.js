@@ -667,21 +667,8 @@ test("mods_signout: deletes every token of the clicker and invalidates unused co
   assert.ok(resp.data.content.includes("Signed out everywhere"));
 });
 
-test("forum_* components still reach the forum handler; unknown ones 400", async () => {
-  // forum_unknown:123 with no such row: the forum handler's "no longer
-  // active" ephemeral reply (a type-2 command would have 400'd instead)
-  const kv = new FakeKV();
-  const db = new FakeD1();
-  const fetchImpl = makeFetch();
-  const res = await handle(await discordRequest({
-    type: 3, data: { custom_id: "forum_publish:123" },
-    member: { user: { id: "42", username: "alice" } },
-  }), makeEnv(kv, await publicKeyB64(), { DB: db }), fetchImpl);
-  assert.equal(res.status, 202);
-  const resp = JSON.parse(fetchImpl.calls[0].init.body);
-  assert.ok(resp.data.content.includes("no longer active"), "routed to the forum handler");
-
-  for (const customId of ["other_thing", "", null, undefined]) {
+test("unknown custom ids 400", async () => {
+  for (const customId of ["forum_publish:123", "other_thing", "", null, undefined]) {
     const r = await handle(await discordRequest({
       type: 3, data: customId == null ? {} : { custom_id: customId },
       member: { user: { id: "42", username: "alice" } },

@@ -15,13 +15,6 @@
 //     an optional metadata.json upload, all tagged with the same X-Upload-Id;
 //     the workflow reassembles, applies the metadata and zips on the runner
 //     (this Worker cannot — 10 ms CPU, stateless).
-//
-// Forum ingestion (Phase 1): a scheduled 5-minute tick checks one dedicated
-// forum channel and dispatches owner-attached zips to the catalog pipeline;
-// the poller, state machine and dispatch builder live in forum.js.
-import {
-  forumTick, handleForumClick, handleForumStatus, q,
-} from "./forum.js";
 import {
   authenticateToken, mintManualToken, peekLoginCode,
   redeemLoginCode, deleteWebToken, mintLoginCode, revokeAllTokens,
@@ -121,11 +114,6 @@ export default {
   async fetch(request, env) {
     return handle(request, env, fetch);
   },
-  // The forum poller: one tick every 5 minutes (wrangler cron). The
-  // scheduled handler gets the bindings on `ctx`, not `env`.
-  async scheduled(event, ctx) {
-    return forumTick(ctx, fetch, new Date());
-  },
 };
 
 /**
@@ -145,7 +133,6 @@ export async function handle(request, env, fetchImpl) {
   if (url.pathname === "/auth/redeem") return handleAuthRedeem(request, env);
   if (url.pathname === "/auth/logout") return handleAuthLogout(request, env);
   if (url.pathname === "/catalog/events") return handleCatalogEvents(request, env, fetchImpl);
-  if (url.pathname === "/forum/status") return handleForumStatus(request, env, fetchImpl);
   return json({ error: "not found" }, 404);
 }
 
@@ -171,8 +158,6 @@ async function handleDiscord(request, env, fetchImpl) {
     const customId = body.data && body.data.custom_id;
     if (customId === "mods_upload") return handleModsUpload(body, env, fetchImpl);
     if (customId === "mods_signout") return handleModsSignout(body, env, fetchImpl);
-    if (typeof customId === "string" && customId.startsWith("forum_"))
-      return handleForumInteraction(body, env, fetchImpl);
     return json({ error: "unknown component" }, 400);
   }
 
@@ -264,37 +249,6 @@ async function handleModsSignout(body, env, fetchImpl) {
   await revokeAllTokens(env.DB, discordId);
   const ack = await sendCallback(body, { type: 4, data: { content: "Signed out everywhere. Your /token token and all browser sessions are revoked.", flags: 64 } }, fetchImpl);
   if (!ack) return json({ error: "discord callback failed" }, 502);
-  return new Response(null, { status: 202 }); // ACK: no body
-}
-
-// The forum prompt's buttons (message-component interactions, type 3).
-// Fast path (the 3 s window): signature + one D1 read + one callback.
-// Heavy work (dispatch, prompt edits) runs AFTER the 202 ACK.
-async function handleForumInteraction(body, env, fetchImpl) {
-  const customId = body.data && body.data.custom_id;
-  if (typeof customId !== "string" || !customId.startsWith("forum_")) {
-    return json({ error: "unknown component" }, 400);
-  }
-  if (!env.DB) return json({ error: "forum not configured" }, 503);
-  const i = customId.indexOf(":");
-  const tid = i > 0 ? customId.slice(i + 1) : "";
-  if (!/^\d{1,32}$/.test(tid)) return json({ error: "bad component" }, 400);
-  const clickerId = interactionUser(body).discordId;
-  if (!clickerId) return json({ error: "missing user id" }, 400);
-  const { row } = await q(env.DB, "getRow", tid);
-  if (!row || clickerId !== row.owner_id) {
-    const msg = !row
-      ? "This prompt is no longer active."
-      : "Only the thread's author can respond to this prompt.";
-    const ack = await sendCallback(body, { type: 7, data: { content: msg, flags: 64 } }, fetchImpl);
-    if (!ack) return json({ error: "discord callback failed" }, 502);
-    return new Response(null, { status: 202 }); // ACK: no body
-  }
-  // Owner's click: defer (fast), ACK, then do the heavy work outside the
-  // 3 s window (the Worker keeps running until the async I/O settles).
-  const ack = await sendCallback(body, { type: 6 }, fetchImpl);
-  if (!ack) return json({ error: "discord callback failed" }, 502);
-  void handleForumClick(env, fetchImpl, env.DB, { customId, clickerId });
   return new Response(null, { status: 202 }); // ACK: no body
 }
 

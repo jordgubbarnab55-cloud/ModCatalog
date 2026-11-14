@@ -46,8 +46,8 @@ the entry point to the web uploader. Two buttons, one action row, handled by
 * **`mods_signout`** — "Sign out everywhere" (danger, style 2):
   `revokeAllTokens` — deletes every token of the clicker (manual and web)
   and invalidates their unused codes; ephemeral confirmation.
-* **`forum_*`** custom ids still go to the forum prompt handler; any other
-  custom id 400s (as before).
+
+Any other custom id 400s.
 
 All button replies are **type-4 + `flags: 64`** (ephemeral *replies*). A
 type-7 callback on a message-component interaction is applied to the
@@ -155,127 +155,6 @@ node --test        # offline tests: fake KV, injected fetch, Ed25519 keypair
 9. `DISCORD_BOT_TOKEN=... MODS_CHANNEL_ID=... node
    scripts/post-mods-message.mjs` — post the persistent #mods button
    message (see *The #mods buttons* above).
-
-## Forum ingestion (Phase 1)
-
-A scheduled tick (every 5 min, `wrangler.toml` `[[triggers]]`) polls one
-dedicated **forum channel** for new mod posts (a user's post with an
-attached `.zip`), posts the owner a "Publish as-is / No thanks" button
-prompt in the thread, and on the click (or a 36 h auto) dispatches
-`.github/workflows/ingest-forum.yml` with **fresh signed CDN URLs**.
-The workflow downloads the package (+ optional cover), converts a WebP
-cover to PNG, uploads the three inbox assets (manifest → package →
-metadata, in that order, so `process-inbox` never sees a partial set)
-and dispatches `process-inbox.yml` — the mod then follows the normal
-inbox pipeline. The identifier is minted from the post title
-(`{ownerId}.{Title}`); the title is the thread name, the description the
-first owner message, the author the owner's username, the version empty,
-tags from the post's applied tags through `FORUM_TAG_MAP` (shipped empty;
-unknowns are dropped by the existing `sanitize_tags`).
-
-**State machine** (D1 `forum_posts`, one row per thread): `prompting`
-→ `awaiting` (prompt posted; a click or the 36 h auto wins the
-`awaiting → processing` race guard — exactly one dispatch per thread) →
-`processing` (the workflow is running; a 30-min watchdog marks it
-`unconfirmed` rather than hard-failing) → `published` / `failed` /
-`declined` (terminal, deleted after 48 h). `awaiting_package` = no owner
-zip at first sight (re-checked on new messages, swept after 36 h).
-Publish confirmation = the catalog (ETag-cached, fetched only while
-`processing`/`unconfirmed` rows exist) containing the thread's
-`ident_key` with `updated >= dispatched_at`; an ingest-stage failure
-callback (HMAC-signed `POST /forum/status`) marks `failed` and refunds the
-quota. The owner's daily **byte quota is the same KV one `/upload` uses**
-(same key, same default 2 GiB/UTC day); a quota-exceeded dispatch is a
-terminal `failed` (no per-tick retry), and our-side failures are refunded.
-
-**Live-verified Discord behaviors this design relies on** (test server,
-2025-06): thread list objects (`threads/active`, `archived/public`)
-carry **no `owner` object** (only `owner_id`) and `applied_tags` as raw
-**ids** — so the owner user (`GET /users/{id}`, which also gives the
-`bot` flag used to skip bot threads) is fetched separately, and the tag
-names come from the forum channel object's `available_tags`
-(`GET /channels/{forum_channel_id}`; there is **no** guild-level
-tag-list endpoint — it 404s). **Editing a message in an archived
-thread is a 400 (code 50083) while posting a new message in an
-archived thread works** — so every prompt/status edit falls back to a
-fresh message (the row's `prompt_msg` is re-pointed at it). Attachment
-URLs are signed `https://cdn.discordapp.com/...?ex=<expiry>&signature=…`
-and are never stored — only re-fetched from the thread at dispatch time.
-
-**Free-plan budgets (per tick, per invocation):** 50 subrequests and 50
-D1 queries (Cloudflare docs; `db.batch()` counts as one). The tick
-budgets itself: unchanged threads are skipped **before** the 10-slot
-cap (one cheap D1 read + a 404 probe each, so a pile of zip-less
-`awaiting_package` threads cannot starve new posts), the per-thread
-work is reserved against both caps, and when the budget runs out — or
-D1 enforces its cap — the tick stops cleanly (`out.stopped`); the
-guarded transitions make the next tick a safe continuation. The three
-cleanup DELETEs run as one batch.
-
-**Setup (owner, in order):**
-
-1. Discord developer portal → the bot user: enable the **MESSAGE_CONTENT**
-   intent (*Privileged Gateway Intents*). The bot is **not** a gateway
-   bot — it never connects to the WebSocket; the token is used for REST
-   calls only (posting/editing the prompt, reading threads/messages, the
-   `/discord` button callback).
-2. Invite the bot to the guild with the **View Channel, Read Message
-   History, Send Messages in Threads** permissions in the forum channel
-   (plus **Manage Threads** if the bot should be able to archive —
-   not required for the flow).
-3. Create the dedicated **Forum** channel (type 15); copy its id.
-4. `npx wrangler d1 create modcatalog-forum` → copy the `database_id`
-   into `wrangler.toml`.
-5. `npx wrangler d1 migrations apply modcatalog-forum --remote` (creates
-   the `forum_posts` table + index).
-6. `npx wrangler secret put DISCORD_BOT_TOKEN` (the bot token),
-   `npx wrangler secret put FORUM_CALLBACK_SECRET` (a random string,
-   e.g. `openssl rand -hex 32`; the same value goes into GitHub Actions,
-   see step 8).
-7. Fill `wrangler.toml`: `FORUM_GUILD_ID`, `FORUM_CHANNEL_ID`,
-   `FORUM_TAG_MAP` (a JSON object, `{}` is fine), and — **right before
-   the deploy** — `FORUM_CUTOFF_THREAD_ID` = a snowflake *newer* than
-   every existing thread (e.g. the id of a throwaway post's thread
-   created at that moment); only threads newer than the cutoff are ever
-   considered, so existing posts are not prompted.
-8. GitHub repo → Settings → Secrets: `FORUM_CALLBACK_URL` =
-   `https://<worker-url>` and `FORUM_CALLBACK_SECRET` = the same secret
-   as step 6 (the `ingest-forum` workflow signs its status callback with
-   it; `X-Forum-Signature` is an HMAC-SHA256 hex of the raw body).
-9. `npx wrangler deploy` (the cron trigger is in `wrangler.toml`; no
-   further action needed for the poller).
-
-**Limits / Phase-1 boundaries:** new mods only (no update-existing-mod —
-a post whose identifier collides with an existing mod is rejected by the
-pipeline and the prompt shows the `unconfirmed` state, which is how the
-owner learns of the collision); one thread = one mod; the first 10
-candidate threads per tick (5-min cron, ≤ 50 subrequests per tick);
-WebP covers are converted to PNG by the runner (Pillow, installed on the
-runner only when a WebP cover is present) so the trailer contract never
-sees WebP; the exact `process-inbox` rejection reason is not surfaced in
-Phase 1 (the owner sees `unconfirmed` / the ingest-stage failures).
-
-**Pinned post copy (paste into the forum channel):**
-
-> **How to share a mod here**
-> • One mod per post — the post title becomes the mod title.
-> • Keep the title **unique** (a post whose title + package match an
->   existing mod is rejected, and the prompt will stay "not
->   confirmed").
-> • Attach exactly **one** `.zip` (the most recent one wins) and,
->   optionally, one cover image (PNG / JPEG / WebP).
-> • The bot will ask you to confirm; if you don't answer, the package
->   is published **36 h** after the prompt. "No thanks" cancels.
-> • Publishing takes a few minutes; the prompt updates when it's done.
-
-**Testing:** `node test/forum.test.js` (28 cases: prompt creation +
-duplicate-tick idempotency, the INSERT-OR-IGNORE race, owner-only
-attachments, bot-thread skip, cutoff, non-owner rejection, double-click
-and tick/click race, the 36 h auto path, decline, the archived-thread
-fresh-message fallback, dispatch failure/retry/exhaustion, quota terminal
-+ refund, the HMAC status callback, the watchdog, reconciliation, stale
-entries, cleanup, ETag caching, tag mapping, vanished zip) — all offline
-(fake D1/KV, URL-routed fake fetch, no network).
 
 ## Upload API contract (for the ModManager app)
 
@@ -444,7 +323,7 @@ invalidation by a newer code, 5-per-60-s rate limit, 90-day web tokens,
 `/auth/*` handler + CORS + bad bodies), the #mods buttons (the `mods_upload`
 ephemeral link-button reply + the minted code's validity via peek + the
 6th-click rate-limit message, `mods_signout`'s full revocation, the
-`forum_*`/unknown-custom_id routing, `loginLinkUrl`), the upload path
+unknown-custom_id 400s, `loginLinkUrl`), the upload path
 (401/411/413/400/429/503, upload sets incl. `.zip` and `metadata.json`, happy path with the **same stream object**
 forwarded to GitHub, 502-without-dispatch on GitHub failure, CORS
 preflight), and the `/catalog/events` mirror (bad/missing signature, tampered body,
