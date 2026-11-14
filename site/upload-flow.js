@@ -258,18 +258,19 @@ export function createUploadFlow(ctx) {
       close.focus({ preventScroll: true });
     }
 
-    /** The link check could not be made (network / server): retry. */
-    stepLinkFailed(message) {
+    /** The link check could not be made (network / server): retry. `retry`
+     *  is what "Try again" does (the peek, or a re-deem of the pending code). */
+    stepLinkFailed(message, retry = () => this.stepLoginPeek()) {
       const m = this.open("Link check failed", "small");
       m.panel.append(el("h2", "", "Could not check your link"), el("p", "upload-status err", message));
-      const retry = el("button", "btn primary", "Try again");
-      retry.type = "button";
-      retry.addEventListener("click", () => this.stepLoginPeek());
+      const retryBtn = el("button", "btn primary", "Try again");
+      retryBtn.type = "button";
+      retryBtn.addEventListener("click", () => retry());
       const actions = el("div", "actions");
-      actions.append(this.differentToken(), retry);
+      actions.append(this.differentToken(), retryBtn);
       m.panel.appendChild(actions);
       this.show(m);
-      retry.focus({ preventScroll: true });
+      retryBtn.focus({ preventScroll: true });
     }
 
     /** Validates the stored token; a rejected one is dropped and asked for again. */
@@ -376,6 +377,11 @@ export function createUploadFlow(ctx) {
           tokenStore.set(result.token);
           this.identity = { discordId: result.discordId, username: result.username };
           this.pendingCode = null;
+        } else if (result.reason === "network") {
+          // keep the code: the response may have burned it anyway, in which
+          // case the retry comes back 'used' and the dead-link path applies
+          this.stepLinkFailed(result.message, () => this.choose(mode, own, null));
+          return;
         } else if (tokenStore.get()) {
           this.linkNote = "Your Discord link is no longer valid, so this browser's saved sign-in is used instead.";
           this.stepCheck();
