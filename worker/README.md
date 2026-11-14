@@ -27,6 +27,44 @@ Cloudflare Worker (free plan) that does two things:
    will carry. `401 {"error"}` for a missing / unknown / revoked / expired
    token (rejected the same way on `/upload`).
 
+## The #mods buttons (the upload flow's entry point)
+
+A single **persistent bot message** in the guild's #mods text channel carries
+the entry point to the web uploader. Two buttons, one action row, handled by
+`POST /discord` type-3 interactions (custom_id dispatch in `src/index.js`):
+
+* **`mods_upload`** — "Upload or update a mod": mints a one-time **login
+  code** (`mintLoginCode`; the 5-per-60-s limit applies — a limited click
+  replies ephemerally with "You're clicking too fast, try again in a
+  minute.") and replies (ephemeral, `flags: 64`, the canonical 202-ACK +
+  callback flow) with an **"Open the uploader" link button** (style 5) to
+  `SITE_URL + "#login=<code>"` — a URL fragment, never a query string. The
+  code is never logged. The site redeems it for a 90-day `web` token at the
+  first upload choice (peek, not peek-burn, on page load). A click whose
+  interaction carries no usable username gets an ephemeral error instead.
+* **`mods_signout`** — "Sign out everywhere" (danger, style 2):
+  `revokeAllTokens` — deletes every token of the clicker (manual and web)
+  and invalidates their unused codes; ephemeral confirmation.
+* **`forum_*`** custom ids still go to the forum prompt handler; any other
+  custom id 400s (as before).
+
+`SITE_URL` is a `wrangler.toml` var (the Pages site, ends with `/`);
+`loginLinkUrl` normalizes a missing trailing slash.
+
+**The message itself** is posted/edited by the owner script (zero-dep; reads
+`DISCORD_BOT_TOKEN` and `MODS_CHANNEL_ID` from the environment at run time
+and stores nothing):
+
+```
+DISCORD_BOT_TOKEN=... MODS_CHANNEL_ID=... node scripts/post-mods-message.mjs [--edit <messageId>] [--dry-run]
+```
+
+No argument posts a new message; `--edit <messageId>` PATCHes the existing
+one (how to refresh it after a copy or button change); `--dry-run` prints
+the exact request without sending it. **Live message: id `PLACEHOLDER_MSG`
+in channel `PLACEHOLDER_CH` (guild `1565286417968398356`)** — re-edit it with
+`--edit PLACEHOLDER_MSG`.
+
 ## Auth: D1 tokens and login codes
 
 Tokens live in **D1** (binding `DB`, database `modcatalog-forum`,
@@ -108,6 +146,9 @@ node --test        # offline tests: fake KV, injected fetch, Ed25519 keypair
    body is rejected by Discord ("didn't respond in time" despite a fast
    200) — the reply must go through the callback endpoint after a 202
    ACK.)
+9. `DISCORD_BOT_TOKEN=... MODS_CHANNEL_ID=... node
+   scripts/post-mods-message.mjs` — post the persistent #mods button
+   message (see *The #mods buttons* above).
 
 ## Forum ingestion (Phase 1)
 
@@ -348,10 +389,14 @@ verification (valid/invalid/missing/wrong key), PING/PONG, manual-token
 minting / replacement (D1, only hashes stored), login-code mint / peek /
 redeem (TTL, single-use atomic burn incl. a concurrent-redeem race,
 invalidation by a newer code, 5-per-60-s rate limit, 90-day web tokens,
-`/auth/*` handler + CORS + bad bodies), the upload path
+`/auth/*` handler + CORS + bad bodies), the #mods buttons (the `mods_upload`
+ephemeral link-button reply + the minted code's validity via peek + the
+6th-click rate-limit message, `mods_signout`'s full revocation, the
+`forum_*`/unknown-custom_id routing, `loginLinkUrl`), the upload path
 (401/411/413/400/429/503, upload sets incl. `.zip` and `metadata.json`, happy path with the **same stream object**
 forwarded to GitHub, 502-without-dispatch on GitHub failure, CORS
 preflight), and the command-registration script (bulk-PUT payload shape,
 per-guild 403 isolation, `--retire-global` ordering, delete-404
-tolerance, auto-discovery, dry-run). Live behavior (deploy, real Discord, real GitHub, the free-plan
+tolerance, auto-discovery, dry-run) plus the #mods message script (payload
+shape, POST/PATCH, dry-run, error detail). Live behavior (deploy, real Discord, real GitHub, the free-plan
 CPU limit on streaming) is the owner's to verify — see SETUP.md.

@@ -318,6 +318,14 @@ injected: `handle(request, env, fetch)`.
   body is rejected by Discord. The invoking user id is `member.user.id`
   (current API member objects have no top-level `id`). **No GitHub
   calls in this path** (the 3 s budget covers the 202 ACK only).
+- **Discord buttons** (one persistent bot message in the guild's #mods
+  text channel, posted/edited by `worker/scripts/post-mods-message.mjs`):
+  type-3 dispatch is on `custom_id` — `mods_upload` mints a login code and
+  replies ephemerally with an "Open the uploader" link button
+  (`SITE_URL` + `#login=<code>`, a fragment, never a query; the 6th click
+  in 60 s is rate-limited) and `mods_signout` runs `revokeAllTokens`
+  (deletes every token of the clicker, invalidates unused codes);
+  `forum_*` goes to the forum prompt handler, other ids 400.
 - **`POST /upload`** — `Bearer` token → 401; `Content-Length` required →
   411; over 100 MB per part → 413 **before any GitHub call** (the
   free-plan request-body limit); per-user daily **byte** quota (default

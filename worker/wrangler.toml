@@ -16,6 +16,9 @@ GITHUB_REPO = "ModCatalog"
 ALLOWED_ORIGIN = "https://jordgubbarnab55-cloud.github.io"
 # Optional: upload bytes per Discord user per UTC day (default 2 GiB)
 UPLOAD_DAILY_BYTES = "2147483648"
+# The Pages site (ends with /); the #mods button's "Open the uploader"
+# link is SITE_URL + "#login=<code>" (URL fragment, never a query string)
+SITE_URL = "https://jordgubbarnab55-cloud.github.io/ModCatalog/"
 
 # Forum ingestion configuration (the poller no-ops while these are blank):
 #   FORUM_GUILD_ID / FORUM_CHANNEL_ID  the dedicated forum channel (type 15)

@@ -6,8 +6,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { handle } from "../src/index.js";
-import { sha256Hex } from "../src/auth.js";
+import { handle, loginLinkUrl } from "../src/index.js";
+import {
+  sha256Hex, peekLoginCode, mintManualToken, mintLoginCode,
+  redeemLoginCode, ASQL,
+} from "../src/auth.js";
 import { FakeD1 } from "./helpers/fake-d1.js";
 
 // ------------------------------------------------------------- fakes
@@ -91,6 +94,7 @@ function makeEnv(kv, pub, overrides = {}) {
     GITHUB_OWNER: "octo",
     GITHUB_REPO: "repo",
     ALLOWED_ORIGIN: "https://pages.example.com",
+    SITE_URL: "https://pages.example.com/",
     UPLOAD_DAILY_BYTES: "2000",
     ...overrides,
   };
@@ -544,6 +548,143 @@ test("/token without a username is refused and mints nothing", async () => {
   }), makeEnv(kv, await publicKeyB64(), { DB: db }), makeFetch());
   assert.equal(res.status, 400);
   assert.equal(db.tokenRows().length, 0);
+});
+
+// ------------------------------------------------- the #mods buttons
+
+test("loginLinkUrl: the code is a URL fragment; the trailing slash is normalized", () => {
+  assert.equal(loginLinkUrl("https://pages.example.com/", "lc_x"),
+    "https://pages.example.com/#login=lc_x");
+  assert.equal(loginLinkUrl("https://pages.example.com", "lc_x"),
+    "https://pages.example.com/#login=lc_x");
+});
+
+async function clickComponent(customId, memberId, username = "alice") {
+  const kv = new FakeKV();
+  const db = new FakeD1();
+  const fetchImpl = makeFetch();
+  const res = await handle(await discordRequest({
+    type: 3, data: { custom_id: customId },
+    member: { user: { id: memberId, username } },
+  }), makeEnv(kv, await publicKeyB64(), { DB: db }), fetchImpl);
+  return { res, db, fetchImpl };
+}
+
+test("mods_upload: 202, one callback with an ephemeral link button; the code is valid", async () => {
+  const { res, db, fetchImpl } = await clickComponent("mods_upload", "42");
+  assert.equal(res.status, 202);
+  assert.equal(fetchImpl.calls.length, 1, "only the Discord callback call");
+  const cb = fetchImpl.calls[0];
+  assert.ok(cb.url.includes("/interactions/") && cb.url.includes("/callback"));
+  const resp = JSON.parse(cb.init.body);
+  assert.equal(resp.type, 4, "CHANNEL_MESSAGE_WITH_SOURCE");
+  assert.equal(resp.data.flags, 64, "ephemeral");
+  assert.ok(resp.data.content.includes("works once"), "the copy explains the one-time link");
+  assert.equal(resp.data.components.length, 1, "one action row");
+  const [button] = resp.data.components[0].components;
+  assert.equal(button.type, 2);
+  assert.equal(button.style, 5, "link button");
+  assert.equal(button.label, "Open the uploader");
+  assert.ok(button.url.startsWith("https://pages.example.com/#login=lc_"), `url: ${button.url}`);
+  const code = button.url.slice("https://pages.example.com/#login=".length);
+  assert.equal(db.codeRows().length, 1, "one code row");
+  assert.ok(!String(db.codeRows()[0].hash).includes(code), "only the hash is stored");
+  const peek = await peekLoginCode(db, code, new Date());
+  assert.equal(peek.ok, true, "the minted code is valid via peekLoginCode");
+  assert.equal(peek.discordId, "42");
+  assert.equal(peek.username, "alice");
+});
+
+test("mods_upload: a missing username is an ephemeral error and mints nothing", async () => {
+  const kv = new FakeKV();
+  const db = new FakeD1();
+  const fetchImpl = makeFetch();
+  const res = await handle(await discordRequest({
+    type: 3, data: { custom_id: "mods_upload" }, member: { user: { id: "99" } },
+  }), makeEnv(kv, await publicKeyB64(), { DB: db }), fetchImpl);
+  assert.equal(res.status, 202);
+  const cb = fetchImpl.calls[0];
+  const resp = JSON.parse(cb.init.body);
+  assert.equal(resp.data.flags, 64, "ephemeral error");
+  assert.ok(!resp.data.components, "no link button");
+  assert.equal(db.codeRows().length, 0, "nothing minted");
+});
+
+test("six rapid clicks: the sixth gets the rate-limit message", async () => {
+  const kv = new FakeKV();
+  const db = new FakeD1();
+  const env = makeEnv(kv, await publicKeyB64(), { DB: db });
+  let last;
+  for (let i = 1; i <= 6; i++) {
+    const f = makeFetch();
+    const res = await handle(await discordRequest({
+      type: 3, data: { custom_id: "mods_upload" },
+      member: { user: { id: "42", username: "alice" } },
+    }), env, f);
+    assert.equal(res.status, 202, `click ${i} ACKs`);
+    last = JSON.parse(f.calls[0].init.body);
+  }
+  assert.equal(last.data.content, "You're clicking too fast, try again in a minute.");
+  assert.ok(!last.data.components, "no link button when limited");
+  assert.equal(db.codeRows().length, 5, "exactly five codes were minted");
+});
+
+test("mods_signout: deletes every token of the clicker and invalidates unused codes", async () => {
+  const kv = new FakeKV();
+  const db = new FakeD1();
+  const env = makeEnv(kv, await publicKeyB64(), { DB: db });
+  // seed state first: a manual + a web token and an unused code for 42,
+  // plus another user's manual token (must survive)
+  const now = new Date();
+  await mintManualToken(db, { discordId: "42", username: "alice", now });
+  const seeded = await mintLoginCode(db, { discordId: "42", username: "alice", now });
+  const redeemed = await redeemLoginCode(db, seeded.code, now);
+  assert.equal(redeemed.ok, true);
+  await mintLoginCode(db, { discordId: "42", username: "alice", now }); // one unused code
+  await mintManualToken(db, { discordId: "77", username: "bob", now });
+  assert.equal(db.tokenRows().length, 3);
+
+  const fetchImpl = makeFetch();
+  const res = await handle(await discordRequest({
+    type: 3, data: { custom_id: "mods_signout" },
+    member: { user: { id: "42", username: "alice" } },
+  }), env, fetchImpl);
+  assert.equal(res.status, 202);
+  const mine = db.tokenRows().filter((r) => r.discord_id === "42");
+  assert.equal(mine.length, 0, "all of 42's tokens are gone");
+  assert.ok(db.tokenRows().some((r) => r.discord_id === "77" && r.kind === "manual"),
+    "the other user's token survives");
+  const codeRows = db.codeRows();
+  assert.ok(codeRows.length > 0 && codeRows.every((r) => r.used_at),
+    "42's unused codes are invalidated");
+  // the reply: an ephemeral confirmation, no components
+  const cb = fetchImpl.calls[0];
+  const resp = JSON.parse(cb.init.body);
+  assert.equal(resp.data.flags, 64);
+  assert.ok(resp.data.content.includes("Signed out everywhere"));
+});
+
+test("forum_* components still reach the forum handler; unknown ones 400", async () => {
+  // forum_unknown:123 with no such row: the forum handler's "no longer
+  // active" ephemeral reply (a type-2 command would have 400'd instead)
+  const kv = new FakeKV();
+  const db = new FakeD1();
+  const fetchImpl = makeFetch();
+  const res = await handle(await discordRequest({
+    type: 3, data: { custom_id: "forum_publish:123" },
+    member: { user: { id: "42", username: "alice" } },
+  }), makeEnv(kv, await publicKeyB64(), { DB: db }), fetchImpl);
+  assert.equal(res.status, 202);
+  const resp = JSON.parse(fetchImpl.calls[0].init.body);
+  assert.ok(resp.data.content.includes("no longer active"), "routed to the forum handler");
+
+  for (const customId of ["other_thing", "", null, undefined]) {
+    const r = await handle(await discordRequest({
+      type: 3, data: customId == null ? {} : { custom_id: customId },
+      member: { user: { id: "42", username: "alice" } },
+    }), makeEnv(new FakeKV(), await publicKeyB64(), { DB: new FakeD1() }), makeFetch());
+    assert.equal(r.status, 400, `custom_id ${String(customId)} is 400`);
+  }
 });
 
 function whoamiRequest(token, method = "GET") {

@@ -24,7 +24,7 @@ import {
 } from "./forum.js";
 import {
   authenticateToken, mintManualToken, peekLoginCode,
-  redeemLoginCode, deleteWebToken,
+  redeemLoginCode, deleteWebToken, mintLoginCode, revokeAllTokens,
 } from "./auth.js";
 
 const MAX_BODY_BYTES = 100 * 1024 * 1024; // Cloudflare free-plan request-body limit
@@ -79,6 +79,27 @@ export function uploaderStamp(discordId, username) {
   const hex = [...new TextEncoder().encode(username)]
     .map((b) => b.toString(16).padStart(2, "0")).join("");
   return `${discordId}-${hex}`;
+}
+
+// The identity of an interaction (type 2 command or type 3 component).
+// The current Discord member object has NO top-level id — the user id is
+// nested at member.user.id (member.id and the DM user.id are fallbacks for
+// other payload variants). The username is the Discord account name (not
+// the display name, not the server nickname).
+export function interactionUser(body) {
+  const discordId =
+    (body.member && (body.member.id || (body.member.user && body.member.user.id))) ||
+    (body.user && body.user.id);
+  const user = (body.member && body.member.user) || body.user;
+  const username = user && typeof user.username === "string" ? user.username : "";
+  return { discordId: discordId || null, username };
+}
+
+// The one-time-login link: the code lives in a URL fragment (never a
+// query string — a fragment is never sent to the server).
+export function loginLinkUrl(siteUrl, code) {
+  const base = siteUrl.endsWith("/") ? siteUrl : `${siteUrl}/`;
+  return `${base}#login=${code}`;
 }
 
 // Looks the bearer token up in D1 (auth.js):
@@ -144,7 +165,14 @@ async function handleDiscord(request, env, fetchImpl) {
   let body;
   try { body = JSON.parse(rawBody); } catch { return json({ error: "bad json" }, 400); }
 
-  if (body.type === 3) return handleForumInteraction(body, env, fetchImpl);
+  if (body.type === 3) {
+    const customId = body.data && body.data.custom_id;
+    if (customId === "mods_upload") return handleModsUpload(body, env, fetchImpl);
+    if (customId === "mods_signout") return handleModsSignout(body, env, fetchImpl);
+    if (typeof customId === "string" && customId.startsWith("forum_"))
+      return handleForumInteraction(body, env, fetchImpl);
+    return json({ error: "unknown component" }, 400);
+  }
 
   if (body.type !== 2) {
     // PING is ACKed through the callback endpoint too (type 1 = PONG).
@@ -154,18 +182,9 @@ async function handleDiscord(request, env, fetchImpl) {
     return new Response(null, { status: 202 }); // ACK: no body
   }
 
-  // Identity: the current Discord interaction member object has NO top-level
-  // id — the user id is nested at member.user.id (keep member.id and the
-  // DM user.id as fallbacks for other payload variants).
-  const discordId =
-    (body.member && (body.member.id || (body.member.user && body.member.user.id))) ||
-    (body.user && body.user.id);
+  const { discordId, username } = interactionUser(body);
   if (!discordId) return json({ error: "missing user id" }, 400);
-
-  // The Discord account name (`username`): not the display name, not the
-  // server nickname. It is what the catalog publishes as the mods' author.
-  const user = (body.member && body.member.user) || body.user;
-  const username = user && typeof user.username === "string" ? user.username : "";
+  if (!username) return json({ error: "missing username" }, 400);
 
   const command = (body.data && body.data.name) || "";
 
@@ -191,6 +210,56 @@ async function handleDiscord(request, env, fetchImpl) {
   return json({ error: `unknown command ${command}` }, 400);
 }
 
+// The #mods channel's "Upload or update a mod" button: mints a one-time
+// login code and replies (ephemeral) with a link button to the site
+// carrying it (URL fragment, never a query string). Same canonical flow
+// as /token: 202 ACK, then sendCallback {type: 4, flags: 64}. The code
+// is never logged; the callback call log only shows its hash-free shape.
+async function handleModsUpload(body, env, fetchImpl) {
+  const { discordId, username } = interactionUser(body);
+  if (!discordId) return json({ error: "missing user id" }, 400);
+  if (!username) {
+    const ack = await sendCallback(body, { type: 7, data: { content: "I couldn't find your Discord account name, so I can't sign you in.", flags: 64 } }, fetchImpl);
+    if (!ack) return json({ error: "discord callback failed" }, 502);
+    return new Response(null, { status: 202 }); // ACK: no body
+  }
+  const res = await mintLoginCode(env.DB, { discordId, username, now: new Date() });
+  if (res.limited) {
+    const ack = await sendCallback(body, { type: 7, data: { content: "You're clicking too fast, try again in a minute.", flags: 64 } }, fetchImpl);
+    if (!ack) return json({ error: "discord callback failed" }, 502);
+    return new Response(null, { status: 202 }); // ACK: no body
+  }
+  const ack = await sendCallback(body, {
+    type: 4,
+    data: {
+      content:
+        "This link signs you in to the catalog uploader. " +
+        "It works once and expires in 5 minutes. Don't share it.",
+      flags: 64, // ephemeral: only this user sees it
+      components: [{
+        type: 1,
+        components: [{
+          type: 2, style: 5, label: "Open the uploader",
+          url: loginLinkUrl(env.SITE_URL, res.code),
+        }],
+      }],
+    },
+  }, fetchImpl);
+  if (!ack) return json({ error: "discord callback failed" }, 502);
+  return new Response(null, { status: 202 }); // ACK: no body
+}
+
+// The #mods channel's "Sign out everywhere" button: deletes all the
+// clicker's tokens (manual + web) and invalidates unused codes.
+async function handleModsSignout(body, env, fetchImpl) {
+  const { discordId } = interactionUser(body);
+  if (!discordId) return json({ error: "missing user id" }, 400);
+  await revokeAllTokens(env.DB, discordId);
+  const ack = await sendCallback(body, { type: 7, data: { content: "Signed out everywhere. Your /token token and all browser sessions are revoked.", flags: 64 } }, fetchImpl);
+  if (!ack) return json({ error: "discord callback failed" }, 502);
+  return new Response(null, { status: 202 }); // ACK: no body
+}
+
 // The forum prompt's buttons (message-component interactions, type 3).
 // Fast path (the 3 s window): signature + one D1 read + one callback.
 // Heavy work (dispatch, prompt edits) runs AFTER the 202 ACK.
@@ -203,9 +272,7 @@ async function handleForumInteraction(body, env, fetchImpl) {
   const i = customId.indexOf(":");
   const tid = i > 0 ? customId.slice(i + 1) : "";
   if (!/^\d{1,32}$/.test(tid)) return json({ error: "bad component" }, 400);
-  const clickerId =
-    (body.member && (body.member.id || (body.member.user && body.member.user.id))) ||
-    (body.user && body.user.id);
+  const clickerId = interactionUser(body).discordId;
   if (!clickerId) return json({ error: "missing user id" }, 400);
   const { row } = await q(env.DB, "getRow", tid);
   if (!row || clickerId !== row.owner_id) {
