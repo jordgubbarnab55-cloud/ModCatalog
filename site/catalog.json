@@ -37,15 +37,15 @@
     },
     {
       "id": "1509993694902878381.ZZTestFinal",
-      "name": "ZZ Test Final",
+      "name": "ZZTestFinal",
       "author": "uncool_1234",
-      "version": "1.0.1",
-      "description": "E2E plan-6 test: version bump",
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.zztestfinal-47fc7bc6/ZZ-Test-Final-1.0.1.zip",
-      "size": 731,
-      "sha256": "2239f7a14490c042161a973c40d320b48806ffcac4962e51c6248d89ddcb7df1",
+      "version": "1.0.2",
+      "description": "raw v1.0.2 via metadata.json",
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.zztestfinal-47fc7bc6/ZZTestFinal-1.0.2.zip",
+      "size": 751,
+      "sha256": "46c69f40062ba5a1fdc92f7c576e1e34ca437db1ed75fcccff83a287529f74a6",
       "uploader": "1509993694902878381",
-      "updated": "2026-11-14T19:59:54Z"
+      "updated": "2026-11-14T20:28:14Z"
     }
   ]
 }
