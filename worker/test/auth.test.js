@@ -106,6 +106,8 @@ test("mint/peek/redeem happy path: the web token authenticates, 90-day expiry", 
   assert.match(red.token, /^ms_/);
   assert.equal(red.discordId, "42");
   assert.equal(red.username, "alice");
+  assert.equal(red.expiresAt, LATER(90 * 24 * 3600 * 1000).toISOString(), "the web token's 90-day expiry, not the code's");
+  assert.equal(db.tokenRows().at(-1).expires_at, red.expiresAt, "the inserted row carries the same value");
   assert.ok(db.codeRows()[0].used_at, "the code was burned");
   const rec = await authenticateToken(db, red.token, NOW);
   assert.deepEqual(rec, { discordId: "42", username: "alice", kind: "web" });
@@ -281,6 +283,10 @@ test("POST /auth/redeem: 200 with a web token; a second call is 410 'used'", asy
   const j = await ok.json();
   assert.match(j.token, /^ms_/);
   assert.deepEqual({ discordId: j.discordId, username: j.username }, { discordId: "42", username: "alice" });
+  // the handler redeems at its own `new Date()`, so check the 90-day value
+  // by distance (a few ms of clock drift is fine)
+  const days = (Date.parse(j.expiresAt) - Date.now()) / (24 * 3600 * 1000);
+  assert.ok(days > 89.9 && days < 90.1, `expiresAt is ~90 days ahead (was ${days} days)`);
 
   const again = await post(code);
   assert.equal(again.status, 410);

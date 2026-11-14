@@ -109,9 +109,10 @@ export async function redeemLoginCode(db, code, now) {
   if ((await q(db, "burnCode", now.toISOString(), hash)).changes !== 1)
     return { ok: false, reason: "used" };
   const token = newSecret("ms_");
+  const tokenExpiresAt = new Date(now.getTime() + WEB_TOKEN_TTL_MS).toISOString();
   await q(db, "insertToken", await sha256Hex(token), row.discord_id, row.username,
-    "web", now.toISOString(), new Date(now.getTime() + WEB_TOKEN_TTL_MS).toISOString());
-  return { ok: true, token, discordId: row.discord_id, username: row.username, expiresAt: row.expires_at };
+    "web", now.toISOString(), tokenExpiresAt);
+  return { ok: true, token, discordId: row.discord_id, username: row.username, expiresAt: tokenExpiresAt };
 }
 
 // Bearer-token lookup: unknown or expired -> null.

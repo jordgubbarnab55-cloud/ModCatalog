@@ -408,8 +408,9 @@ injected: `handle(request, env, fetch)`.
   >1 KB bodies are 400; codes are never logged): `POST /auth/peek`
   (read-only `200 {discordId, username, expiresAt}` | 404 unknown | 410
   expired/used), `POST /auth/redeem` (the atomic burn → `200 {token, …}`,
-  an `ms_…` web token), `POST /auth/logout` (204; deletes the token only
-  when it is a `web` one). KV (`TOKENS`) keeps only the upload quota and
+  an `ms_…` web token — peek's `expiresAt` is the code's 5-minute
+  expiry, redeem's is the web token's 90-day expiry), `POST /auth/logout`
+  (204; deletes the token only when it is a `web` one). KV (`TOKENS`) keeps only the upload quota and
   the inbox release-id cache.
 - KV is eventually consistent — a slightly late quota count is acceptable.
 - Fine-grained `GITHUB_TOKEN` **expires** (max 1 year); expired token →

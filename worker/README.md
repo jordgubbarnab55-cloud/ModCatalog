@@ -105,7 +105,9 @@ non-JSON or >1 KB bodies are 400; codes are never logged):
   reason: "expired" | "used"}`.
 * `POST /auth/redeem` `{"code"}` — the atomic single-use burn: `200
   {"token", "discordId", "username", "expiresAt"}` (the `ms_…` web
-  token) | the same errors.
+  token) | the same errors. The two `expiresAt` fields mean different
+  things: peek's is the code's 5-minute expiry, redeem's is the web
+  token's 90-day expiry.
 * `POST /auth/logout` — bearer token → `204`; deletes the token only when
   it is a `web` one (a `manual` one is left alone; an unknown token is a
   no-op).
