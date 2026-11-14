@@ -569,9 +569,11 @@ release URL).
 
 ## Adding a mod (the whole flow)
 
-1. Discord: `/token` → copy the token.
+1. Click "Upload or update a mod" in the #mods text channel and open the
+   link (or the alternative: `/token` → copy the token).
 2. Upload the `.zip` or the loose files (ModManager app against
-   `worker/README.md`'s contract, or the page's "Upload a mod" button). Or, for maintainers: `python build.py process
+   `worker/README.md`'s contract, or the page's "Upload a mod" button / the
+   Discord link). Or, for maintainers: `python build.py process
    --from-dir <dir> --as-uid <id> --as-username <name>`, or the `seed-legacy`
    workflow.
 3. The `Process inbox` workflow does the rest; the mod appears in the
