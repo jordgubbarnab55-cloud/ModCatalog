@@ -21,10 +21,13 @@ Two storage backends behind one thin interface (PackageClient):
 
 Usage:
   python build.py process --from-inbox              # drain the "inbox" release
+                                                    # (--results-file PATH: also write the run's outcome events)
   python build.py process --from-dir legacy-assets --as-uid ID --as-username NAME
                                                     # seed a dir's zips as that Discord user
   python build.py rebuild                           # regenerate from all mod-* releases
   python build.py retitle                           # only re-apply the name/description
+  python build.py notify --results PATH             # POST the run's events to the Worker
+                                                    # (CATALOG_CALLBACK_URL / _SECRET)
 
   The catalog's name/description come from site/config.json (`title`,
   `description`; defaults when absent), `--config` picks another file.
@@ -58,6 +61,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -67,6 +71,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -763,6 +768,64 @@ def dump_catalog(path: pathlib.Path, catalog: dict) -> None:
         f.write("\n")
 
 
+# ------------------------------------------------------------- events
+
+
+def published_event(uploader: Uploader, entry: dict, mode: str,
+                   asset_name: str) -> dict:
+    """The 'published' outcome event of `entry`: the catalog entry's fields
+    are reused as-is (built from entry_from_meta's output, not re-derived)."""
+    return {
+        "eventId": f"{ident_key(entry['id'])}:{entry['sha256']}",
+        "status": "published",
+        "mode": mode,
+        "uploaderId": uploader.uid,
+        "uploaderName": uploader.username,
+        "title": entry["name"],
+        "version": entry["version"],
+        "description": entry["description"],
+        "author": entry["author"],
+        "identifier": entry["id"],
+        "tags": entry.get("tags", []),
+        "gameVersion": entry.get("gameVersion"),
+        "fileUrl": entry["file"],
+        "coverUrl": entry.get("cover"),
+        "size": entry["size"],
+        "sha256": entry["sha256"],
+        "assetName": asset_name,
+    }
+
+
+def rejected_event(uploader: Uploader, gid: str, reason: str,
+                  title: str | None = None, version: str | None = None,
+                  identifier: str | None = None) -> dict:
+    """The 'rejected' outcome event: one human-readable line (<= 300 chars,
+    collapsed to a single line), plus whatever of title/version/identifier is
+    known (else null)."""
+    return {
+        "eventId": f"rej:{uploader.uid}:{gid}",
+        "status": "rejected",
+        "mode": None,
+        "uploaderId": uploader.uid,
+        "uploaderName": uploader.username,
+        "reason": " ".join(str(reason).split())[:300],
+        "title": title or None,
+        "version": version or None,
+        "identifier": identifier or None,
+    }
+
+
+def write_json_atomic(path: pathlib.Path, obj) -> None:
+    """Writes `obj` as JSON to `path` atomically (temp file + rename)."""
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / (path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8", newline="\n") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
 # ------------------------------------------------------------ processing
 
 
@@ -775,13 +838,15 @@ class Staged(NamedTuple):
 
 
 class PackageSource:
-    """One inbox item: how to load it (-> Staged) and how to delete it."""
+    """One inbox item: how to load it (-> Staged) and how to delete it.
+    `gid` is its inbox group or asset id (the id part of its outcome event)."""
 
-    def __init__(self, uploader: Uploader, load, delete, label: str):
+    def __init__(self, uploader: Uploader, load, delete, label: str, gid: str | None = None):
         self.uploader = uploader
         self._load = load  # () -> Staged
         self._delete = delete
         self.label = label
+        self.gid = gid or label
 
     def load(self) -> Staged:
         return self._load()
@@ -805,8 +870,12 @@ def inbox_items_from_dir(d: pathlib.Path, uploader: Uploader) -> list[PackageSou
             for p in sorted(d.glob("*.zip"))]
 
 
-def inbox_items_from_release(client: PackageClient) -> list[PackageSource]:
+def inbox_items_from_release(client: PackageClient,
+                            events: list | None = None) -> list[PackageSource]:
     """Classifies inbox assets into PackageSources (drains the whole inbox).
+    Swept items (stale zips, stalled sets) are also appended to `events`
+    (a 'rejected' event: 'incomplete upload expired'); groups still waiting
+    for parts emit nothing.
 
     Two upload shapes coexist; <uploader> is the Worker's stamp
     `<discordId>-<hex of the UTF-8 username>`:
@@ -834,6 +903,8 @@ def inbox_items_from_release(client: PackageClient) -> list[PackageSource]:
             if (now - a.created).total_seconds() > STALE_AFTER:
                 client.delete_asset(INBOX_TAG, a.name)
                 print(f"  stale inbox zip {a.name} (>{STALE_AFTER // 86400} days), removed")
+                if events is not None:
+                    events.append(rejected_event(info["uploader"], a.name, "incomplete upload expired"))
                 continue
             def load(n: str = a.name) -> Staged:
                 with tempfile.TemporaryDirectory() as td:
@@ -850,7 +921,7 @@ def inbox_items_from_release(client: PackageClient) -> list[PackageSource]:
         # the manifest's stamp names the uploader (a token minted mid-upload
         # may change the username between parts)
         first = next((i for i, _ in items if i["kind"] == "manifest"), items[0][0])
-        src = raw_group_source(client, first["uploader"], uid, items, now)
+        src = raw_group_source(client, first["uploader"], uid, items, now, events)
         if src is not None:
             sources.append(src)
     if unknown:
@@ -953,18 +1024,23 @@ def rejecting_source(client: PackageClient, uploader: Uploader, label: str,
         raise PackageError(reason)
     return PackageSource(uploader, load,
                          (lambda: [client.delete_asset(INBOX_TAG, a.name) for _, a in items]),
-                         label)
+                         label, items[0][0].get("upload_id") or label)
 
 
 def raw_group_source(client: PackageClient, uploader: Uploader, uid: str,
-                     items: list, now: datetime) -> PackageSource | None:
-    """Builds one PackageSource for a complete upload set, or None (wait)."""
+                     items: list, now: datetime, events: list | None = None) -> PackageSource | None:
+    """Builds one PackageSource for a complete upload set, or None (wait;
+    the group is still arriving, and it emits nothing). A group stalled for
+    over STALE_AFTER is deleted, logged, and reported in `events` (a
+    'rejected' event: 'incomplete upload expired')."""
     label = f"raw {uid}"
     newest = max(a.created for _, a in items)
     if (now - newest).total_seconds() > STALE_AFTER:
         for _, a in items:
             client.delete_asset(INBOX_TAG, a.name)
         print(f"  REJECTED {label}: stalled for >{STALE_AFTER // 86400} days, removed", file=sys.stderr)
+        if events is not None:
+            events.append(rejected_event(uploader, items[0][0]["upload_id"], "incomplete upload expired"))
         return None
 
     manifest_asset = next((a for i, a in items if i["kind"] == "manifest"), None)
@@ -1061,6 +1137,7 @@ class Processor:
         self.catalog_path = catalog_path
         self.config_path = config_path
         self._content: dict[str, str | None] = {}  # entry file URL -> content_hash
+        self.results: list[dict] = []  # this run's outcome events (--results-file)
 
     def _is_admin(self, uid: str) -> bool:
         return uid in self.admins
@@ -1117,22 +1194,34 @@ class Processor:
 
     # -- one item -------------------------------------------------------
     def _process_item(self, src: PackageSource, entries: dict,
-                      now: datetime) -> tuple[bool, str]:
+                      now: datetime) -> tuple[bool, dict | None, dict]:
+        """One inbox item: (ok, catalog entry, outcome event). The event is
+        a 'published' one (the entry's fields, reused as-is) or a 'rejected'
+        one (the reason, plus whatever of title/version/identifier is known)."""
         uploader = src.uploader
         try:
             staged = src.load()
             utoc_name = utoc_member(staged.members)
             existing = existing_trailer(staged.members[utoc_name])
             fields = package_fields(staged.metadata, existing)
+        except PackageError as ex:
+            src.delete()
+            return False, None, rejected_event(uploader, src.gid, f"invalid package: {ex}")
+
+        known = {"title": fields.get("title") or None,
+                 "version": fields.get("version") or None,
+                 "identifier": staged.metadata.get("target") if staged.metadata is not None else None}
+        try:
             # `entries` is live: an earlier item of this same run counts too
             target = self._target(staged, fields, existing, uploader.uid, entries)
         except PackageError as ex:
             src.delete()
-            return False, f"invalid package: {ex}"
+            return False, None, rejected_event(uploader, src.gid, f"invalid package: {ex}", **known)
 
         # an admin updating someone else's mod: the entry stays under its
         # owner, and the stored package carries the owner's (catalog) name
         author = uploader.username if target.owner == uploader.uid else target.entry["author"]
+        mode = "update" if target.entry is not None else "new"
         members = dict(staged.members)
         with tempfile.TemporaryDirectory() as td:
             tmp = pathlib.Path(td) / "package.zip"
@@ -1145,7 +1234,10 @@ class Processor:
                 meta = validate_package(tmp)
             except PackageError as ex:
                 src.delete()
-                return False, f"invalid package: {ex}"
+                return False, None, rejected_event(uploader, src.gid, f"invalid package: {ex}",
+                                                 title=fields.get("title") or None,
+                                                 version=fields.get("version") or None,
+                                                 identifier=target.identifier)
 
             # the same content + title + version under ANOTHER identifier is a
             # duplicate of that mod, whoever uploads it
@@ -1153,8 +1245,11 @@ class Processor:
             dup = self._duplicate_of(meta, content, entries)
             if dup is not None:
                 src.delete()
-                return False, (f"duplicate of the existing mod {dup['name']!r} v{dup['version']} "
-                               f"(id {dup['id']}): same content, title and version under another identifier")
+                return False, None, rejected_event(
+                    uploader, src.gid,
+                    (f"duplicate of the existing mod {dup['name']!r} v{dup['version']} "
+                     f"(id {dup['id']}): same content, title and version under another identifier"),
+                    title=meta["title"], version=meta["version"], identifier=meta["identifier"])
 
             tag = mod_tag(target.identifier)
             existing_rel = self.client.get_release(tag)
@@ -1173,7 +1268,9 @@ class Processor:
                     other_path.unlink()
                     if same:
                         src.delete()
-                        return False, f"already uploaded as {other}, nothing changed"
+                        return False, None, rejected_event(
+                            uploader, src.gid, f"already uploaded as {other}, nothing changed",
+                            title=meta["title"], version=meta["version"], identifier=meta["identifier"])
             zip_name = free_asset_name(base_name, taken)
 
             if existing_rel is None:
@@ -1186,7 +1283,9 @@ class Processor:
                 self.client.upload_asset(tag, staged_zip, zip_name)
             except AssetExists:
                 src.delete()
-                return False, f"asset name {zip_name} was taken meanwhile; upload again"
+                return False, None, rejected_event(
+                    uploader, src.gid, f"asset name {zip_name} was taken meanwhile; upload again",
+                    title=meta["title"], version=meta["version"], identifier=meta["identifier"])
 
             # cover (dedup: skip an identical one, never overwrite a different one)
             image = meta.get("image")
@@ -1197,7 +1296,9 @@ class Processor:
                 if cname in names:
                     if self.client.asset_bytes(tag, cname) != image["data"]:
                         src.delete()
-                        return False, f"cover name collision with different content: {cname}"
+                        return False, None, rejected_event(
+                            uploader, src.gid, f"cover name collision with different content: {cname}",
+                            title=meta["title"], version=meta["version"], identifier=meta["identifier"])
                 else:
                     cover_path = pathlib.Path(td) / cname
                     cover_path.write_bytes(image["data"])
@@ -1211,7 +1312,7 @@ class Processor:
                 size=tmp.stat().st_size, sha256=sha, uploader=target.owner, updated=_iso(now),
                 cover_url=asset_url(self.owner, self.repo, tag, cname) if image is not None else None)
             self._content[entry["file"]] = content
-            return True, entry
+            return True, entry, published_event(uploader, entry, mode, zip_name)
 
     # -- duplicates under another identifier ---------------------------
     def _entry_content(self, entry: dict) -> str | None:
@@ -1252,25 +1353,28 @@ class Processor:
             self.client.create_release(INBOX_TAG, "Inbox")
         _, old_entries = load_catalog(self.catalog_path)
         entries = {k: dict(m) for k, m in old_entries.items()}
+        self.results = []  # one 'published' / 'rejected' event per item of this run
         ok = rejected = 0
         for src in sources:
             try:
-                success, result = self._process_item(src, entries,
-                                                   datetime.now(timezone.utc))
+                success, result, event = self._process_item(src, entries,
+                                                          datetime.now(timezone.utc))
             except Exception as ex:  # a client hiccup must not strand the rest
                 src.delete()
-                success, result = False, f"error: {ex}"
+                success, result, event = False, None, rejected_event(src.uploader, src.gid, f"error: {ex}")
             if success:
                 entries[ident_key(result["id"])] = result
                 for entry in entries.values():
                     if entry.get("uploader") == src.uploader.uid:
                         entry["author"] = src.uploader.username  # a rename follows the owner's uploads
                 ok += 1
+                self.results.append(event)
                 print(f"  ok {src.label}: {result['name']} v{result['version']} "
                       f"(id {result['id']}, owner {result['uploader']})")
             else:
                 rejected += 1
-                print(f"  REJECTED {src.label}: {result}", file=sys.stderr)
+                self.results.append(event)
+                print(f"  REJECTED {src.label}: {event['reason']}", file=sys.stderr)
         if ok:
             write_catalog(self.catalog_path, list(entries.values()), self.config_path)
             print(f"\n{self.catalog_path.name}: catalog written ({ok} new/updated, {rejected} rejected)")
@@ -1666,6 +1770,94 @@ def ingest_forum(client: PackageClient, owner: str, repo: str, args) -> int:
     return 0
 
 
+# --------------------------------------------------------------- notify
+
+# `notify` POSTs a results file's events to the Worker's /catalog/events:
+# 10 events per request, X-Catalog-Signature = the hex HMAC-SHA256 of the
+# raw body keyed with the shared secret. One retry, 2 s later, on a network
+# error or 5xx; 4xx is final. The secret is never printed. `build.py notify`
+# never raises and always exits 0 (failures are logged).
+
+def sign_body(secret: str, body: bytes) -> str:
+    """X-Catalog-Signature: the hex HMAC-SHA256 of the raw body."""
+    return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+
+
+def chunk_events(events: list[dict], size: int = 10) -> list[list[dict]]:
+    """The events in chunks of at most `size` (10 per request)."""
+    if size < 1:
+        raise ValueError("size must be >= 1")
+    return [events[i:i + size] for i in range(0, len(events), size)]
+
+
+def post_event(url: str, secret: str, payload: bytes, *, delay: float = 2.0,
+               sleep=time.sleep, timeout: int = 60) -> bool:
+    """POSTs one signed chunk (a retry once, `delay` seconds later, on a
+    network error or 5xx). Never raises. True when the server accepted it."""
+    import urllib.error
+    import urllib.request
+    last = ""
+    for attempt in (1, 2):
+        try:
+            req = urllib.request.Request(url + "/catalog/events", data=payload, method="POST",
+                                        headers={"Content-Type": "application/json",
+                                                 "X-Catalog-Signature": sign_body(secret, payload)})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                code = r.status
+            if 200 <= code < 300:
+                return True
+            last = f"HTTP {code}"
+        except urllib.error.HTTPError as ex:
+            last = f"HTTP {ex.code}"
+            if ex.code < 500:  # 4xx: final (a 5xx is retried below)
+                print(f"  notify: {url} failed: {last}", file=sys.stderr)
+                return False
+        except Exception as ex:
+            last = ex.__class__.__name__  # the secret never appears in a message
+        if attempt == 1:
+            sleep(delay)
+    print(f"  notify: {url} failed after retry: {last}", file=sys.stderr)
+    return False
+
+
+def notify_events(url: str, secret: str, events: list[dict], *,
+                  delay: float = 2.0, sleep=time.sleep, timeout: int = 60) -> tuple[int, int]:
+    """Sends `events` (chunked, signed) to `url` + /catalog/events.
+    Returns (sent chunks, total chunks); never raises (failures are logged)."""
+    chunks = chunk_events(events)
+    sent = 0
+    for chunk in chunks:
+        payload = json.dumps({"ts": int(time.time()), "events": chunk},
+                            ensure_ascii=False).encode("utf-8")
+        if post_event(url, secret, payload, delay=delay, sleep=sleep, timeout=timeout):
+            sent += 1
+    return sent, len(chunks)
+
+
+def notify_cli(args) -> int:
+    """The `notify` subcommand: exit 0 even on failure (logged)."""
+    url = (args.url or os.environ.get("CATALOG_CALLBACK_URL", "")).strip().rstrip("/")
+    secret = (args.secret or os.environ.get("CATALOG_CALLBACK_SECRET", "")).strip()
+    if not url or not secret:
+        print("notify: CATALOG_CALLBACK_URL / CATALOG_CALLBACK_SECRET not set; nothing to do")
+        return 0
+    path = pathlib.Path(args.results)
+    if path.is_file():
+        try:
+            events = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as ex:
+            print(f"notify: {path} is not valid JSON ({ex}); nothing to do", file=sys.stderr)
+            return 0
+    else:
+        events = []  # a missing results file is a no-op, not a failure
+    if not isinstance(events, list):
+        print(f"notify: {path} is not a JSON array; nothing to do", file=sys.stderr)
+        return 0
+    sent, total = notify_events(url, secret, events)
+    print(f"notify: sent {sent}/{total} chunk(s)")
+    return 0
+
+
 # ------------------------------------------------------------------ cli
 
 
@@ -1701,6 +1893,8 @@ def main(argv: list[str] | None = None) -> int:
                      help="seed the dir's zips as uploads by --as-uid/--as-username (both required)")
     p.add_argument("--as-uid", metavar="ID", help="Discord user id the seeded packages belong to")
     p.add_argument("--as-username", metavar="NAME", help="Discord username published as their author")
+    p.add_argument("--results-file", metavar="PATH",
+                   help="write the run's outcome events (published/rejected) as a JSON array here, for `notify`")
     common(p)
 
     p = sub.add_parser("rebuild", help="regenerate the whole catalog from mod-* releases")
@@ -1730,11 +1924,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--owner", default=os.environ.get("GITHUB_OWNER"))
     p.add_argument("--repo", default=os.environ.get("GITHUB_REPO"))
 
+    p = sub.add_parser("notify", help="POST a results file's events to the Worker (never fails the run)")
+    p.add_argument("--results", required=True, help="the results file (a JSON array of events)")
+    p.add_argument("--url", default=None,
+                   help="the Worker origin (default: CATALOG_CALLBACK_URL)")
+    p.add_argument("--secret", default=None,
+                   help="the shared HMAC secret (default: CATALOG_CALLBACK_SECRET)")
+
     args = ap.parse_args(argv)
     config = pathlib.Path(args.config) if hasattr(args, "config") else None
     if args.cmd == "retitle":
         retitle(pathlib.Path(args.catalog), config)
         return 0
+    if args.cmd == "notify":  # no owner/repo: the callback goes to the Worker
+        try:
+            return notify_cli(args)
+        except Exception as ex:  # never raise (always exit 0; log the failure)
+            print(f"notify: {ex.__class__.__name__}", file=sys.stderr)
+            return 0
     owner, repo = args.owner, args.repo
     if not owner or not repo:
         gr = os.environ.get("GITHUB_REPOSITORY")
@@ -1754,6 +1961,7 @@ def main(argv: list[str] | None = None) -> int:
         rebuild(client, owner, repo, catalog, config, full=args.full)
         return 0
 
+    swept: list[dict] = []
     if args.from_dir:
         if not args.as_uid or not args.as_username:
             raise SystemExit("error: --from-dir needs --as-uid and --as-username: every package in the "
@@ -1771,12 +1979,17 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("error: --as-uid/--as-username only apply to --from-dir")
         if client.get_release(INBOX_TAG) is None:
             client.create_release(INBOX_TAG, "Inbox")
-        sources = inbox_items_from_release(client)
+        sources = inbox_items_from_release(client, swept)
         if not sources:
             print("inbox is empty; nothing to do")
+            if args.results_file:
+                write_json_atomic(pathlib.Path(args.results_file), swept)
             return 0
 
-    Processor(client, owner, repo, admins, catalog, config).run(sources)
+    processor = Processor(client, owner, repo, admins, catalog, config)
+    processor.run(sources)
+    if args.results_file:
+        write_json_atomic(pathlib.Path(args.results_file), swept + processor.results)
     return 0
 
 

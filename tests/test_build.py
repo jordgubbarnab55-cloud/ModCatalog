@@ -6,16 +6,22 @@ Run: python -m unittest discover -s tests
 import base64
 import contextlib
 import hashlib
+import hmac
+import http.server
 import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
 import unittest
 import zipfile
+from datetime import datetime, timedelta, timezone
 
 import build
 import trailer
@@ -1586,6 +1592,359 @@ class TestLegacyEndToEnd(Base):
         for m in data["mods"]:
             self.assertEqual(len(m["sha256"]), 64)
         self.assertEqual(len(data["mods"]), 3)
+
+
+class TestEvents(Base):
+    """A run's outcome events (published/rejected): the results file and the
+    event ids (mod-contract: `published` = <identKeyLower>:<package sha256>,
+    `rejected` = rej:<uploaderId>:<inbox group or asset id>)."""
+
+    def events(self) -> list[dict]:
+        return self.processor.results
+
+    def by_status(self, status: str) -> list[dict]:
+        return [e for e in self.events() if e["status"] == status]
+
+    def reset(self) -> None:
+        """A fresh world (no releases, no catalog) for the same Processor."""
+        rel = self.root / "releases"
+        for p in rel.glob("*") if rel.is_dir() else []:
+            if p.is_dir():
+                shutil.rmtree(p)
+        self.catalog.unlink(missing_ok=True)
+        self.n = 0
+
+    def test_published_event_fields_equal_the_catalog_entry(self):
+        image = make_image("png")
+        make_package(self.root / "a.zip", image=image, tags=["VFX"], game_version="5.6")
+        self.to_inbox(self.root / "a.zip", "12345", f"{S('12345')}__1__a.zip")
+        self.run_process()
+        pub = self.by_status("published")
+        self.assertEqual(len(pub), 1)
+        e = pub[0]
+        entry = self.catalog_mods()["12345.TestMod"]
+        self.assertEqual(e["status"], "published")
+        self.assertEqual(e["mode"], "new")
+        self.assertEqual(e["uploaderId"], "12345")
+        self.assertEqual(e["uploaderName"], "user12345")
+        self.assertEqual(e["title"], entry["name"])
+        self.assertEqual(e["version"], entry["version"])
+        self.assertEqual(e["description"], entry["description"])
+        self.assertEqual(e["author"], entry["author"])
+        self.assertEqual(e["identifier"], entry["id"])
+        self.assertEqual(e["tags"], entry.get("tags", []))
+        self.assertEqual(e["gameVersion"], entry.get("gameVersion"))
+        self.assertEqual(e["fileUrl"], entry["file"])
+        self.assertEqual(e["coverUrl"], entry.get("cover"))
+        self.assertEqual(e["size"], entry["size"])
+        self.assertEqual(e["sha256"], entry["sha256"])
+        self.assertEqual(e["assetName"], entry["file"].rsplit("/", 1)[-1])
+        # the event id: the identifier key + the stored package's sha256
+        tag = build.mod_tag("12345.TestMod")
+        self.assertEqual(e["eventId"],
+                         f"12345.testmod:{hashlib.sha256(self.client.asset_bytes(tag, e['assetName'])).hexdigest()}")
+
+    def test_update_event_mode(self):
+        make_package(self.root / "a.zip", title="Upd Mod", version="1.0")
+        self.to_inbox(self.root / "a.zip", "12345", f"{S('12345')}__1__a.zip")
+        self.run_process()
+        self.assertEqual(self.by_status("published")[0]["mode"], "new")
+        make_package(self.root / "b.zip", title="Upd Mod", version="1.1", identifier="12345.UpdMod")
+        self.to_inbox(self.root / "b.zip", "12345", f"{S('12345')}__2__b.zip")
+        self.run_process()  # `results` is per run
+        pub = self.by_status("published")
+        self.assertEqual(len(pub), 1)
+        self.assertEqual(pub[0]["mode"], "update")
+        self.assertEqual(pub[0]["identifier"], "12345.UpdMod")
+
+    def test_rejection_events_with_reasons_do_not_block(self):
+        good = self.root / "good.zip"
+        make_package(good, title="Good Mod")
+        self.to_inbox(good, "12345", f"{S('12345')}__1__good.zip")
+        make_package(self.root / "notrail.zip", no_trailer=True)
+        self.to_inbox(self.root / "notrail.zip", "12345", f"{S('12345')}__2__notrail.zip")
+        make_package(self.root / "corrupt.zip", corrupt=True)
+        self.to_inbox(self.root / "corrupt.zip", "12345", f"{S('12345')}__3__corrupt.zip")
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 2})
+        pub = self.by_status("published")
+        self.assertEqual(len(pub), 1)  # the good one survived the rejections
+        self.assertEqual(pub[0]["title"], "Good Mod")
+        rej = self.by_status("rejected")
+        self.assertEqual(len(rej), 2)
+        for e in rej:
+            self.assertIsNone(e["mode"])
+            self.assertEqual(e["uploaderId"], "12345")
+            self.assertEqual(e["uploaderName"], "user12345")
+            self.assertTrue(e["reason"])
+            self.assertLessEqual(len(e["reason"]), 300)
+            self.assertRegex(e["eventId"], r"^rej:12345:")
+            # rejected before the trailer is parsed: nothing is known
+            self.assertIsNone(e["title"])
+            self.assertIsNone(e["version"])
+            self.assertIsNone(e["identifier"])
+        self.assertTrue(any("no metadata trailer" in e["reason"] for e in rej))
+        self.assertTrue(any("not a valid zip file" in e["reason"] for e in rej))
+
+    def test_rejection_event_carries_the_known_fields(self):
+        make_package(self.root / "a.zip", title="Dup Mod", version="1.0", payload="X")
+        self.to_inbox(self.root / "a.zip", "111", f"{S('111')}__1__a.zip")
+        self.run_process()
+        make_package(self.root / "b.zip", title="Dup Mod", version="1.0", payload="X", author="other")
+        self.to_inbox(self.root / "b.zip", "222", f"{S('222')}__2__b.zip")
+        self.run_process()
+        rej = self.by_status("rejected")
+        self.assertEqual(len(rej), 1)
+        e = rej[0]
+        self.assertEqual((e["title"], e["version"], e["identifier"]), ("Dup Mod", "1.0", "222.DupMod"))
+        self.assertIn("duplicate of the existing mod 'Dup Mod' v1.0 (id 111.DupMod)", e["reason"])
+
+    def test_incomplete_group_emits_nothing(self):
+        # a set that declares 2 parts but only uploaded one: left for the next run
+        self.client.create_release(build.INBOX_TAG, "inbox")
+        d = self.client._release_dir(build.INBOX_TAG)
+        stamp = S("111")
+        manifest = {"files": [{"name": "mod.pak",
+                               "sha256": hashlib.sha256(b"PAK").hexdigest(), "parts": 2}]}
+        (d / f"{stamp}__u1__manifest.json").write_bytes(json.dumps(manifest).encode("utf-8"))
+        (d / f"{stamp}__u1__f0__p0of2__mod.pak").write_bytes(b"PAK")
+        events = []
+        sources = build.inbox_items_from_release(self.client, events)
+        self.assertEqual(sources, [])
+        self.assertEqual(events, [])
+        self.assertEqual(sorted(self.inbox_names()),
+                         sorted([f"{stamp}__u1__manifest.json", f"{stamp}__u1__f0__p0of2__mod.pak"]))
+
+    def test_stalled_group_is_rejected_with_the_sweep_reason(self):
+        # a group stalled for > 7 days: deleted, and a 'rejected' event
+        self.client.create_release(build.INBOX_TAG, "inbox")
+        d = self.client._release_dir(build.INBOX_TAG)
+        stamp = S("111")
+        manifest = {"files": [{"name": "mod.pak",
+                               "sha256": hashlib.sha256(b"PAK").hexdigest(), "parts": 1}]}
+        (d / f"{stamp}__u9__manifest.json").write_bytes(json.dumps(manifest).encode("utf-8"))
+        (d / f"{stamp}__u9__f0__p0of1__mod.pak").write_bytes(b"PAK")
+        old = (datetime.now(timezone.utc) - timedelta(days=8)).timestamp()
+        os.utime(d / f"{stamp}__u9__manifest.json", (old, old))
+        os.utime(d / f"{stamp}__u9__f0__p0of1__mod.pak", (old, old))
+        events = []
+        sources = build.inbox_items_from_release(self.client, events)
+        self.assertEqual(sources, [])
+        self.assertEqual(len(events), 1)
+        e = events[0]
+        self.assertEqual(e["status"], "rejected")
+        self.assertEqual(e["reason"], "incomplete upload expired")
+        self.assertEqual(e["eventId"], "rej:111:u9")
+        self.assertEqual(e["uploaderName"], "user111")
+        self.assertEqual(self.inbox_names(), [])  # the group was deleted
+
+    def test_event_ids_stable_and_distinct(self):
+        def stage() -> None:
+            make_package(self.root / "bad.zip", no_trailer=True)
+            self.to_inbox(self.root / "bad.zip", "12345", f"{S('12345')}__7__bad.zip")
+            make_package(self.root / "good.zip", title="Stable Mod")
+            self.to_inbox(self.root / "good.zip", "12345", f"{S('12345')}__8__good.zip")
+        stage()
+        self.run_process()
+        first = [e["eventId"] for e in self.events()]
+        self.assertEqual(len(first), 2)
+        self.assertNotEqual(first[0], first[1])  # distinct
+        self.reset()
+        stage()
+        self.run_process()
+        second = [e["eventId"] for e in self.events()]
+        # the rejection id (uploader + asset name) is stable across runs of
+        # the same input ...
+        self.assertEqual(first[0], second[0])
+        # ... the published one is checked against the stored package's bytes
+        # (the runner's per-upload fresh guid makes those differ between runs)
+        pub = self.by_status("published")[0]
+        tag = build.mod_tag("12345.StableMod")
+        sha = hashlib.sha256(self.client.asset_bytes(tag, pub["assetName"])).hexdigest()
+        self.assertEqual(pub["eventId"], f"12345.stablemod:{sha}")
+
+
+class TestResultsFile(Base):
+    """`process --results-file`: the events as a JSON array (atomic write,
+    `[]` when there were none, written even with rejections)."""
+
+    def run_cli(self, extra: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(ROOT / "build.py"), "process", "--from-inbox",
+             "--client", "local", "--root", str(self.root),
+             "--catalog", str(self.catalog), "--owner", OWNER, "--repo", REPO] + extra,
+            capture_output=True, text=True, cwd=str(ROOT))
+
+    def test_writes_one_event_per_item_including_rejections(self):
+        make_package(self.root / "a.zip", title="RF Mod")
+        self.to_inbox(self.root / "a.zip", "12345", f"{S('12345')}__1__a.zip")
+        make_package(self.root / "b.zip", no_trailer=True)
+        self.to_inbox(self.root / "b.zip", "12345", f"{S('12345')}__2__b.zip")
+        out = self.root / "res.json"
+        p = self.run_cli(["--results-file", str(out)])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        events = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(len(events), 2)
+        self.assertEqual(sorted(e["status"] for e in events), ["published", "rejected"])
+        self.assertEqual(events[0]["status"], "published")  # sources are in asset order
+
+    def test_empty_run_writes_an_empty_array(self):
+        out = self.root / "res.json"
+        p = self.run_cli(["--results-file", str(out)])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(out.read_text(encoding="utf-8")), [])
+
+    def test_no_results_file_no_file(self):
+        make_package(self.root / "a.zip", title="RF Mod")
+        self.to_inbox(self.root / "a.zip", "12345", f"{S('12345')}__1__a.zip")
+        p = self.run_cli([])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertFalse((self.root / "res.json").exists())
+
+
+class _NotifyHandler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.server.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
+        code = self.server.statuses.pop(0) if self.server.statuses else 200
+        self.send_response(code)
+        self.end_headers()
+        if code == 200:
+            self.wfile.write(b"{}")
+
+    def log_message(self, *args):
+        pass
+
+
+class _StubServer:
+    def __init__(self):
+        self._httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _NotifyHandler)
+        self.requests: list[dict] = []
+        self._httpd.requests = self.requests
+        self._httpd.statuses = []
+        self.port = self._httpd.server_address[1]
+
+    @property
+    def statuses(self) -> list[int]:
+        return self._httpd.statuses
+
+    @statuses.setter
+    def statuses(self, v: list[int]) -> None:
+        self._httpd.statuses = v
+
+    def start(self):
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._httpd.shutdown()
+        self._httpd.server_close()
+
+
+class TestNotify(unittest.TestCase):
+    """`build.py notify`: the signed callback to the Worker (a local HTTP stub
+    on 127.0.0.1; the signature is recomputed with hmac)."""
+
+    def setUp(self):
+        self.server = _StubServer()
+        self.server.start()
+        self.addCleanup(self.server.stop)
+        self.url = f"http://127.0.0.1:{self.server.port}"
+        self.secret = "test-secret"
+
+    def events(self, n: int) -> list[dict]:
+        return [{"eventId": f"e{i}", "status": "published"} for i in range(n)]
+
+    def check_signatures(self) -> None:
+        self.assertTrue(self.server.requests)
+        for req in self.server.requests:
+            want = hmac.new(self.secret.encode("utf-8"), req["body"], hashlib.sha256).hexdigest()
+            self.assertEqual(req["headers"].get("X-Catalog-Signature"), want)
+            self.assertEqual(req["headers"].get("Content-Type"), "application/json")
+            doc = json.loads(req["body"])
+            self.assertIsInstance(doc["ts"], int)
+            self.assertIsInstance(doc["events"], list)
+
+    def run_cli(self, results: str, env: dict | None = None) -> subprocess.CompletedProcess:
+        e = dict(os.environ) if env is None else env
+        return subprocess.run([sys.executable, str(ROOT / "build.py"), "notify",
+                              "--results", results], env=e, capture_output=True,
+                             text=True, cwd=str(ROOT))
+
+    def test_body_shape_signature_and_header(self):
+        sent, total = build.notify_events(self.url, self.secret, self.events(3), delay=0.0)
+        self.assertEqual((sent, total), (1, 1))
+        self.assertEqual(len(self.server.requests), 1)
+        self.assertEqual(self.server.requests[0]["path"], "/catalog/events")
+        self.check_signatures()
+        self.assertEqual(len(json.loads(self.server.requests[0]["body"])["events"]), 3)
+
+    def test_chunking_25_events_into_3_requests(self):
+        sent, total = build.notify_events(self.url, self.secret, self.events(25), delay=0.0)
+        self.assertEqual((sent, total), (3, 3))
+        self.assertEqual([len(json.loads(r["body"])["events"]) for r in self.server.requests],
+                         [10, 10, 5])
+        self.check_signatures()
+
+    def test_no_events_no_request(self):
+        sent, total = build.notify_events(self.url, self.secret, [], delay=0.0)
+        self.assertEqual((sent, total), (0, 0))
+        self.assertEqual(self.server.requests, [])
+
+    def test_retry_on_5xx_then_success(self):
+        self.server.statuses = [500, 503]  # both attempts 5xx: a failure, one retry
+        sent, total = build.notify_events(self.url, self.secret, self.events(1), delay=0.0)
+        self.assertEqual((sent, total), (0, 1))
+        self.assertEqual(len(self.server.requests), 2)
+        self.server.statuses = [500, 200]
+        sent, total = build.notify_events(self.url, self.secret, self.events(1), delay=0.0)
+        self.assertEqual((sent, total), (1, 1))
+        self.assertEqual(len(self.server.requests), 4)
+
+    def test_4xx_is_not_retried(self):
+        self.server.statuses = [404]
+        sent, total = build.notify_events(self.url, self.secret, self.events(1), delay=0.0)
+        self.assertEqual((sent, total), (0, 1))
+        self.assertEqual(len(self.server.requests), 1)
+
+    def test_server_down_is_a_clean_failure(self):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()  # nothing listens there anymore
+        sent, total = build.notify_events(f"http://127.0.0.1:{port}", self.secret,
+                                         self.events(1), delay=0.0)
+        self.assertEqual((sent, total), (0, 1))
+
+    def test_cli_missing_env_exits_zero_without_a_request(self):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CATALOG_CALLBACK")}
+        p = self.run_cli("does-not-exist.json", env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("not set", p.stdout)
+        self.assertEqual(self.server.requests, [])
+
+    def test_cli_missing_results_file_is_a_noop(self):
+        env = dict(os.environ)
+        env["CATALOG_CALLBACK_URL"] = self.url
+        env["CATALOG_CALLBACK_SECRET"] = self.secret
+        p = self.run_cli("does-not-exist.json", env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(self.server.requests, [])
+
+    def test_cli_sends_and_never_prints_the_secret(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(self.events(2), f)
+            name = f.name
+        self.addCleanup(os.unlink, name)
+        env = dict(os.environ)
+        env["CATALOG_CALLBACK_URL"] = self.url
+        env["CATALOG_CALLBACK_SECRET"] = self.secret
+        p = self.run_cli(name, env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("sent 1/1", p.stdout)
+        self.assertEqual(len(self.server.requests), 1)
+        self.check_signatures()
+        self.assertNotIn(self.secret, p.stdout + p.stderr)
 
 
 if __name__ == "__main__":

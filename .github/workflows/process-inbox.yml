@@ -37,12 +37,26 @@ jobs:
 
       # Drain the inbox: validate each package, re-home it to its mod's release,
       # merge into site/catalog.json. Invalid packages are rejected and
-      # removed without blocking the rest of the run.
+      # removed without blocking the rest of the run. The outcome events
+      # (published/rejected, plus the stalled-upload sweeps) go to
+      # inbox-results.json for the notify step below.
       - name: Drain the inbox release
-        run: python build.py process --from-inbox
+        run: python build.py process --from-inbox --results-file inbox-results.json
 
       - name: Commit catalog + deploy Pages
         uses: ./.github/actions/commit-and-deploy
         with:
           commit_path: site/catalog.json
           commit_message: "Regenerate catalog from inbox"
+
+      # After the Pages deploy (the site is live before the ping): POST the
+      # run's outcome events to the Worker's /catalog/events. always() +
+      # continue-on-error: the callback never fails the run; a missing results
+      # file or missing secrets is a no-op (exit 0).
+      - name: Notify the catalog event endpoint
+        if: always()
+        continue-on-error: true
+        env:
+          CATALOG_CALLBACK_URL: ${{ secrets.CATALOG_CALLBACK_URL }}
+          CATALOG_CALLBACK_SECRET: ${{ secrets.CATALOG_CALLBACK_SECRET }}
+        run: python build.py notify --results inbox-results.json

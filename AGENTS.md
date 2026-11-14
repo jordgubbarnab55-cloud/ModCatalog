@@ -225,7 +225,21 @@ to 64 KiB.
 
 - `python build.py process --from-inbox` — drain the `inbox` release
   (list/download/upload/delete through the client interface), validate,
-  re-home, merge into `site/catalog.json`.
+  re-home, merge into `site/catalog.json`. `--results-file PATH` also
+  writes the run's outcome events (one `published` or `rejected` dict per
+  item, plus the > 7-day sweeps as `rejected` with reason
+  "incomplete upload expired") as a JSON array, atomically, at the end
+  (written as `[]` when there were none, also on the empty-inbox early
+  return; `--from-dir` may use it too, but never notifies).
+  `published` = the catalog entry's fields reused as-is
+  (`eventId` = `<identKeyLower>:<package sha256>`, `mode` = new/update,
+  `uploaderId`/`uploaderName`, `title`/`version`/`description`/`author`/
+  `identifier`/`tags`/`gameVersion`, `fileUrl`/`coverUrl`, `size`,
+  `sha256`, `assetName`); `rejected` = `eventId` =
+  `rej:<uploaderId>:<inbox group or asset id>`, one human-readable reason
+  line (<= 300 chars), `mode` null, and whatever of title/version/
+  identifier is known (else null). Incomplete groups waiting for parts
+  emit nothing; `rebuild` emits nothing.
 - `python build.py process --from-dir <dir> --as-uid <id> --as-username
   <name>` — treat the dir's zips as uploads by that Discord account; used
   for one-off seeding (the `seed-legacy` workflow's inputs).
@@ -238,6 +252,14 @@ to 64 KiB.
   identifier; one download in practice) — cost is O(mods), not O(upload
   history). `--full` (the `rebuild.yml` dispatch input `full`) is the
   exhaustive audit: every package of every release, not just the newest.
+- `python build.py notify --results PATH [--url URL] [--secret S]` —
+  POST the events to `CATALOG_CALLBACK_URL/catalog/events` (defaults from
+  the env of the same names; missing → a one-line note, exit 0): 10
+  events per request, `X-Catalog-Signature` = the hex HMAC-SHA256 of the
+  raw body keyed with `CATALOG_CALLBACK_SECRET`, one retry 2 s later on a
+  network error or 5xx (4xx is final); never raises, always exit 0
+  (failures logged), the secret is never printed. A missing results file
+  is a no-op.
 - **`--client local --root <dir>`** selects the directory-backed fake
   (releases = folders, assets = files, mtime = created-at) so the whole
   pipeline runs offline; the default `gh` client shells out to the
@@ -273,8 +295,14 @@ to 64 KiB.
   the payload carries nothing). `permissions: contents:write, pages:write,
   id-token:write`; `concurrency: {group: catalog, cancel-in-progress:
   false}`. Steps: checkout, setup-python 3.12, `python build.py process
-  --from-inbox` (with `GH_TOKEN: ${{ github.token }}`), then the shared
-  `commit-and-deploy` composite action.
+  --from-inbox --results-file inbox-results.json` (with `GH_TOKEN:
+  ${{ github.token }}`), then the shared `commit-and-deploy` composite
+  action, then — **after the Pages deploy, so the site is live before
+  the ping** — a notify step (`if: always()`, `continue-on-error: true`):
+  `python build.py notify --results inbox-results.json` with
+  `CATALOG_CALLBACK_URL` / `CATALOG_CALLBACK_SECRET` from repository
+  secrets (the Worker's `/catalog/events`; missing secrets or a missing
+  results file are no-ops, so it never fails the run).
 - `rebuild.yml` — `workflow_dispatch` (optional input `full` = the
   exhaustive audit; the default run is the selective scan), `python build.py
   rebuild`, commit, deploy. Same concurrency group.
