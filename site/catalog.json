@@ -5,129 +5,6 @@
   "verifiedAuthors": true,
   "mods": [
     {
-      "id": "94daad40-07ad-4237-9a80-5f5b6b82ceb0",
-      "name": "adadghhjg",
-      "author": "uncool_1234",
-      "version": "43.1",
-      "gameVersion": "54.0.0",
-      "description": "234",
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-94daad40-07ad-4237-9a80-5f5b6b82ceb0/adadghhjg-43.1.zip",
-      "size": 3388480,
-      "sha256": "e2731ef3fc6613868478475ae9eef231301ea8f7e130364df99a0d9fd63b132c",
-      "uploader": "1509993694902878381",
-      "updated": "2026-10-30T08:54:31Z",
-      "tags": [
-        "Blueprint",
-        "Skin",
-        "Sound",
-        "VFX"
-      ]
-    },
-    {
-      "id": "70397db8-f70a-4f85-a17a-d3e3ab1d5067",
-      "name": "Example UE Mod",
-      "author": "Epic Games",
-      "version": "1.0.0",
-      "description": "Sample UE 5.6 packaged container (.utoc/.ucas/.pak) zipped as a downloadable package.",
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-70397db8-f70a-4f85-a17a-d3e3ab1d5067/Example-UE-Mod-1.0.0.zip",
-      "size": 10336186,
-      "sha256": "c7e0991c767473fc5eb8872143e0b2fadfe956e6cdb9b7cfbc18e77bdcf2f437",
-      "uploader": null,
-      "updated": "2026-10-29T10:35:41Z",
-      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-70397db8-f70a-4f85-a17a-d3e3ab1d5067/70397db8-f70a-4f85-a17a-d3e3ab1d5067-cover-b7d038b8.jpg"
-    },
-    {
-      "id": "9704a204-c4f1-46f5-82d7-6396c0316ac5",
-      "name": "fghfgh",
-      "author": "uncool_1234",
-      "version": "",
-      "description": "",
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-9704a204-c4f1-46f5-82d7-6396c0316ac5/fghfgh-package.zip",
-      "size": 4822288,
-      "sha256": "cf416c45ec68ae019e744432ae25ab7cb015531e89796c168c2956e3ec1dc2e1",
-      "uploader": "1509993694902878381",
-      "updated": "2026-11-04T22:25:42Z",
-      "tags": [
-        "Sound"
-      ]
-    },
-    {
-      "id": "05dfce29-38db-4c42-b65c-e7d1196af540",
-      "name": "Frostbound Interiors",
-      "author": "Aurora Studio",
-      "version": "1.2.0",
-      "description": "Snow-covered apartment interiors with warm lighting, frosted windows, and seasonal props.",
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-05dfce29-38db-4c42-b65c-e7d1196af540/Frostbound-Interiors-1.2.0.zip",
-      "size": 10188443,
-      "sha256": "59bd175c9f299205f8693ad5eb1d5901a179f29fd98147c310caf85ebe982092",
-      "uploader": null,
-      "updated": "2026-10-29T10:35:45Z",
-      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-05dfce29-38db-4c42-b65c-e7d1196af540/05dfce29-38db-4c42-b65c-e7d1196af540-cover-940db1af.png",
-      "tags": [
-        "Blueprint",
-        "Skin",
-        "Environment",
-        "VFX"
-      ]
-    },
-    {
-      "id": "0adb8d0f-a778-48f6-8750-1641430e113f",
-      "name": "Galaxy Lockers",
-      "author": "uncool_1234",
-      "version": "",
-      "description": "",
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-0adb8d0f-a778-48f6-8750-1641430e113f/Galaxy-Lockers-package.zip",
-      "size": 3386774,
-      "sha256": "7c771a18ee1b7942c33302c78c975ab0e834085d3cd318d86e2f37bc9adb347d",
-      "uploader": "1509993694902878381",
-      "updated": "2026-11-04T22:23:41Z",
-      "tags": [
-        "Skin",
-        "Environment",
-        "VFX"
-      ]
-    },
-    {
-      "id": "ceaddf7b-b079-4661-b36c-1e74feb091ca",
-      "name": "Horologium Core [3]",
-      "author": "uncool_1234",
-      "version": "2.0.0",
-      "gameVersion": "11.0.1",
-      "description": "Blueprint mod loader. New and improved.",
-      "tags": [
-        "Blueprint",
-        "Skin",
-        "Environment",
-        "Sound",
-        "VFX"
-      ],
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-ceaddf7b-b079-4661-b36c-1e74feb091ca-a8809c56/Horologium-Core-3-2.0.0.zip",
-      "size": 905266,
-      "sha256": "73628a948ad6d6b40c46209deed4873f28216b454c2095b9ea3bab31e1cd147f",
-      "uploader": "1509993694902878381",
-      "updated": "2026-11-06T21:32:51Z",
-      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-ceaddf7b-b079-4661-b36c-1e74feb091ca-a8809c56/cover-69bd5cb4.png"
-    },
-    {
-      "id": "742c2e78-a272-44dc-9ea4-969c36eca47f",
-      "name": "Neon Night Drive",
-      "author": "Pixel Forge",
-      "version": "0.3.1",
-      "description": "Neon-lit street interiors, holographic signage, and volumetric lighting for night scenes.",
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-742c2e78-a272-44dc-9ea4-969c36eca47f/Neon-Night-Drive-0.3.1.zip",
-      "size": 10188503,
-      "sha256": "168781e1f0389f46269b862982407909a705f62dea2d1c24935df2de1efa88bc",
-      "uploader": null,
-      "updated": "2026-10-29T10:35:49Z",
-      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-742c2e78-a272-44dc-9ea4-969c36eca47f/742c2e78-a272-44dc-9ea4-969c36eca47f-cover-64402791.png",
-      "tags": [
-        "Skin",
-        "Environment",
-        "Sound",
-        "VFX"
-      ]
-    },
-    {
       "id": "1509993694902878381.RedLegacyNea",
       "name": "Red Legacy Nea 3",
       "author": "uncool_1234",
@@ -141,7 +18,7 @@
       "size": 214239101,
       "sha256": "91a8a3ec88f1d42d51f8cffc50369da9e71c05452e61f2298573ead48cdb1d48",
       "uploader": "1509993694902878381",
-      "updated": "2026-11-06T23:14:29Z",
+      "updated": "2026-11-06T23:14:44Z",
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.redlegacynea-1a41ea7d/cover-17bceb40.png"
     },
     {
@@ -155,32 +32,8 @@
       "size": 39753754,
       "sha256": "42848f76909234af82351eaa89a56949255c218d233598eb85456b778ffb7827",
       "uploader": "1509993694902878381",
-      "updated": "2026-11-06T23:35:52Z",
+      "updated": "2026-11-06T23:35:59Z",
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.residentevilcharacterssurviors-c77c898f/cover-260fd23e.png"
-    },
-    {
-      "id": "1509993694902878381.ZZTestPlan4",
-      "name": "ZZ Test Plan4",
-      "author": "uncool_1234",
-      "version": "1.0.0",
-      "description": "plan 4 live test package",
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.zztestplan4-99e57c54/ZZ-Test-Plan4-1.0.0.zip",
-      "size": 736,
-      "sha256": "e8b0c278ea3cbddb8798e0d2609495749a1b06dc33fda7233788fdbad18cebf7",
-      "uploader": "1509993694902878381",
-      "updated": "2026-11-14T15:16:33Z"
-    },
-    {
-      "id": "1509993694902878381.ZZTestPlan4b",
-      "name": "ZZ Test Plan4b",
-      "author": "uncool_1234",
-      "version": "1.0.0",
-      "description": "plan 4 live test, second package",
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.zztestplan4b-a925e70a/ZZ-Test-Plan4b-1.0.0.zip",
-      "size": 743,
-      "sha256": "6ebc86d3e9c8d8281680eee6442304cc9f09ce5a20cb8489636c7e98c76043a9",
-      "uploader": "1509993694902878381",
-      "updated": "2026-11-14T15:20:27Z"
     }
   ]
 }
