@@ -34,18 +34,6 @@
       "uploader": "1509993694902878381",
       "updated": "2026-11-06T23:35:59Z",
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.residentevilcharacterssurviors-c77c898f/cover-260fd23e.png"
-    },
-    {
-      "id": "1509993694902878381.ZZTestFinal",
-      "name": "ZZTestFinal",
-      "author": "uncool_1234",
-      "version": "1.0.2",
-      "description": "raw v1.0.2 via metadata.json",
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.zztestfinal-47fc7bc6/ZZTestFinal-1.0.2.zip",
-      "size": 751,
-      "sha256": "46c69f40062ba5a1fdc92f7c576e1e34ca437db1ed75fcccff83a287529f74a6",
-      "uploader": "1509993694902878381",
-      "updated": "2026-11-14T20:28:14Z"
     }
   ]
 }
