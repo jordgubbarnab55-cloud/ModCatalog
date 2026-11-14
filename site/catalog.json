@@ -39,13 +39,13 @@
       "id": "1509993694902878381.ZZTestFinal",
       "name": "ZZ Test Final",
       "author": "uncool_1234",
-      "version": "1.0.0",
-      "description": "E2E plan-6 test: initial version",
-      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.zztestfinal-47fc7bc6/ZZ-Test-Final-1.0.0.zip",
-      "size": 736,
-      "sha256": "8b980c2294aee14f162625cbefb885431b1f66ed1e345802021ac613d3d83b98",
+      "version": "1.0.1",
+      "description": "E2E plan-6 test: version bump",
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.zztestfinal-47fc7bc6/ZZ-Test-Final-1.0.1.zip",
+      "size": 731,
+      "sha256": "2239f7a14490c042161a973c40d320b48806ffcac4962e51c6248d89ddcb7df1",
       "uploader": "1509993694902878381",
-      "updated": "2026-11-14T19:58:05Z"
+      "updated": "2026-11-14T19:59:54Z"
     }
   ]
 }
