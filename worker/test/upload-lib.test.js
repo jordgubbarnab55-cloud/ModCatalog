@@ -5,7 +5,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   configOk, statusMessage, findNewMod, findNewModByName, POLL_MAX_MS,
-  whoamiUrl, checkToken, forcedFields, authorMismatchNote, resolveForm, buildMetadataJson,
+  whoamiUrl, authUrl, peekCode, redeemCode, logoutToken, parseLoginHash,
+  checkToken, forcedFields, authorMismatchNote, resolveForm, buildMetadataJson,
   classifySelection, selectionLabel, uploadedText, confirmText,
   ownMods, filterPickerMods, editorPrefillFromEntry, updatePrefill, NO_OWN_MODS_TEXT,
 } from "../../site/upload-lib.js";
@@ -23,6 +24,8 @@ test("configOk rejects placeholders, empty, non-http and missing values", () => 
 
 test("statusMessage covers every documented status", () => {
   assert.match(statusMessage(202), /processed/i);
+  assert.match(statusMessage(202), /Discord/i);
+  assert.match(statusMessage(202), /1-2 minutes/i);
   assert.match(statusMessage(401), /token/i);
   assert.match(statusMessage(411), /size/i);
   assert.match(statusMessage(413), /100 MB/i);
@@ -75,6 +78,100 @@ test("whoamiUrl sits next to the upload URL", () => {
   assert.equal(whoamiUrl("https://w.example.workers.dev/upload/"), "https://w.example.workers.dev/whoami");
   assert.equal(whoamiUrl("https://example.com/api/upload?x=1#h"), "https://example.com/api/whoami");
   assert.equal(whoamiUrl("https://w.example.workers.dev"), "https://w.example.workers.dev/whoami");
+});
+
+// ------------------------------------------------------ the login link
+
+const CODE = "lc_" + "a".repeat(24);   // the shape of a minted code
+
+test("parseLoginHash accepts only #login= + a valid code", () => {
+  assert.equal(parseLoginHash("#login=" + CODE), CODE);
+  assert.equal(parseLoginHash("#login=lc_" + "c".repeat(20)), "lc_" + "c".repeat(20), "exactly 20 chars after the prefix");
+  assert.equal(parseLoginHash("#login=lc_" + "d".repeat(80)), "lc_" + "d".repeat(80), "exactly 80 chars after the prefix");
+});
+
+test("parseLoginHash rejects empty, wrong prefix, extra params, query style, short, long, bad chars", () => {
+  assert.equal(parseLoginHash("#login="), null, "empty code");
+  assert.equal(parseLoginHash("#upload" + CODE), null, "wrong prefix");
+  assert.equal(parseLoginHash("#Login=" + CODE), null, "case-sensitive prefix");
+  assert.equal(parseLoginHash("?login=" + CODE), null, "query-string style");
+  assert.equal(parseLoginHash(CODE), null, "no fragment at all");
+  assert.equal(parseLoginHash("#login=" + CODE + "&x=1"), null, "extra parameter");
+  assert.equal(parseLoginHash("#login=" + "lc_" + "e".repeat(19)), null, "19 chars is too short");
+  assert.equal(parseLoginHash("#login=" + "lc_" + "f".repeat(81)), null, "81 chars is too long");
+  assert.equal(parseLoginHash("#login=mm_" + "a".repeat(24)), null, "token prefix");
+  assert.equal(parseLoginHash("#login=lc_" + "g".repeat(10) + "+/=" + "h".repeat(10)), null, "non-base64url characters");
+  assert.equal(parseLoginHash("#login=lc_" + " " + "i".repeat(24)), null, "space");
+  assert.equal(parseLoginHash(""), null, "empty hash");
+  assert.equal(parseLoginHash(null), null, "null");
+  assert.equal(parseLoginHash(undefined), null, "undefined");
+  // underscores and dashes are part of base64url
+  assert.equal(parseLoginHash("#login=lc_" + "-".repeat(23) + "_" + "j"), "lc_" + "-".repeat(23) + "_" + "j");
+});
+
+test("authUrl sits next to the upload URL, under /auth/", () => {
+  assert.equal(authUrl("https://w.example.workers.dev/upload", "peek"), "https://w.example.workers.dev/auth/peek");
+  assert.equal(authUrl("https://w.example.workers.dev/upload/", "redeem"), "https://w.example.workers.dev/auth/redeem");
+  assert.equal(authUrl("https://example.com/api/upload?x=1#h", "logout"), "https://example.com/api/auth/logout");
+  assert.equal(authUrl("https://w.example.workers.dev", "peek"), "https://w.example.workers.dev/auth/peek");
+});
+
+function codeFetch(status, body, seen = {}) {
+  return async (url, init) => {
+    seen.url = url;
+    seen.init = init;
+    return { status, json: async () => { if (body === undefined) throw new Error("no json"); return body; } };
+  };
+}
+
+test("peekCode: 200 gives the identity, posting the code (no token)", async () => {
+  const seen = {};
+  const r = await peekCode("https://w/auth/peek", CODE, codeFetch(200, { discordId: "42", username: "alice", expiresAt: "2026-01-01T00:00:00Z" }, seen));
+  assert.deepEqual(r, { ok: true, discordId: "42", username: "alice", expiresAt: "2026-01-01T00:00:00Z" });
+  assert.equal(seen.url, "https://w/auth/peek");
+  assert.equal(seen.init.method, "POST");
+  assert.deepEqual(JSON.parse(seen.init.body), { code: CODE });
+  assert.ok(!seen.init.headers.Authorization, "no bearer token on a peek");
+});
+
+test("peekCode: 404 is unknown, 410 is the server's reason, network is neither", async () => {
+  const r404 = await peekCode("u", CODE, codeFetch(404, { error: "unknown code", reason: "unknown" }));
+  assert.deepEqual([r404.ok, r404.reason], [false, "unknown"]);
+  assert.match(r404.message, /Discord/);
+  const r410e = await peekCode("u", CODE, codeFetch(410, { error: "code expired", reason: "expired" }));
+  assert.deepEqual([r410e.ok, r410e.reason], [false, "expired"]);
+  const r410u = await peekCode("u", CODE, codeFetch(410, { error: "code used", reason: "used" }));
+  assert.deepEqual([r410u.ok, r410u.reason], [false, "used"]);
+  assert.match(r410u.message, /already been used/);
+  const r410plain = await peekCode("u", CODE, codeFetch(410, { error: "code expired" }));
+  assert.equal(r410plain.reason, "expired", "410 without a reason defaults to expired");
+  const down = await peekCode("u", CODE, async () => { throw new TypeError("fetch failed"); });
+  assert.deepEqual([down.ok, down.reason], [false, "network"]);
+  assert.match(down.message, /network/i);
+  const boom = await peekCode("u", CODE, codeFetch(500, {}));
+  assert.deepEqual([boom.ok, boom.reason], [false, "network"]);
+});
+
+test("redeemCode: 200 gives the token; a 200 without one does not", async () => {
+  const seen = {};
+  const r = await redeemCode("https://w/auth/redeem", CODE, codeFetch(200, { token: "ms_" + "z".repeat(43), discordId: "42", username: "alice", expiresAt: "2027-01-01T00:00:00Z" }, seen));
+  assert.deepEqual(r, { ok: true, token: "ms_" + "z".repeat(43), discordId: "42", username: "alice", expiresAt: "2027-01-01T00:00:00Z" });
+  assert.deepEqual(JSON.parse(seen.init.body), { code: CODE });
+  const bad = await redeemCode("u", CODE, codeFetch(200, { discordId: "42", username: "alice" }));
+  assert.equal(bad.ok, false, "no token in the body: not an ok redeem");
+  const used = await redeemCode("u", CODE, codeFetch(410, { error: "code used", reason: "used" }));
+  assert.deepEqual([used.ok, used.reason], [false, "used"]);
+  const unknown = await redeemCode("u", CODE, codeFetch(404, { error: "unknown code", reason: "unknown" }));
+  assert.deepEqual([unknown.ok, unknown.reason], [false, "unknown"]);
+});
+
+test("logoutToken: posts the bearer token, never rejects", async () => {
+  const seen = {};
+  await logoutToken("https://w/auth/logout", "ms_t", codeFetch(204, undefined, seen));
+  assert.equal(seen.init.method, "POST");
+  assert.equal(seen.init.headers.Authorization, "Bearer ms_t");
+  await logoutToken("u", "t", async () => { throw new TypeError("fetch failed"); });   // no throw
+  await logoutToken("u", "t", codeFetch(500, {}));   // no throw
 });
 
 function fakeFetch(status, body, seen = {}) {

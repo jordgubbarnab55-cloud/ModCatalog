@@ -17,7 +17,7 @@ export function configOk(uploadUrl) {
 /** Human-readable message for an upload HTTP status (or "network"). */
 export function statusMessage(status) {
   switch (status) {
-    case 202: return "Your mod is being processed. Please check back in a few minutes.";
+    case 202: return "Your mod is queued and being processed. You'll get a ping in Discord when it's live (usually 1-2 minutes) — or if it is rejected.";
     case 401: return "Token is not valid. Get a fresh one in Discord with /token.";
     case 411: return "The browser could not send the file size. Please try again.";
     case 413: return "One upload was over 100 MB. Upload the loose .utoc/.ucas/.pak files instead of a big .zip.";
@@ -179,6 +179,66 @@ export function whoamiUrl(uploadUrl) {
   return u.toString();
 }
 
+/** The Worker's /auth/<name> ("peek" | "redeem" | "logout") URL next to its
+ *  /upload URL. */
+export function authUrl(uploadUrl, name) {
+  const u = new URL(uploadUrl);
+  u.pathname = u.pathname.replace(/\/upload\/?$/, "").replace(/\/$/, "") + "/auth/" + name;
+  u.search = "";
+  u.hash = "";
+  return u.toString();
+}
+
+/** Asks the Worker about `code`. `peek` is the read-only check (a page load
+ *  or link prefetch must never burn it); `redeem` is the atomic single-use
+ *  burn that returns the web token. Resolves to
+ *  { ok: true, discordId, username, expiresAt } (redeem adds `token`) or
+ *  { ok: false, reason: "unknown" | "expired" | "used" | "network", message }.
+ */
+async function codeRequest(url, code, withToken, fetchImpl) {
+  let res;
+  try {
+    res = await fetchImpl(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }), cache: "no-store" });
+  } catch {
+    return { ok: false, reason: "network", message: statusMessage("network") };
+  }
+  let body = null;
+  try { body = await res.json(); } catch { /* not JSON */ }
+  const ok = res.status === 200
+    && body
+    && (body.discordId != null)
+    && typeof body.username === "string" && body.username
+    && (!withToken || typeof body.token === "string" && body.token);
+  if (ok)
+    return withToken
+      ? { ok: true, token: body.token, discordId: String(body.discordId), username: body.username, expiresAt: body.expiresAt }
+      : { ok: true, discordId: String(body.discordId), username: body.username, expiresAt: body.expiresAt };
+  if (res.status === 404)
+    return { ok: false, reason: "unknown", message: "This link is not valid. Click the upload button in Discord again." };
+  if (res.status === 410) {
+    const reason = body && body.reason === "used" ? "used" : "expired";
+    return { ok: false, reason, message: `This link has ${reason === "used" ? "already been used" : "expired"}. Click the upload button in Discord again.` };
+  }
+  return { ok: false, reason: "network", message: statusMessage(res.status) };
+}
+
+export function peekCode(url, code, fetchImpl = fetch) {
+  return codeRequest(url, code, false, fetchImpl);
+}
+
+export function redeemCode(url, code, fetchImpl = fetch) {
+  return codeRequest(url, code, true, fetchImpl);
+}
+
+/** Best-effort logout (the Worker deletes the token only when it is a `web`
+ *  one); never rejects — a failure just leaves the token for the next time.
+ */
+export async function logoutToken(url, token, fetchImpl = fetch) {
+  try {
+    await fetchImpl(url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + token }, body: "{}", cache: "no-store" });
+  } catch { /* best effort */ }
+}
+
 /** Asks the Worker whom `token` belongs to. Resolves to
  *  { ok: true, identity: { discordId, username } } or
  *  { ok: false, rejected, message }: `rejected` means the token itself is bad
@@ -262,6 +322,16 @@ export function uploadedText(title, version, update = false) {
 export function doneText(name, version) {
   const v = (version ?? "").trim();
   return `Done — “${(name ?? "").trim()}”${v ? ` v${v}` : ""} is now in the catalog.`;
+}
+
+/** The one-time login code from the Discord link's fragment
+ *  (`#login=<code>`), or null: only `#login=` + `lc_` + 20-80 base64url
+ *  characters (extra parameters, query-string styles, anything else are
+ *  rejected — a fragment is never sent to the server). */
+export function parseLoginHash(hash) {
+  if (typeof hash !== "string" || !hash.startsWith("#login=")) return null;
+  const code = hash.slice("#login=".length);
+  return /^lc_[A-Za-z0-9_-]{20,80}$/.test(code) ? code : null;
 }
 
 /** A title to start from when the package has none: the file's base name. */
@@ -398,5 +468,5 @@ export function updatePrefill(entry, packagePrefill, vocabulary = null) {
 // The pages load this as <script type="module">; expose the helpers
 // (module scope is not global). No-op under Node (tests import directly).
 if (typeof window !== "undefined") {
-  Object.assign(window, { configOk, whoamiUrl, statusMessage, findNewMod, findNewModByName, findPublishedMod, classifyRawSet, POLL_MAX_MS });
+  Object.assign(window, { configOk, whoamiUrl, authUrl, statusMessage, parseLoginHash, peekCode, redeemCode, logoutToken, findNewMod, findNewModByName, findPublishedMod, classifyRawSet, POLL_MAX_MS });
 }

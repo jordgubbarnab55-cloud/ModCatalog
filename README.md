@@ -50,14 +50,21 @@ Pages.
 
 ## Adding a mod
 
-1. In Discord, run **`/token`** and copy the token it shows (treat it like
-   a password; `/token` again replaces it, `/token revoke` kills it). The
-   token carries your Discord username, which becomes the mods' author; a
-   token minted before that was recorded is rejected — mint a new one.
+1. In the catalog's Discord server, click **"Upload or update a mod"** in
+   the #mods text channel and open the link button the bot replies with
+   (it works once and expires in 5 minutes). The site opens the upload
+   wizard already signed in; the link is turned into a long-lived sign-in
+   (stored in the browser) the moment you click "Upload a new mod" or
+   "Update a mod". Alternatively, run **`/token`** and paste the token
+   into the wizard's token field (treat it like a password; `/token`
+   again replaces it; "Use a different account" in the wizard logs out
+   and clears the sign-in). The sign-in carries your Discord username,
+   which becomes the mods' author; a token minted before that was
+   recorded is rejected — mint a new one.
 2. Upload it — either as a `.zip` or as the raw container files
    (`.utoc`/`.ucas`/`.pak`), from ModManager's upload flow (against the
    Worker API documented in `worker/README.md`) or from the web page at
-   `<catalog URL>` ("Upload a mod": paste the token once, pick the package,
+   `<catalog URL>` ("Upload a mod" or the Discord link: pick the package,
    edit the metadata, confirm). Files over 100 MB are automatically
    part-split by the client. The page's editor prefills from the package's
    metadata trailer (or starts empty) and the catalog writes your edited

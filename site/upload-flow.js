@@ -13,6 +13,7 @@ import {
   classifySelection, buildManifest, buildMetadataJson, planRequests, sha256Hex, statusMessage,
   confirmText, titleFromBase, forcedFields, authorMismatchNote, whoamiUrl,
   checkToken, selectionLabel, ownMods, filterPickerMods, updatePrefill, NO_OWN_MODS_TEXT,
+  authUrl, peekCode, redeemCode, logoutToken,
 } from "./upload-lib.js";
 import { readUtocFromZip, shapeProblem, ZipError, MAX_UTOC_BYTES } from "./zip-lib.js";
 import { readTrailer, parseTocHeader, TrailerError, TOC_SUPPORTED_VERSION } from "./trailer.js";
@@ -131,13 +132,14 @@ async function analyze(selection, files, vocabulary) {
 export function createUploadFlow(ctx) {
   let session = null;
 
-  function start(opener) {
+  function start(opener, opts = {}) {
     if (session) return;
     if (!ctx.uploadUrl()) {
       notConfigured(opener);
       return;
     }
     session = new Session(opener);
+    if (opts.loginCode) session.loginCode = opts.loginCode;
     session.begin();
   }
 
@@ -163,6 +165,9 @@ export function createUploadFlow(ctx) {
       this.editor = null;
       this.editorModal = null;
       this.identity = null;
+      this.loginCode = null;  // the Discord link's code, until peeked
+      this.pendingCode = null;  // a peeked code, redeemed on the explicit click
+      this.linkNote = null;   // the choice step's one-line note (a dead link fell back to the stored token)
       this.lastForm = null;
       this.pkg = null;
       this.mode = null;     // "upload" | "update", from the choice step
@@ -197,8 +202,74 @@ export function createUploadFlow(ctx) {
     begin() {
       // refetched so a mod uploaded minutes ago can be updated
       this.mods = ctx.loadMods().catch(() => []);
-      if (tokenStore.get()) this.stepCheck();
+      // a Discord link wins: the stored token (if any) is ignored in this session
+      if (this.loginCode) this.stepLoginPeek();
+      else if (tokenStore.get()) this.stepCheck();
       else this.stepToken();
+    }
+
+    /** The Discord link's first check (a non-burning peek). */
+    async stepLoginPeek() {
+      const m = this.open("Checking your link", "small");
+      m.panel.append(el("h2", "", "Checking your link…"));
+      this.show(m);
+      const result = await peekCode(authUrl(ctx.uploadUrl(), "peek"), this.loginCode);
+      if (this.ended) return;
+      if (result.ok) {
+        this.identity = { discordId: result.discordId, username: result.username };
+        this.pendingCode = this.loginCode;
+        this.loginCode = null;
+        this.stepChoice();
+        return;
+      }
+      if (result.reason === "network") {
+        this.stepLinkFailed(result.message);
+        return;
+      }
+      // the link is dead (unknown/expired/used): the stored token wins, if any
+      if (tokenStore.get()) {
+        this.linkNote = "Your Discord link is no longer valid, so this browser's saved sign-in is used instead.";
+        this.stepCheck();
+      } else {
+        this.stepLinkDead(result.message);
+      }
+    }
+
+    /** The link is dead and there is no stored token: explain, offer a token. */
+    stepLinkDead(message) {
+      const m = this.open("Link no longer valid", "small");
+      m.panel.append(
+        el("h2", "", "This link has expired or was already used"),
+        el("p", "", "Click the upload button in Discord again to get a fresh link."));
+      const actions = el("div", "actions");
+      const paste = el("button", "btn", "Paste a token instead");
+      paste.type = "button";
+      paste.addEventListener("click", () => {
+        tokenStore.clear();
+        this.identity = null;
+        this.stepToken();
+      });
+      const close = el("button", "btn primary", "Close");
+      close.type = "button";
+      close.addEventListener("click", () => this.end());
+      actions.append(paste, close);
+      m.panel.appendChild(actions);
+      this.show(m);
+      close.focus({ preventScroll: true });
+    }
+
+    /** The link check could not be made (network / server): retry. */
+    stepLinkFailed(message) {
+      const m = this.open("Link check failed", "small");
+      m.panel.append(el("h2", "", "Could not check your link"), el("p", "upload-status err", message));
+      const retry = el("button", "btn primary", "Try again");
+      retry.type = "button";
+      retry.addEventListener("click", () => this.stepLoginPeek());
+      const actions = el("div", "actions");
+      actions.append(this.differentToken(), retry);
+      m.panel.appendChild(actions);
+      this.show(m);
+      retry.focus({ preventScroll: true });
     }
 
     /** Validates the stored token; a rejected one is dropped and asked for again. */
@@ -256,6 +327,7 @@ export function createUploadFlow(ctx) {
       m.panel.append(
         el("h2", "", "What would you like to do?"),
         el("p", "", `Signed in as ${this.identity.username}.`));
+      if (this.linkNote) m.panel.appendChild(el("p", "", this.linkNote));
 
       const option = (title, detail) => {
         const b = el("button", "choice-opt");
@@ -264,7 +336,7 @@ export function createUploadFlow(ctx) {
         return b;
       };
       const upload = option("Upload a new mod", "Publish a mod that is not in the catalog yet.");
-      upload.addEventListener("click", () => this.choose("upload"));
+      upload.addEventListener("click", () => this.choose("upload", null, upload));
       const update = option("Update a mod", own.length > 0
         ? `Publish a new version of one of your ${own.length} mod${own.length === 1 ? "" : "s"}.`
         : "Publish a new version of a mod you uploaded.");
@@ -280,7 +352,7 @@ export function createUploadFlow(ctx) {
         update.setAttribute("aria-describedby", tip.id);
         cell.appendChild(tip);
       } else {
-        update.addEventListener("click", () => this.choose("update", own));
+        update.addEventListener("click", () => this.choose("update", own, update));
       }
       const row = el("div", "choice");
       row.append(upload, cell);
@@ -291,7 +363,28 @@ export function createUploadFlow(ctx) {
       upload.focus({ preventScroll: true });
     }
 
-    choose(mode, own = null) {
+    /** The one-time burn of the peeked link code happens on this explicit
+     *  click only (never on begin, never on a timer); it replaces the stored
+     *  token. A dead link falls back to the stored token, if any. */
+    async choose(mode, own = null, option = null) {
+      if (this.pendingCode) {
+        if (option) option.disabled = true;   // a short busy state on the clicked option
+        const result = await redeemCode(authUrl(ctx.uploadUrl(), "redeem"), this.pendingCode);
+        if (this.ended) return;
+        if (option) option.disabled = false;
+        if (result.ok) {
+          tokenStore.set(result.token);
+          this.identity = { discordId: result.discordId, username: result.username };
+          this.pendingCode = null;
+        } else if (tokenStore.get()) {
+          this.linkNote = "Your Discord link is no longer valid, so this browser's saved sign-in is used instead.";
+          this.stepCheck();
+          return;
+        } else {
+          this.stepLinkDead(result.message);
+          return;
+        }
+      }
       if (this.mode !== mode) this.lastForm = null;
       this.mode = mode;
       this.target = null;
@@ -408,12 +501,15 @@ export function createUploadFlow(ctx) {
     }
 
     differentToken() {
-      const link = el("button", "linkbtn", "Use a different token");
+      const link = el("button", "linkbtn", "Use a different account");
       link.type = "button";
-      link.addEventListener("click", () => {
+      link.addEventListener("click", async () => {
         if (this.editor && this.current === this.editorModal) this.lastForm = this.editor.getForm();
+        const token = tokenStore.get();
+        if (token) await logoutToken(authUrl(ctx.uploadUrl(), "logout"), token);  // best-effort
         tokenStore.clear();
         this.identity = null;
+        this.pendingCode = null;
         this.stepToken();
       });
       return link;
@@ -708,9 +804,10 @@ export function createUploadFlow(ctx) {
           this.backToEditor();
         });
         if (status401) {
-          finish(button("Use a different token", () => {
+          finish(button("Use a different account", () => {
             tokenStore.clear();
             this.identity = null;
+            this.pendingCode = null;
             modal.close();
             this.confirm = null;
             this.stepToken();

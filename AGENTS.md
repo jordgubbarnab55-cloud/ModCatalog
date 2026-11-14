@@ -449,16 +449,35 @@ still start.
 
 **Uploading** is a chain of modals on `index.html` (the header's "Upload a
 mod" button; `upload.html` is only a redirect to `index.html#upload`, which
-opens the flow, so old links work). `config.json` (`{"title": ...,
-"uploadUrl": ...}`, the deployer's settings; `uploadUrl` is filled in after
-deploying the Worker) feeds it; while `uploadUrl` is a
+opens the flow, so old links work; the #mods Discord button's link
+`#login=<code>` opens it already signed in — below). `config.json`
+(`{"title": ..., "uploadUrl": ...}`, the deployer's settings; `uploadUrl`
+is filled in after deploying the Worker) feeds it; while `uploadUrl` is a
 placeholder the button shows "upload is not configured yet". The steps, each
 its own modal in the details lightbox's style (`modal.js`: scrim, panel,
 floating ✕, Esc/scrim close, focus trap; closing any step cancels the whole
 flow; nothing is uploaded before the confirm):
 
-1. **Token** — only when `localStorage` `modcatalog.uploadToken` is empty
-   (from Discord `/token`); later steps have "Use a different token". The
+0. **Discord link** (only via `#login=<code>`; `parseLoginHash` accepts
+   only `#login=` + `lc_` + 20–80 base64url chars, and the hash is stripped
+   at once with `history.replaceState`, so the code never stays in the
+   address bar or history; `flow.start(btn, { loginCode })`): `Session.begin()`
+   skips straight to `stepLoginPeek` — **`POST /auth/peek`** (non-burning;
+   a stored token is ignored in this session, the link wins). On ok the
+   identity comes from the peek, the code is kept as `pendingCode` and the
+   choice step shows "Signed in as …". **The redeem (`POST /auth/redeem`,
+   the burn) happens only on the explicit click** of "Upload a new mod" /
+   "Update a mod" (`choose()`): it stores the web token (replacing the stored
+   one) and continues. A code that is dead by then (expired/used): the stored
+   token takes over instead (a one-line note on the choice step) or, without
+   one, an explanatory modal ("Click the upload button in Discord again" +
+   "Paste a token instead"). A dead code at page load does the same; a
+   network failure gets a retry modal. `GET /whoami` is not called at all in a
+   link session.
+1. **Token** — only when `localStorage` `modcatalog.uploadToken` is empty and
+   there was no Discord link (from Discord `/token`); later steps have
+   "Use a different account" (best-effort `POST /auth/logout` of the stored
+   web token — failures ignored — then clear it and return here). The
    token is **validated with `GET /whoami`** (derived from `uploadUrl`,
    `checkToken` in `upload-lib.js`): on Continue, and for a stored token when
    the flow starts. A 401 clears the stored token and shows the server's

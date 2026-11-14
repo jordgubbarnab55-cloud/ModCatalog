@@ -39,8 +39,9 @@ the entry point to the web uploader. Two buttons, one action row, handled by
   minute.") and replies (ephemeral, `flags: 64`, the canonical 202-ACK +
   callback flow) with an **"Open the uploader" link button** (style 5) to
   `SITE_URL + "#login=<code>"` — a URL fragment, never a query string. The
-  code is never logged. The site redeems it for a 90-day `web` token at the
-  first upload choice (peek, not peek-burn, on page load). A click whose
+  code is never logged. The site peeks it on page load (never burning it)
+  and redeems it for a 90-day `web` token only when the user clicks the
+  first "Upload a new mod" / "Update a mod". A click whose
   interaction carries no usable username gets an ephemeral error instead.
 * **`mods_signout`** — "Sign out everywhere" (danger, style 2):
   `revokeAllTokens` — deletes every token of the clicker (manual and web)
