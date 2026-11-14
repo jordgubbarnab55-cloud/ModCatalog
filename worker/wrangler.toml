@@ -20,11 +20,6 @@ UPLOAD_DAILY_BYTES = "2147483648"
 # link is SITE_URL + "#login=<code>" (URL fragment, never a query string)
 SITE_URL = "https://jordgubbarnab55-cloud.github.io/ModCatalog/"
 
-# No cron triggers (the old forum-poller schedule is gone; the explicit
-# empty array removes any stray triggers added out-of-band on deploy).
-[triggers]
-crons = []
-
 # The /catalog/events mirror (worker/src/mirror.js):
 #   FORUM_CHANNEL_ID  the forum channel the mod threads are mirrored into
 #   FORUM_TAG_IDS     a JSON object mapping the catalog tag vocabulary to the
@@ -33,6 +28,11 @@ crons = []
 FORUM_CHANNEL_ID = "1570021563602829374"
 FORUM_TAG_IDS = "{}"
 NOTICES_CHANNEL_ID = "1571189289562407117"
+
+# No cron triggers (the old forum-poller schedule is gone; the explicit
+# empty array removes any stray triggers added out-of-band on deploy).
+[triggers]
+crons = []
 
 # Secrets -- set with `npx wrangler secret put NAME`, never committed:
 #   DISCORD_PUBLIC_KEY  base64 public key from the Discord application
