@@ -11,3 +11,8 @@ site/tags.json
 # local scratch / tool caches
 .local/
 .wrangler/
+
+# e2e session scratch (test zips, run logs, token dumps) and tool output
+.live/
+worker/d1out.txt
+pi-session-*.md
