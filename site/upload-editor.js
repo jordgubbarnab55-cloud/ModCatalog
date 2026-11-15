@@ -1,7 +1,7 @@
-// The metadata editor of the upload flow: ModManager's DevelopmentEditor on
-// the web (same fields, labels, placeholders and limits, the 160x160 image
-// picker, tag chips, the read-only identifier, and a live preview card).
-// DOM only; the rules it applies live in upload-lib.js (tested).
+// The metadata editor of the upload flow: the fields, labels, placeholders
+// and limits, the 160x160 image picker, tag chips, the read-only identifier,
+// and a live preview card. DOM only; the rules it applies live in
+// upload-lib.js (tested).
 
 import { el } from "./modal.js";
 import {

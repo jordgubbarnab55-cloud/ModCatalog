@@ -108,7 +108,8 @@ def main() -> int:
             utoc_copy = staged / utoc.name
             utoc_copy.write_bytes(utoc_with_trailer)
             with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-                # pak, ucas, then the trailer-carrying utoc (same order as example_server/build.py)
+                # the package member order is fixed (.pak, .ucas, then the
+                # trailer-carrying .utoc) to match build.py's zip_package
                 for src in companions:
                     (staged / src.name).write_bytes(src.read_bytes())
                     z.write(staged / src.name, src.name)

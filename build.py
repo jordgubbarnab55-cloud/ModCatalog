@@ -36,7 +36,7 @@ Usage:
   --owner / --repo default to GITHUB_OWNER/GITHUB_REPO (or GITHUB_REPOSITORY).
 
 Two upload shapes are accepted in the inbox (both end in a release-asset zip):
-  * a ready-made .zip package (the original zip mode), or
+  * a ready-made .zip package (zip mode), or
   * an upload SET announced by a small JSON manifest: either the loose
     .utoc/.ucas/.pak/+.sig files or exactly one .zip, each streamed to the
     inbox (part-split when over 100 MB), plus an optional metadata.json.
@@ -308,9 +308,9 @@ class GhClient(PackageClient):
         dest.parent.mkdir(parents=True, exist_ok=True)
         d = dest.parent
         # name is already sanitized to [A-Za-z0-9._-]; "." is literal in the glob.
-        # No --directory/--dest flag (renamed in gh 2.103.2): download into the
-        # subprocess cwd instead, which works across gh versions. gh keeps the
-        # asset's original name, so move it to `dest` to honour the contract
+        # gh's output-directory flag differs between versions, so download into
+        # the subprocess cwd, which works across versions. gh keeps the asset's
+        # original name, so move it to `dest` to honour the contract
         # (callers expect the file AT `dest`, e.g. a fixed `package.zip`).
         self._run(["release", "download", tag, "--pattern", name], cwd=str(d))
         written = d / name

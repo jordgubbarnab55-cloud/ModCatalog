@@ -388,7 +388,7 @@ class TestDuplicateRules(Base):
         self.up("111", "a", title="Dup Mod", version="1.0", payload="X")
         self.run_process()
         live = json.loads(self.catalog.read_text(encoding="utf-8"))
-        self.catalog.unlink()  # forget 111.DupMod: a duplicate gets stored (as before this rule)
+        self.catalog.unlink()  # forget 111.DupMod: the catalog is gone, so the duplicate check has nothing to match and the mod is stored
         self.up("222", "b", title="dup mod", version="1.0", payload="X")
         self.run_process()
         self.assertIsNotNone(self.client.get_release(build.mod_tag("222.dupmod")))

@@ -1,7 +1,7 @@
 // Catalog outcome-event mirror (POST /catalog/events).
 //
 // The `process-inbox` / `rebuild` runner POSTs signed outcome events
-// (Plan 4; build.py `notify`): X-Catalog-Signature = the hex
+// (build.py `notify`): X-Catalog-Signature = the hex
 // HMAC-SHA256 of the raw body keyed with CATALOG_CALLBACK_SECRET, plus
 // a fresh `ts` in the (signed) payload. For every event we mirror it
 // into Discord:

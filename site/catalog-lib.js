@@ -1,5 +1,5 @@
-// Pure helpers for index.html, ported from ModManager's Browse tab so the web
-// cards read, format and filter like the app's. Dependency-free so
+// Pure helpers for index.html: card reading, formatting and filtering,
+// matching ModManager's Browse tab. Dependency-free so
 // `node --test` can exercise them (worker/test/catalog-lib.test.js).
 // Loaded as an ES module by index.html, which then sees these on `window`.
 

@@ -9,8 +9,7 @@
 //                      (GET /users/@me/guilds) and targets all of them.
 // Flags:
 //   --retire-global  after ALL target guilds registered successfully,
-//                    DELETE the legacy global "token" command (404 is ok).
-//                    First cutover runs with this flag; later runs without.
+//                    DELETE the global "token" command (a 404 is a success).
 //   --dry-run        print the exact mutation requests without sending them
 //                    (auto-discovery is a read and still runs).
 //
@@ -31,12 +30,10 @@ const API = "https://discord.com/api/v10";
 
 // The command set is the single source of truth: the guild endpoint is a
 // full replace, so adding a second command means adding it here.
-// Intentionally parameter-free: commands whose only entry points are
-// subcommands never appeared in this app's clients (subcommands render as
-// top-level menu entries; those did not render at all), so a bare /token
+// Intentionally parameter-free: this app's clients do not render
+// subcommands (they render as top-level menu entries), so a bare /token
 // is the mint. "Revoke" = mint again and ignore the new token (one active
-// token per user). The Worker still accepts a legacy `token revoke`
-// subcommand if one is ever registered again.
+// token per user).
 export const COMMANDS = [
   {
     name: "token",
@@ -94,12 +91,11 @@ export async function registerForGuilds(appId, token, guilds, fetchImpl, opts = 
   return { registered, skipped, failed };
 }
 
-// Delete the legacy global "token" command. Only call after every target
-// guild succeeded (that ordering is enforced by runCli / main). The delete
+// Delete the global "token" command. Only call after every target guild
+// succeeded (that ordering is enforced by runCli / main). The delete
 // endpoint needs the command's snowflake id, so we locate "token" in the
-// global list first; a missing command is an already-gone success (the
-// 404 case the plan speaks of). An explicit 404 from the DELETE itself is
-// tolerated too.
+// global list first; a missing command is an already-gone success. An
+// explicit 404 from the DELETE itself is tolerated too.
 export async function retireGlobal(appId, token, fetchImpl, opts = {}) {
   const { dryRun = false } = opts;
   const listUrl = `${API}/applications/${appId}/commands`;

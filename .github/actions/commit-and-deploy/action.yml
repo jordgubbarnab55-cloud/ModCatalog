@@ -6,11 +6,10 @@ name: Commit catalog and deploy Pages
 # commit pushed with GITHUB_TOKEN does not trigger other workflows, so the
 # deploy must not depend on a follow-up trigger.
 #
-# A no-change run may hold a checkout that predates a commit an earlier
-# (concurrent) run just pushed: instead of deploying that possibly-stale
-# site — which once clobbered a fresher deployment — it syncs site/ to the
-# latest origin/main first, so a re-dispatch also repairs a stale
-# deployment and a no-change run can never overwrite a newer one.
+# The checkout may predate a commit a concurrent run just pushed. Before
+# deploying, the sync step checks out site/ from the latest origin/main,
+# so a re-dispatch repairs a stale deployment and a no-change run never
+# overwrites a newer one.
 
 inputs:
   commit_path:

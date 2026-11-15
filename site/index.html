@@ -86,7 +86,7 @@
     @media (max-width: 560px) { .grid.gridmode { grid-template-columns: 1fr; } }
     .empty { grid-column: 1 / -1; color: var(--fg2); font-size: 13px; margin: 8px 0; }
 
-    /* Card: mirrors BrowseModCard (fixed 90x90 cover drives the height, info, download column) */
+    /* Card: fixed 90x90 cover drives the height, info, download column */
     .card {
         display: grid;
         grid-template-columns: auto 1fr auto;
@@ -248,7 +248,7 @@
         background-position: center;
         background-size: cover;
         border-radius: 7px 7px 4px 4px;   /* own radius: some Chromium builds skip the parent's radius clip for image layers while this overlay is visible, so the photo is also painted by the overlay's own background */
-        /* Stands in for the old `top: -10px`: an outer shadow is only painted outside the
+        /* An outer shadow is only painted outside the
            border box, so this fills exactly the strip above the panel while it slides in
            (at rest it sits above .gmedia and is clipped away) without growing the box,
            which would change the background photo's cover crop. */
@@ -292,7 +292,7 @@
         .card.grid .gcap, .card.grid .gov, .card.grid .gdlbtn { transition: none; }
     }
 
-    /* Details lightbox: mirrors ModDetailsDialog (720x240 panel, 240 cover) */
+    /* Details lightbox: 720x240 panel, 240 cover */
     .scrim, .scrim-out {
         position: fixed;
         inset: 0;
@@ -400,7 +400,7 @@
         .lbx-close { background: rgba(0, 0, 0, 0.45); color: var(--fg); }
     }
 
-    /* Floating filter panel: mirrors FilterBar + SearchBox */
+    /* Floating filter panel */
     .filter {
         position: fixed;
         left: 50%;
@@ -702,7 +702,7 @@
     .pick-id { font-size: 11px; color: var(--fg3); }
     .modal .pick-empty { margin: 8px 0 0; color: var(--fg2); }
 
-    /* Metadata editor: mirrors ModManager's DevelopmentEditor */
+    /* Metadata editor */
     .ed { display: flex; flex-direction: column; gap: 12px; }
     .ed-preview {
         display: flex;
@@ -1159,7 +1159,7 @@
         await configPromise;
         flow.start(uploadBtn);
     });
-    // upload.html redirects here (#upload) so old links open the flow
+    // #upload opens the flow (upload.html redirects here)
     if (location.hash === '#upload') {
         history.replaceState(null, '', location.pathname + location.search);
         configPromise.then(() => flow.start(uploadBtn));

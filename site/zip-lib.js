@@ -4,7 +4,8 @@
 // authority on the package. Pure and dependency-free (`Blob.slice` +
 // `DecompressionStream('deflate-raw')`), so `node --test` covers it
 // (worker/test/zip-lib.test.js). The package-shape rule is
-// mod-contract/package-spec.md (a port of build.py classify_members).
+// mod-contract/package-spec.md (the same rule build.py classify_members
+// enforces).
 
 const EOCD_SIG = 0x06054b50;
 const EOCD_MIN = 22;

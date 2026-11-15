@@ -1,7 +1,7 @@
 // A small modal helper for the upload steps and the details lightbox: a scrim
 // + panel + floating close button with Esc / scrim-click dismissal, a focus
 // trap, and a stack so only the topmost modal answers Esc and Tab. Opening and
-// closing animate like ModManager's DialogHost dialogs (see `MOTION`).
+// closing are animated (see `MOTION`).
 
 /** Creates an element; `content` is set as text. */
 export function el(tag, cls, content) {

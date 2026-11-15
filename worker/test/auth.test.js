@@ -309,7 +309,7 @@ test("/auth/* reject non-JSON and oversize bodies with 400, non-POST with 405", 
   // in BYTES, not characters
   const euro = "{" + `\"code\":\"${"€".repeat(400)}\"` + "}";
   assert.ok(new TextEncoder().encode(euro).length > 1024);
-  assert.ok(euro.length < 1024, "fewer characters than the limit (the old check would have passed)");
+  assert.ok(euro.length < 1024, "fewer characters than the byte limit");
   assert.equal((await post("/auth/peek", euro)).status, 400, "oversize multibyte");
   const smallEuro = JSON.stringify({ code: "€".repeat(300) }); // 900 bytes: under the limit
   assert.ok(new TextEncoder().encode(smallEuro).length < 1024);
@@ -390,7 +390,7 @@ test("/token via the interaction mints into D1; a re-mint replaces, no revoke su
   assert.notEqual(t1, t2);
   assert.equal(db.tokenRows().length, 1, "replaced, not accumulated");
 
-  // the removed `token revoke` subcommand now falls through to /token
+  // an unregistered `token revoke` subcommand falls through to /token
   const res = await handle(await discordRequest({
     type: 2, data: { name: "token", options: [{ type: 2, name: "revoke" }] },
     member: { id: "42", user: { id: "42", username: "alice" } },

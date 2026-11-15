@@ -1,162 +1,15 @@
 # ModCatalog Worker
 
-Cloudflare Worker (free plan) that does two things:
+Cloudflare Worker (free plan). The Discord interaction flow, the #mods
+buttons, the D1 token/login-code auth internals, the forum-channel setup
+and the test suite are documented in [`docs/worker.md`](../docs/worker.md).
 
-1. **Discord token commands** — `POST /discord` (Interactions endpoint,
-   slash commands over HTTPS; no gateway/WebSocket bot). `/token` is
-   registered **per guild** (guild commands appear in Discord
-   immediately) and mints a **`manual`** token for the user (shown once,
-   ephemerally). One manual token per user: minting again replaces the
-   previous one — that is also the revoke path (the legacy `token revoke`
-   subcommand is gone; the command is parameter-free, see step 8). The
-   response uses Discord's canonical flow: an immediate **202 ACK (no
-   body)** to the interaction, then a `POST /interactions/{id}/{token}/callback`
-   with `{type: 4, data: {content, flags}}` (the 3 s budget covers the
-   ACK only; the callback token is valid 15 min). Only the SHA-256 of
-   the token is stored (in D1, binding `DB`, table `tokens` — see the
-   *Auth* section below), next to the account's Discord id and
-   **`username`** (the account name — not the display name or the server
-   nickname — read from the interaction's `member.user`, or `user` in a DM).
-   The catalog publishes mods under that username (verified authors, below).
-2. **Upload API** — `POST /upload` takes a bearer token + raw zip body and
-   **streams it straight through** to the `inbox` release on GitHub
-   (no buffering, no storage — the Worker holds no file bytes), then
-   dispatches the `process-inbox` workflow as a wake-up.
-3. **`GET /whoami`** — bearer token → `200 {"discordId", "username"}`; the web
-   page uses it to validate a token and to show the author name the upload
-   will carry. `401 {"error"}` for a missing / unknown / revoked / expired
-   token (rejected the same way on `/upload`).
+## `GET /whoami`
 
-## The #mods buttons (the upload flow's entry point)
-
-A single **persistent bot message** in the guild's #mods text channel carries
-the entry point to the web uploader. Two buttons, one action row, handled by
-`POST /discord` type-3 interactions (custom_id dispatch in `src/index.js`):
-
-* **`mods_upload`** — "Upload or update a mod": mints a one-time **login
-  code** (`mintLoginCode`; the 5-per-60-s limit applies — a limited click
-  replies ephemerally with "You're clicking too fast, try again in a
-  minute.") and replies (ephemeral, `flags: 64`, the canonical 202-ACK +
-  callback flow) with an **"Open the uploader" link button** (style 5) to
-  `SITE_URL + "#login=<code>"` — a URL fragment, never a query string. The
-  code is never logged. The site peeks it on page load (never burning it)
-  and redeems it for a 90-day `web` token only when the user clicks the
-  first "Upload a new mod" / "Update a mod". A click whose
-  interaction carries no usable username gets an ephemeral error instead.
-* **`mods_signout`** — "Sign out everywhere" (danger, style 2):
-  `revokeAllTokens` — deletes every token of the clicker (manual and web)
-  and invalidates their unused codes; ephemeral confirmation.
-
-Any other custom id 400s.
-
-All button replies are **type-4 + `flags: 64`** (ephemeral *replies*). A
-type-7 callback on a message-component interaction is applied to the
-**original message** — it edits the public #mods post in place — so it is
-deliberately never used here.
-
-`SITE_URL` is a `wrangler.toml` var (the Pages site, ends with `/`);
-`loginLinkUrl` normalizes a missing trailing slash.
-
-**The message itself** is posted/edited by the owner script (zero-dep; reads
-`DISCORD_BOT_TOKEN` and `MODS_CHANNEL_ID` from the environment at run time
-and stores nothing):
-
-```
-DISCORD_BOT_TOKEN=... MODS_CHANNEL_ID=... node scripts/post-mods-message.mjs [--edit <messageId>] [--dry-run]
-```
-
-No argument posts a new message; `--edit <messageId>` PATCHes the existing
-one (how to refresh it after a copy or button change); `--dry-run` prints
-the exact request without sending it. **Live message: id `1571116888073703498`
-in channel `1571116545638142025` (guild `1565286417968398356`)** — re-edit it with
-`--edit 1571116888073703498`.
-
-## Auth: D1 tokens and login codes
-
-Tokens live in **D1** (binding `DB`, database `modcatalog-forum`,
-migration `0002_auth.sql`; the logic is `src/auth.js`) instead of KV, so
-one user can hold many tokens:
-
-* kind `manual` — minted by `/token` (one per user; a re-mint replaces
-  the previous one, which is the revoke path; **never expires**).
-* kind `web` — minted by redeeming a one-time **login code** (many per
-  user; **90-day expiry**).
-
-Only the sha256 of a secret string is ever stored. Secret shapes: manual
-`mm_…`, web `ms_…`, login code `lc_…` (prefix + base64url of 32 random
-bytes). KV (`TOKENS`) keeps only the upload quota (`quota:<id>`) and the
-inbox release-id cache.
-
-Login codes (table `login_codes`) are **5-minute TTL, single-use**:
-minting one invalidates the user's older unused codes, a user can mint
-at most 5 per 60 s, and rows older than 24 h are swept
-opportunistically. The burn is atomic — `UPDATE login_codes SET
-used_at = now WHERE hash = ? AND used_at IS NULL AND expires_at > now`,
-succeeding only when exactly one row changed — then a 90-day `web`
-token is inserted.
-
-Endpoints (same CORS pattern as `/whoami`: `Access-Control-Allow-Origin`
-= `ALLOWED_ORIGIN`, `Content-Type, Authorization` in the preflight;
-non-JSON or >1 KB bodies are 400; codes are never logged):
-
-* `POST /auth/peek` `{"code"}` — a read-only check (page load / link
-  prefetch must never burn the code): `200 {"discordId", "username",
-  "expiresAt"}` | `404 {"error", reason: "unknown"}` | `410 {"error",
-  reason: "expired" | "used"}`.
-* `POST /auth/redeem` `{"code"}` — the atomic single-use burn: `200
-  {"token", "discordId", "username", "expiresAt"}` (the `ms_…` web
-  token) | the same errors. The two `expiresAt` fields mean different
-  things: peek's is the code's 5-minute expiry, redeem's is the web
-  token's 90-day expiry.
-* `POST /auth/logout` — bearer token → `204`; deletes the token only when
-  it is a `web` one (a `manual` one is left alone; an unknown token is a
-  no-op).
-
-`/upload` and `/whoami` authenticate through the same store.
-
-Plain JavaScript ES modules, **zero runtime dependencies**. Tests run with
-bare Node (no install needed):
-
-```
-cd worker
-node --test        # offline tests: fake KV, injected fetch, Ed25519 keypair
-```
-
-## Deploy (owner, brief)
-
-1. `npx wrangler login`
-2. `npx wrangler kv namespace create TOKENS` → paste the id into `wrangler.toml`
-3. `npx wrangler secret put DISCORD_PUBLIC_KEY` (Discord app public key)
-4. `npx wrangler secret put GITHUB_TOKEN` (fine-grained token, see below)
-5. Fill `GITHUB_OWNER`, `GITHUB_REPO`, `ALLOWED_ORIGIN` in `wrangler.toml`
-6. `npx wrangler deploy`
-7. Discord portal → *General Information* → Interactions Endpoint URL =
-   `<worker-url>/discord` (the save runs a signed test request)
-8. `DISCORD_APP_ID=... DISCORD_BOT_TOKEN=... node scripts/register-commands.mjs`
-   The commands are **guild-scoped**: the script bulk-registers `token` in
-   every guild the bot is a member of (or `DISCORD_GUILD_IDS=
-   <id1>,<id2>` for an explicit list), and they appear **immediately** —
-   no waiting. A new server later? Invite the bot, re-run the script
-   (a server the bot was removed from keeps a harmless registration that
-   doesn't resolve there; re-invite + re-run). To retire a leftover global
-   `token` command during the first cutover, add `--retire-global`
-   (it deletes the global command only after every target guild
-   registered; 404 is fine). `--dry-run` prints the exact requests
-   without sending them. The command itself is parameter-free by
-   design: the original `token` + `revoke` subcommand never appeared in
-   this app's client menus (subcommands render as top-level entries,
-   and those did not render at all — desktop and mobile), so `/token`
-   is directly callable and re-minting is the revoke path.
-   (Debugging note: interaction `member` objects in the current Discord
-   API carry no top-level `id` — the invoking user's id is nested at
-   `member.user.id`; the handler checks `member.id`, `member.user.id`
-   and the DM `user.id` in that order. Also: a flat inline 200 response
-   body is rejected by Discord ("didn't respond in time" despite a fast
-   200) — the reply must go through the callback endpoint after a 202
-   ACK.)
-9. `DISCORD_BOT_TOKEN=... MODS_CHANNEL_ID=... node
-   scripts/post-mods-message.mjs` — post the persistent #mods button
-   message (see *The #mods buttons* above).
+Bearer token → `200 {"discordId", "username"}`; the web page uses it to
+validate a token and to show the author name the upload will carry.
+`401 {"error"}` for a missing / unknown / revoked / expired token
+(rejected the same way on `/upload`).
 
 ## Upload API contract (for the ModManager app)
 
@@ -226,7 +79,7 @@ fields, except that `author`, `identifier` and `guid` are always forced.
 | `429`  | Daily per-user byte quota exceeded (default 2 GiB/day, UTC). |
 | `400`  | Bad name/headers (zip mode: not a .zip; set mode: not .pak/.ucas/.utoc/.sig/.zip, or bad part/manifest/metadata headers). |
 | `502`  | GitHub failed (token wrong/expired, or upload/dispatch error). Nothing was stored; do not retry blindly — check the token. |
-| `503`  | The `inbox` release does not exist yet; run the Seed legacy mods (or Process inbox) workflow once. |
+| `503`  | The `inbox` release does not exist yet; run the `Process inbox` workflow once. |
 
 Notes:
 
@@ -260,7 +113,7 @@ Notes:
   whitespace>`, whatever the package or `metadata.json` says (see
   `mod-contract/upload.md`).
 
-### Minimum GitHub token permissions (for `GITHUB_TOKEN`)
+## Minimum GitHub token permissions (for `GITHUB_TOKEN`)
 
 - **Fine-grained**, resource owner: your account, repository access:
   **only this repo**.
@@ -271,7 +124,6 @@ Notes:
 
 ## Catalog outcome events (`/catalog/events`)
 
-
 `build.py notify` (the `process-inbox` / `rebuild` workflows) POSTs a run's
 outcome events here: `X-Catalog-Signature` = the hex HMAC-SHA256 of the raw
 body keyed with the secret `CATALOG_CALLBACK_SECRET`, plus a fresh `ts` in
@@ -280,7 +132,6 @@ signature (constant-time) and the timestamp (|now - ts| <= 300 s, else 401)
 and mirrors each event into Discord — one failing event never aborts the
 others: it stays unrecorded and is reported `ok: false` so the runner can
 retry it.
-
 
 - `published` — one forum thread per mod (D1 `mod_threads`, keyed on the
   lowercased identifier): a **new thread** on first sight (name = the title,
@@ -294,7 +145,6 @@ retry it.
 - `rejected` — a notice in the var `NOTICES_CHANNEL_ID` (a text channel;
   blank = a log line only). No DMs.
 
-
 Mirrored event ids go into `seen_events` (a redelivered event is a no-op;
 rows are opportunistically swept at 30 days old). Every outgoing payload
 sets `allowed_mentions: {parse: [], users: [uploaderId]}` and user-supplied
@@ -304,37 +154,10 @@ event are <= 3, so a full 10-event request stays inside the free-plan cap of
 50. A 429 from Discord is retried once, honouring `retry_after` (wait capped
 at 5 s).
 
+Plain JavaScript ES modules, **zero runtime dependencies**. Tests run with
+bare Node (no install needed):
 
-Required bot permissions: **View Channel, Create Posts, Send Messages in
-Posts, Embed Links** in the forum channel (and in the notices channel:
-Send Messages + Embed Links). The forum should be locked so *only the bot*
-creates posts: an `@everyone` overwrite that denies `SEND_MESSAGES` (1<<11 —
-that is "Create Posts" in a forum channel) while allowing
-`SEND_MESSAGES_IN_THREADS` (1<<38) + View/Read, and an explicit bot-user
-overwrite allowing View Channel, `SEND_MESSAGES`, `SEND_MESSAGES_IN_THREADS`
-and `EMBED_LINKS` (1<<14). (Changing those overwrites needs
-Manage Channels — a human, or the bot if it has it.)
-
-## Test status
-
-`node --test` is fully green offline: Discord signature
-verification (valid/invalid/missing/wrong key), PING/PONG, manual-token
-minting / replacement (D1, only hashes stored), login-code mint / peek /
-redeem (TTL, single-use atomic burn incl. a concurrent-redeem race,
-invalidation by a newer code, 5-per-60-s rate limit, 90-day web tokens,
-`/auth/*` handler + CORS + bad bodies), the #mods buttons (the `mods_upload`
-ephemeral link-button reply + the minted code's validity via peek + the
-6th-click rate-limit message, `mods_signout`'s full revocation, the
-unknown-custom_id 400s, `loginLinkUrl`), the upload path
-(401/411/413/400/429/503, upload sets incl. `.zip` and `metadata.json`, happy path with the **same stream object**
-forwarded to GitHub, 502-without-dispatch on GitHub failure, CORS
-preflight), and the `/catalog/events` mirror (bad/missing signature, tampered body,
-stale/future `ts` -> 401, >10 events / bad shape / over-size body -> 400,
-thread create + mapping + seen recording, update-in-thread, deleted-thread
-404 re-create, duplicate-delivery no-op, one-failing-event isolation +
-redelivery, rejected notices, NOTICES-unset no-call, @everyone
-neutralisation, 429 retry-once), and the command-registration script (bulk-PUT payload shape,
-per-guild 403 isolation, `--retire-global` ordering, delete-404
-tolerance, auto-discovery, dry-run) plus the #mods message script (payload
-shape, POST/PATCH, dry-run, error detail). Live behavior (deploy, real Discord, real GitHub, the free-plan
-CPU limit on streaming) is the owner's to verify — see SETUP.md.
+```
+cd worker
+node --test        # offline tests: fake KV, injected fetch, Ed25519 keypair
+```
