@@ -198,6 +198,44 @@ export function sanitizeTags(tags, vocabulary) {
   return { kept, dropped };
 }
 
+/**
+ * The lenient reader of site/downloads.json: `{ id: { total, latest? } }`.
+ * The root must be an object with a `mods` object; otherwise the result is
+ * empty. `total` (and `latest`) are kept only as non-negative integers; an
+ * entry without a usable `total` is dropped. Never throws.
+ */
+export function parseDownloads(json) {
+  const map = new Map();
+  if (!isObject(json) || !isObject(json.mods)) return map;
+  for (const [id, el] of Object.entries(json.mods)) {
+    if (!isObject(el)) continue;
+    const total = Number.isInteger(el.total) && el.total >= 0 ? el.total : null;
+    if (total === null) continue;
+    const entry = { total };
+    if (has(el, "latest") && Number.isInteger(el.latest) && el.latest >= 0) {
+      entry.latest = el.latest;
+    }
+    map.set(id, entry);
+  }
+  return map;
+}
+
+/**
+ * A download count in short form: exact below 1 k, `k` and `M` above, at
+ * most one decimal (truncated, never rounded up), no trailing `.0`
+ * (0 → "0", 999 → "999", 1234 → "1.2k", 1250 → "1.2k", 1000000 → "1M").
+ */
+export function formatCount(n) {
+  const v = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  const scaled = (div) => {
+    const t = Math.floor(v / div) / 10;
+    return Number.isInteger(t) ? String(t) : t.toFixed(1);
+  };
+  if (v >= 1000000) return scaled(100000) + "M";
+  if (v >= 1000) return scaled(100) + "k";
+  return String(v);
+}
+
 const UNITS = ["B", "KB", "MB", "GB", "TB"];
 
 /** ByteFormat.FormatBytes: exact below 1 KB, else binary units with at most one
@@ -354,6 +392,6 @@ if (typeof window !== "undefined") {
   Object.assign(window, {
     parseCatalog, sanitizeTags, formatBytes, singleLine, metaParts,
     fileNameOf, parseAccent, accentFor, placeholder, matches, catalogTitle,
-    fitTagCutoff,
+    fitTagCutoff, parseDownloads, formatCount,
   });
 }

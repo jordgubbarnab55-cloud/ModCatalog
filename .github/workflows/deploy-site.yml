@@ -14,6 +14,7 @@ on:
       - "mod-contract/tags.json"
 
 permissions:
+  contents: read
   pages: write
   id-token: write
 
@@ -39,6 +40,16 @@ jobs:
       # once; the committed copy picks them up on the next catalog run.
       - name: Apply the catalog title from config.json
         run: python build.py retitle
+
+      # A fresh site/downloads.json on every deploy. continue-on-error: a
+      # transient GitHub API failure must not block the site deploy; the
+      # next refresh or deploy replaces the missing counts (the page then
+      # hides them).
+      - name: Refresh the download counts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python build.py downloads
+        continue-on-error: true
 
       - name: Upload site artifact
         uses: actions/upload-pages-artifact@v4

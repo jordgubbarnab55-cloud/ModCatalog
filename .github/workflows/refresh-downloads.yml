@@ -1,0 +1,58 @@
+name: Refresh download counts
+
+# Regenerates site/downloads.json (GitHub's per-asset `download_count` for
+# every mod's release) and deploys it to Pages. The file is generated at
+# deploy time and never committed (it changes constantly; the counts are
+# the only thing that changes between runs). `retitle` runs first because
+# the committed catalog.json can carry an older title than config.json
+# (the site deploy applies it at deploy time without committing, and a
+# refresh that skipped it would revert the deployed title). `downloads` is
+# NOT continue-on-error: a failed generation ends the run before the
+# deploy, so a transient GitHub API error never ships a site without
+# counts. Runs hourly (off the hour) plus on every deploy path; the
+# concurrency group keeps it behind uploads and rebuilds like the other
+# workflows.
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: catalog
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    env:
+      # `gh` CLI reads GH_TOKEN; the build never hand-rolls asset HTTP
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Apply the catalog title from config.json
+        run: python build.py retitle
+
+      - name: Regenerate the download counts
+        run: python build.py downloads
+
+      - name: Add the tag vocabulary to the site
+        run: cp mod-contract/tags.json site/tags.json
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4

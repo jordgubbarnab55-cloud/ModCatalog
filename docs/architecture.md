@@ -6,7 +6,7 @@
 |---|---|
 | GitHub Releases | Storage. One release per mod (`mod-<slug>-<hex>`), plus one fixed `inbox` release for incoming uploads |
 | GitHub Actions | Processing. Drains the inbox, validates, re-homes packages, regenerates `site/catalog.json`, deploys Pages |
-| GitHub Pages | Serves `site/` (the page, `config.json`, `catalog.json`) and nothing else |
+| GitHub Pages | Serves `site/` (the page, `config.json`, `catalog.json`) and nothing else; `downloads.json` (per-mod download counts, generated at deploy time) and `tags.json` ride along on each deploy |
 | Cloudflare Worker (`worker/`) | Discord interactions, token and login-code auth, streaming upload pass-through, runner event mirror |
 | D1 (`DB`) | Tokens, login codes, forum thread mapping, seen event ids |
 | KV (`TOKENS`) | Upload quota counters, inbox release-id cache |

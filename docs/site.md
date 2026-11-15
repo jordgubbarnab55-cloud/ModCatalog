@@ -15,6 +15,7 @@ HTML**. The upload flow is in `docs/upload-flow.md`.
 | `config.json` | `{"title", "uploadUrl", ...}`, the deployer's settings |
 | `catalog.json` | Generated; never edit |
 | `tags.json` | Copied from `mod-contract/tags.json` at deploy time |
+| `downloads.json` | Generated at deploy time (gitignored, optional); per-mod download counts |
 | `upload.html` | Redirect to `index.html#upload` |
 | `icons/*.svg` | Vendored `lucide-static` files |
 
@@ -29,6 +30,14 @@ HTML**. The upload flow is in `docs/upload-flow.md`.
   removed so the letter placeholder shows.
 - `file` and `cover` are absolute release URLs; `new URL(url, base)` handles
   them.
+- The per-mod download count comes from `downloads.json` (a same-origin
+  file, generated at deploy time; `docs/build-pipeline.md`), fetched in
+  parallel with `catalog.json` with `{cache: 'no-store'}`. The page never
+  blocks card rendering on it, and a missing, failed or malformed file is
+  silent: the map stays empty and every count display hides (an absent
+  mod hides; a count of 0 shows `0`). The counts are GitHub's raw asset
+  counters, so the pipeline's own `rebuild` reads add one or two per mod
+  and deleting an asset can lower a total.
 - The `download` attribute is ignored cross-origin, but GitHub serves release
   assets as attachments, so downloads still start.
 
@@ -106,7 +115,10 @@ shown.
 Holds every pure helper: `parseCatalog` (the lenient reader of
 `mod-contract/catalog.md`, tested against the shared `catalog-cases.json`),
 `sanitizeTags`, `formatBytes`, `singleLine`, `metaParts`,
-`placeholder`/`accentFor` and `matches`. They are ports of the app's
+`placeholder`/`accentFor` and `matches`, plus `parseDownloads` (the lenient
+reader of `downloads.json`: never throws, keeps `total`/`latest` only as
+non-negative integers) and `formatCount` (short count form: truncated, at
+most one decimal, `k`/`M` units). The first set are ports of the app's
 `CatalogParser`, `TagCatalog.Sanitize`, `ByteFormat`, `SingleLineConverter`,
 `PlaceholderAccent` and `FilterViewModel.Matches`. The placeholder colour
 vectors in `worker/test/catalog-lib.test.js` are the ones recorded in the
@@ -118,4 +130,6 @@ app's `PlaceholderAccentTests`.
   browser owns the download.
 - `sha256` verification: release assets cannot be `fetch()`ed (CORS).
 - The catalog source picker and Refresh: the page serves exactly one catalog.
+- The per-mod download count: ModManager's Browse tab does not show one
+  (nothing to mirror); the page shows its own, from `downloads.json`.
 - The light theme: the app is dark-only.

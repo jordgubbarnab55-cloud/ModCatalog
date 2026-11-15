@@ -38,10 +38,13 @@ then commits and deploys.
 
 Triggers on push to `site/**` (a human editing `index.html` or `config.json`).
 Runs `python build.py retitle` so the deployed `catalog.json` carries the
-config's title at once (nothing is committed), then uploads `site/` as the
-Pages artifact and deploys. Bot pushes made with `GITHUB_TOKEN` do not trigger
-it, so there are no loops. The deploy copies `mod-contract/tags.json` to
-`site/tags.json`.
+config's title at once (nothing is committed), then a
+`python build.py downloads` step (with `GH_TOKEN`, `continue-on-error: true`
+— a transient API failure must not block the site deploy), then uploads
+`site/` as the Pages artifact and deploys. `permissions` lists `contents: read`
+as well (an unlisted permission is `none`). Bot pushes made with
+`GITHUB_TOKEN` do not trigger it, so there are no loops. The deploy copies
+`mod-contract/tags.json` to `site/tags.json`.
 
 ## `.github/actions/commit-and-deploy/action.yml`
 
@@ -55,8 +58,45 @@ it, so there are no loops. The deploy copies `mod-contract/tags.json` to
   pushed with `GITHUB_TOKEN` does not trigger other workflows.
 - A no-change run first syncs `site/` to the latest `origin/main`, so it never
   deploys a checkout older than a commit a concurrent run just pushed.
+- After the sync, next to the `tags.json` copy: `python build.py downloads`
+  with `GH_TOKEN: ${{ github.token }}`, `continue-on-error: true` (the
+  caller's Python setup is reused; the action itself needs none).
+
+## `refresh-downloads.yml`
+
+The hourly download-count refresh: `schedule: cron "17 * * * *"` (off the
+hour) plus `workflow_dispatch`.
+`permissions: contents: read, pages: write, id-token: write`;
+`concurrency: {group: catalog, cancel-in-progress: false}` (it queues behind
+uploads and rebuilds like the other workflows). Steps: checkout, setup-python
+3.12, `python build.py retitle` (the committed `catalog.json` can carry an
+older title than `config.json`, and the site deploy applies it at deploy
+time without committing — a refresh that skipped it would revert the
+deployed title), `python build.py downloads` (not `continue-on-error`: a
+failure ends the run before the deploy, so the previously deployed counts
+stay in place), `cp mod-contract/tags.json site/tags.json`,
+`actions/upload-pages-artifact@v4` (path `site`), `actions/deploy-pages@v4`.
 
 ## Pages
 
 Source is **GitHub Actions**, not a branch. Custom-Actions deploys are not
 subject to the 10-builds-per-hour limit of branch deploys.
+
+## Download counts
+
+Every deploy path publishes a fresh `site/downloads.json`
+(`docs/build-pipeline.md`, `downloads`): `commit-and-deploy` and
+`deploy-site` run `python build.py downloads` (with `GH_TOKEN`) right next
+to the `tags.json` copy, **after** the `git checkout origin/main -- site`
+sync in `commit-and-deploy` (that checkout would otherwise clobber anything
+generated earlier), marked `continue-on-error: true` — a transient GitHub
+API failure must not block deploying a freshly processed upload; a deploy
+that ships without counts blanks them until the next successful one. The
+hourly `refresh-downloads.yml` (below) runs it **without**
+`continue-on-error`: a failed generation ends the run before the deploy, so
+a failure leaves the previously deployed counts in place.
+
+Scheduled workflows on public repositories are disabled after 60 days without
+repository activity. Uploads (and pushes) keep the repository alive; a long
+quiet period would stop the hourly refresh silently — every deploy still
+refreshes the counts, so a manual run or any upload recovers them.

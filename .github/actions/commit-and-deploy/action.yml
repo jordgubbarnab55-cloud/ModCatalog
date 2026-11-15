@@ -42,6 +42,18 @@ runs:
       shell: bash
       run: cp mod-contract/tags.json site/tags.json
 
+    # A fresh site/downloads.json on every deploy (after the sync step, which
+    # checks site/ out of origin/main and would otherwise clobber anything
+    # generated earlier). continue-on-error: a transient GitHub API failure
+    # must not block deploying a freshly processed upload; the next refresh
+    # or deploy replaces the missing counts (the page then hides them).
+    - name: Refresh the download counts
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python build.py downloads
+      continue-on-error: true
+
     - name: Upload site artifact
       uses: actions/upload-pages-artifact@v4
       with:

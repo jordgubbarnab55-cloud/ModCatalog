@@ -236,6 +236,21 @@
         flex-wrap: nowrap;
         overflow: hidden;
     }
+    .card.grid .gcount {
+        position: absolute;
+        right: 10px;
+        bottom: 10px;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        padding: 2px 8px;
+        border-radius: 10px;
+        border: 1px solid var(--layer2-border);
+        background: var(--layer2-hl);
+        color: var(--fg2);
+        font-size: 11px;
+    }
+    .card.grid .gcount svg { width: 12px; height: 12px; }
     .card.grid .gcap { display: flex; flex-direction: column; gap: 10px; transition: opacity 160ms ease; }
     .card.grid .gov {
         position: absolute;
@@ -365,6 +380,7 @@
     .lbx-tags .wrap { display: flex; flex-wrap: wrap; }
     .lbx-file { display: flex; justify-content: space-between; gap: 12px; }
     .lbx-file > span { display: flex; gap: 8px; min-width: 0; }
+    .lbx-dl { display: flex; gap: 8px; min-width: 0; }
     .tag {
         margin-right: 6px;
         padding: 2px 8px;
@@ -821,6 +837,7 @@
     import {
         parseCatalog, sanitizeTags, formatBytes, singleLine, metaParts,
         fileNameOf, placeholder, matches, catalogTitle, fitTagCutoff,
+        parseDownloads, formatCount,
     } from './catalog-lib.js';
     import { createUploadFlow } from './upload-flow.js';
     import { configOk, parseLoginHash } from './upload-lib.js';
@@ -837,14 +854,42 @@
     const selected = new Set();
     const entries = [];   // { mod, card }
     const mods = [];     // sanitized mod objects, in catalog order
+    let downloadsMap = null;   // id -> { total, latest? } (null = not loaded yet)
+    loadDownloads();
+
+    // downloads.json is optional: a missing, failed or malformed file leaves
+    // the map empty, and every count display then hides itself. The map
+    // never blocks card rendering; it applies whenever it arrives, and again
+    // on every re-render (setMode).
+    function applyDownloads() {
+        if (downloadsMap === null) return;
+        for (const { mod, card } of entries) {
+            const gcount = card.querySelector('.gcount');
+            if (!gcount) continue;
+            const entry = downloadsMap.get(mod.id);
+            if (!entry) { gcount.hidden = true; continue; }
+            gcount.hidden = false;
+            gcount.querySelector('span').textContent = formatCount(entry.total);
+        }
+    }
+    async function loadDownloads() {
+        try {
+            const res = await fetch('downloads.json', { cache: 'no-store' });
+            if (!res.ok) throw new Error('downloads.json: HTTP ' + res.status);
+            downloadsMap = parseDownloads(await res.json());
+        } catch {
+            downloadsMap = new Map();   // fail soft: counts hide, cards still render
+        }
+        applyDownloads();
+    }
 
     // list/grid toggle (XOR: exactly one pressed); the choice is remembered
     let mode;
     try { mode = localStorage.getItem('modcatalog.cardMode') === 'grid' ? 'grid' : 'list'; } catch { mode = 'list'; }
     const modeBtns = [...document.querySelectorAll('.modebtn')];
 
-    // Grid card tags: the whole row (chips + the `+N` chip) must fit the card —
-    // show all that fit; re-fit when a card's width changes (columns / resize)
+    // Grid card tags: the row (chips + the `+N` chip) must fit beside the
+    // download-count chip; show all that fit; re-fit when a card's width changes
     const TAG_GAP = 6;   // the .tag chip's margin-right
     let tagFitScheduled = false;
     const tagFitObserved = [];
@@ -866,9 +911,11 @@
             if (chips.length === 0) { plus.hidden = true; continue; }
             chips.forEach((c) => { c.hidden = false; });
             plus.hidden = false;   // measurable
+            const gcount = card.querySelector('.gcount');
+            const avail = card.clientWidth - 20 - (gcount ? gcount.offsetWidth + TAG_GAP : 0);
             const { tags: k, plus: rem } = fitTagCutoff(
                 chips.map((c) => c.offsetWidth),
-                card.clientWidth - 20,   // the 10px inset from each edge of the photo
+                avail,
                 TAG_GAP,
                 (r) => { plus.textContent = '+' + r; return plus.offsetWidth; });
             chips.forEach((c, i) => { c.hidden = i >= k; });
@@ -897,6 +944,7 @@
                 tagFitObserved.push(card);
             }
         fitGridTags();
+        applyDownloads();
         applyFilter();
     }
 
@@ -946,6 +994,9 @@
             plus.hidden = true;
             twrap.appendChild(plus);
             media.appendChild(twrap);
+            const gcount = h('div', 'gcount');
+            gcount.innerHTML = DOWNLOAD_ICON + '<span></span>';
+            media.appendChild(gcount);
             const ov = h('div', 'gov');
             if (mod.cover) {
                 // The photo is also painted by the overlay's own background (same crop as the
@@ -1042,6 +1093,18 @@
         size.append(h('span', 'lbx-label', 'Size'), h('span', 'lbx-value', formatBytes(mod.size)));
         file.append(left, size);
         foot.appendChild(file);
+        const dlEntry = downloadsMap === null ? null : downloadsMap.get(mod.id);
+        if (dlEntry) {
+            let text = formatCount(dlEntry.total);
+            if (dlEntry.latest !== undefined && dlEntry.latest !== dlEntry.total) {
+                text += ` (latest version: ${formatCount(dlEntry.latest)})`;
+            }
+            const dl = h('div', 'lbx-dl');
+            const dls = h('span');
+            dls.append(h('span', 'lbx-label', 'Downloads'), h('span', 'lbx-value', text));
+            dl.append(dls);
+            foot.appendChild(dl);
+        }
 
         panel.append(coverBox('lbx-cover', mod), head, desc, foot);
         panel.querySelector('.lbx-close').focus({ preventScroll: true });

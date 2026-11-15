@@ -28,6 +28,8 @@ Usage:
   python build.py retitle                           # only re-apply the name/description
   python build.py notify --results PATH             # POST the run's events to the Worker
                                                     # (CATALOG_CALLBACK_URL / _SECRET)
+  python build.py downloads [--catalog PATH] [--out PATH]
+                                                    # write downloads.json (per-mod download counts)
 
   The catalog's name/description come from site/config.json (`title`,
   `description`; defaults when absent), `--config` picks another file.
@@ -72,6 +74,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -138,10 +141,11 @@ class AssetExists(Exception):
 
 
 class Asset:
-    def __init__(self, name: str, size: int, created: datetime):
+    def __init__(self, name: str, size: int, created: datetime, downloads: int = 0):
         self.name = name
         self.size = size
         self.created = created  # naive-UTC datetime
+        self.downloads = downloads
 
 
 class Release:
@@ -154,6 +158,9 @@ class PackageClient:
     """Interface everything talks to; tests and offline runs use LocalClient."""
 
     def list_tags(self, prefix: str) -> list[str]:
+        raise NotImplementedError
+
+    def release_assets(self, prefix: str) -> dict[str, list[Asset]]:
         raise NotImplementedError
 
     def get_release(self, tag: str) -> Release | None:
@@ -189,8 +196,9 @@ class LocalClient(PackageClient):
     versions are immutable.
     """
 
-    def __init__(self, root: pathlib.Path):
+    def __init__(self, root: pathlib.Path, downloads: dict | None = None):
         self.root = pathlib.Path(root)
+        self.downloads = dict(downloads or {})  # (tag, asset name) -> count
 
     def _release_dir(self, tag: str) -> pathlib.Path:
         return self.root / "releases" / tag
@@ -200,6 +208,9 @@ class LocalClient(PackageClient):
         if not d.is_dir():
             return []
         return sorted(p.name for p in d.iterdir() if p.is_dir() and p.name.startswith(prefix))
+
+    def release_assets(self, prefix: str) -> dict[str, list[Asset]]:
+        return {tag: self.list_assets(tag) for tag in self.list_tags(prefix)}
 
     def get_release(self, tag: str) -> Release | None:
         d = self._release_dir(tag)
@@ -218,7 +229,8 @@ class LocalClient(PackageClient):
         for p in sorted(d.iterdir()):
             if p.is_file():
                 out.append(Asset(p.name, p.stat().st_size,
-                                datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)))
+                                datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc),
+                                self.downloads.get((tag, p.name), 0)))
         return out
 
     def download_asset(self, tag: str, name: str, dest: pathlib.Path) -> None:
@@ -279,6 +291,15 @@ class GhClient(PackageClient):
         releases = self._api(f"repos/{self.owner}/{self.repo}/releases")
         return sorted(r["tag_name"] for r in releases if str(r.get("tag_name", "")).startswith(prefix))
 
+    def release_assets(self, prefix: str) -> dict[str, list[Asset]]:
+        releases = self._api(f"repos/{self.owner}/{self.repo}/releases")
+        out = {}
+        for r in releases:
+            tag = r.get("tag_name") or ""
+            if tag.startswith(prefix):
+                out[tag] = self._assets(r)
+        return out
+
     def get_release(self, tag: str) -> Release | None:
         try:
             data = self._api(f"repos/{self.owner}/{self.repo}/releases/tags/{tag}")
@@ -293,7 +314,9 @@ class GhClient(PackageClient):
         for a in release.get("assets", []):
             stamp = a.get("created_at") or a.get("updated_at") or "1970-01-01T00:00:00Z"
             created = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-            out.append(Asset(a["name"], a.get("size", 0), created))
+            count = a.get("download_count", 0)
+            count = int(count) if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0
+            out.append(Asset(a["name"], a.get("size", 0), created, count))
         return out
 
     def create_release(self, tag: str, title: str) -> None:
@@ -765,6 +788,43 @@ def dump_catalog(path: pathlib.Path, catalog: dict) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as f:
         json.dump(catalog, f, indent=2, ensure_ascii=False)
         f.write("\n")
+
+
+def downloads_payload(catalog: dict, assets_by_tag: dict, now: str) -> dict:
+    """The site/downloads.json document: per-mod `total` (sum of the
+    `download_count` over every .zip asset of the mod's release, case-insensitive
+    extension) and `latest` (the count of the asset the entry's `file` URL names)
+    keyed by the catalog entry `id`. Entries whose `file` URL is not a
+    `/<owner>/<repo>/releases/download/<tag>/<asset>` (foreign host or shape)
+    are skipped, and a mod with no matching release is omitted (the page shows
+    0 as `0` and an absent mod as nothing). `total` is 0 when the release has
+    no zip assets; `latest` is omitted when the named asset is not in it."""
+    mods = {}
+    for entry in (catalog or {}).get("mods", []):
+        if not isinstance(entry, dict):
+            continue
+        url = entry.get("file")
+        if not isinstance(url, str):
+            continue
+        try:
+            path = urllib.parse.urlparse(url).path
+        except ValueError:
+            continue
+        m = re.fullmatch(r"/[^/]+/[^/]+/releases/download/([^/]+)/([^/]+)", path)
+        if m is None:
+            continue
+        tag, asset = urllib.parse.unquote(m.group(1)), urllib.parse.unquote(m.group(2))
+        rel = assets_by_tag.get(tag)
+        if rel is None:
+            continue
+        counts = {a.name: a.downloads for a in rel}
+        mods[entry["id"]] = {
+            "total": sum(v for k, v in counts.items() if k.lower().endswith(".zip"))
+        }
+        if asset in counts:
+            mods[entry["id"]]["latest"] = counts[asset]
+    return {"generated": now,
+            "mods": {k: mods[k] for k in sorted(mods)}}
 
 
 # ------------------------------------------------------------- events
@@ -1609,6 +1669,40 @@ def notify_cli(args) -> int:
     return 0
 
 
+def downloads_cli(args) -> int:
+    """The `downloads` subcommand: write site/downloads.json (atomic; a missing
+    catalog, an unreadable one, or a client/API failure exits non-zero and
+    leaves no output file)."""
+    out = pathlib.Path(args.out)
+    catalog_path = pathlib.Path(args.catalog)
+    if not catalog_path.is_file():
+        print(f"downloads: catalog {catalog_path} not found", file=sys.stderr)
+        return 1
+    owner, repo = args.owner, args.repo
+    if (not owner or not repo) and args.client == "gh":
+        gr = os.environ.get("GITHUB_REPOSITORY")
+        if gr and "/" in gr:
+            owner, repo = gr.split("/", 1)
+        if not owner or not repo:
+            print("error: the real client needs --owner/--repo (or GITHUB_OWNER/GITHUB_REPO/GITHUB_REPOSITORY)",
+                  file=sys.stderr)
+            return 1
+    try:
+        client = make_client(args, owner, repo)
+        with catalog_path.open(encoding="utf-8") as f:
+            catalog = json.load(f)
+        if not isinstance(catalog, dict):
+            raise ValueError("the catalog is not a JSON object")
+        payload = downloads_payload(catalog, client.release_assets(MOD_TAG_PREFIX),
+                                   _iso(datetime.now(timezone.utc)))
+        write_json_atomic(out, payload)
+    except Exception as ex:
+        print(f"downloads: {ex.__class__.__name__}: {ex}", file=sys.stderr)
+        return 1
+    print(f"{out.name}: download counts for {len(payload['mods'])} mod(s)")
+    return 0
+
+
 # ------------------------------------------------------------------ cli
 
 
@@ -1658,6 +1752,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--catalog", default=str(CATALOG_DEFAULT))
     p.add_argument("--config", default=str(CONFIG_DEFAULT))
 
+    p = sub.add_parser("downloads", help="write site/downloads.json (per-mod download counts from the release assets)")
+    p.add_argument("--client", choices=("local", "gh"), default="gh")
+    p.add_argument("--root", help="root dir for the local client")
+    p.add_argument("--owner", default=os.environ.get("GITHUB_OWNER"))
+    p.add_argument("--repo", default=os.environ.get("GITHUB_REPO"))
+    p.add_argument("--catalog", default=str(CATALOG_DEFAULT))
+    p.add_argument("--out", default=str(SITE / "downloads.json"))
+
     p = sub.add_parser("notify", help="POST a results file's events to the Worker (never fails the run)")
     p.add_argument("--results", required=True, help="the results file (a JSON array of events)")
     p.add_argument("--url", default=None,
@@ -1670,6 +1772,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "retitle":
         retitle(pathlib.Path(args.catalog), config)
         return 0
+    if args.cmd == "downloads":
+        return downloads_cli(args)
     if args.cmd == "notify":  # no owner/repo: the callback goes to the Worker
         try:
             return notify_cli(args)

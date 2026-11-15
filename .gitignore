@@ -8,6 +8,9 @@ secrets/
 # copied from mod-contract/tags.json at deploy time
 site/tags.json
 
+# generated at deploy time from the release assets' download_count
+site/downloads.json
+
 # per-agent scratch folders (see AGENTS/)
 AGENTS/
 

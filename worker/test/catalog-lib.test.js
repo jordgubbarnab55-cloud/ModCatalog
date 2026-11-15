@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import {
   parseCatalog, sanitizeTags, formatBytes, singleLine, metaParts, fileNameOf,
   parseAccent, accentFor, placeholder, matches, catalogTitle, fitTagCutoff,
+  parseDownloads, formatCount,
 } from "../../site/catalog-lib.js";
 
 const FIXTURES = new URL("../../mod-contract/fixtures/", import.meta.url);
@@ -205,4 +206,48 @@ test("fitTagCutoff: no single chip fits -> just the +N chip", () => {
 test("fitTagCutoff: the +N chip fits nowhere -> plain chips as far as they fit", () => {
   assert.deepEqual(fitTagCutoff([40, 40, 40], 92, 6, () => 500), { tags: 2, plus: 0 });
   assert.deepEqual(fitTagCutoff([40, 40, 40], 30, 6, () => 500), { tags: 0, plus: 0 });
+});
+
+test("formatCount: truncate (never round up), k and M units, no trailing .0", () => {
+  for (const [n, want] of [
+    [0, "0"], [999, "999"], [1000, "1k"], [1234, "1.2k"], [1250, "1.2k"],
+    [9999, "9.9k"], [10000, "10k"], [999999, "999.9k"], [1000000, "1M"],
+    [1500000, "1.5M"],
+  ]) {
+    assert.equal(formatCount(n), want, `formatCount(${n})`);
+  }
+});
+
+test("parseDownloads: valid file, bad roots, and unusable counts", () => {
+  const valid = {
+    generated: "2026-11-15T14:00:00Z",
+    mods: {
+      "123456789.FullMod": { total: 482, latest: 61 },
+      "999999999.Partial": { total: 5 },
+    },
+  };
+  assert.deepEqual([...parseDownloads(valid).entries()], [
+    ["123456789.FullMod", { total: 482, latest: 61 }],
+    ["999999999.Partial", { total: 5 }],
+  ]);
+  // bad roots: a bare array, a non-object, a missing `mods`, a non-object `mods`
+  assert.equal(parseDownloads([]).size, 0);
+  assert.equal(parseDownloads([1, 2, 3]).size, 0);
+  assert.equal(parseDownloads(42).size, 0);
+  assert.equal(parseDownloads(null).size, 0);
+  assert.equal(parseDownloads({}).size, 0);
+  assert.equal(parseDownloads({ mods: 7 }).size, 0);
+  assert.equal(parseDownloads({ mods: [1] }).size, 0);
+  // unusable counts are dropped: negative/float/string totals, a bad `latest`
+  const dirty = {
+    mods: {
+      a: { total: 5, latest: "six" },
+      b: { total: -3, latest: 1 },
+      c: { total: 1.5 },
+      d: { total: "9" },
+      e: [1],
+      f: { total: 2 },
+    },
+  };
+  assert.deepEqual([...parseDownloads(dirty).entries()], [["a", { total: 5 }], ["f", { total: 2 }]]);
 });

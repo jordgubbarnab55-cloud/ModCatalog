@@ -1947,5 +1947,208 @@ class TestNotify(unittest.TestCase):
         self.assertNotIn(self.secret, p.stdout + p.stderr)
 
 
+class TestDownloads(unittest.TestCase):
+    """`downloads`: per-mod counts from the release assets' `download_count`
+    (LocalClient seam: `client.downloads[(tag, name)]`)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        self.catalog = self.root / "catalog.json"
+        self.client = build.LocalClient(self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write_catalog(self, mods) -> None:
+        with self.catalog.open("w", encoding="utf-8") as f:
+            json.dump({"mods": mods}, f)
+
+    def entry(self, identifier: str, tag: str, asset: str, url: str | None = None) -> dict:
+        return {"id": identifier,
+                "file": url or f"https://github.com/{OWNER}/{REPO}/releases/download/{tag}/{asset}"}
+
+    def upload(self, tag: str, name: str) -> None:
+        self.client.create_release(tag, tag)
+        src = self.root / f"src-{name}"
+        src.write_bytes(b"x" * 8)
+        self.client.upload_asset(tag, src, name)
+
+    def payload(self, assets_by_tag: dict) -> dict:
+        with self.catalog.open(encoding="utf-8") as f:
+            catalog = json.load(f)
+        return build.downloads_payload(catalog, assets_by_tag, "2026-01-01T00:00:00Z")
+
+    def test_total_sums_every_zip_version_and_latest_matches_the_file_url(self):
+        self.write_catalog([self.entry("12345.Foo", "mod-12345.foo-abc", "Foo-1.1.0.zip")])
+        for name in ("Foo-1.0.0.zip", "Foo-1.1.0.zip", "cover-1234abcd.png", "notes.txt"):
+            self.upload("mod-12345.foo-abc", name)
+        self.client.downloads.update({
+            ("mod-12345.foo-abc", "Foo-1.0.0.zip"): 10,
+            ("mod-12345.foo-abc", "Foo-1.1.0.zip"): 20,
+            ("mod-12345.foo-abc", "cover-1234abcd.png"): 100,
+            ("mod-12345.foo-abc", "notes.txt"): 5})
+        p = self.payload(self.client.release_assets("mod-"))
+        self.assertEqual(p, {"generated": "2026-01-01T00:00:00Z",
+                            "mods": {"12345.Foo": {"total": 30, "latest": 20}}})
+
+    def test_uppercase_zip_counted_cover_and_non_zip_excluded(self):
+        self.write_catalog([self.entry("12345.Bar", "mod-12345.bar-def", "Bar-1.0.0.zip")])
+        for name in ("Bar-1.0.0.zip", "Bar-2.0.0.ZIP", "cover-abcdef01.png", "readme.md"):
+            self.upload("mod-12345.bar-def", name)
+        self.client.downloads.update({
+            ("mod-12345.bar-def", "Bar-1.0.0.zip"): 1,
+            ("mod-12345.bar-def", "Bar-2.0.0.ZIP"): 7,
+            ("mod-12345.bar-def", "cover-abcdef01.png"): 9,
+            ("mod-12345.bar-def", "readme.md"): 3})
+        p = self.payload(self.client.release_assets("mod-"))
+        self.assertEqual(p["mods"]["12345.Bar"], {"total": 8, "latest": 1})
+
+    def test_release_without_zip_assets_has_total_zero(self):
+        self.write_catalog([self.entry("12345.NoZip", "mod-12345.nozip-abc", "Gone.zip")])
+        self.upload("mod-12345.nozip-abc", "cover-0123abcd.png")
+        self.client.downloads[("mod-12345.nozip-abc", "cover-0123abcd.png")] = 4
+        p = self.payload(self.client.release_assets("mod-"))
+        self.assertEqual(p["mods"]["12345.NoZip"], {"total": 0})
+
+    def test_missing_release_omitted_named_asset_missing_omits_latest_only(self):
+        self.write_catalog([self.entry("12345.Only", "mod-12345.only-abc", "Missing.zip"),
+                           self.entry("12345.Kept", "mod-12345.kep-abc", "Gone.zip")])
+        self.upload("mod-12345.kep-abc", "Kept.zip")
+        self.client.downloads[("mod-12345.kep-abc", "Kept.zip")] = 11
+        p = self.payload(self.client.release_assets("mod-"))
+        self.assertNotIn("12345.Only", p["mods"])
+        self.assertEqual(p["mods"]["12345.Kept"], {"total": 11})
+
+    def test_non_release_file_urls_are_skipped(self):
+        self.write_catalog([
+            self.entry("12345.A", "mod-12345.a-abc", "A.zip",
+                      url="https://other.example/foo/bar.zip"),
+            self.entry("12345.B", "mod-12345.b-abc", "B.zip",
+                      url=f"https://github.com/{OWNER}/{REPO}/releases/download"),
+            self.entry("12345.C", "mod-12345.c-abc", "C.zip",
+                      url=f"https://github.com/{OWNER}/{REPO}/releases/download/mod-12345.c-abc"),
+            self.entry("12345.D", "mod-12345.d-abc", "D.zip"),
+        ])
+        self.upload("mod-12345.d-abc", "D.zip")
+        self.client.downloads[("mod-12345.d-abc", "D.zip")] = 2
+        p = self.payload(self.client.release_assets("mod-"))
+        self.assertEqual(p["mods"], {"12345.D": {"total": 2, "latest": 2}})
+
+    def test_percent_encoded_tag_and_asset_are_decoded(self):
+        tag = "mod-12345.foo-abc"
+        self.write_catalog([self.entry("12345.Pct", tag, "Foo%20v1.zip"),
+                           self.entry("12345.Pct2", "mod-12345%2Epct-abc", "Foo%20v2.zip")])
+        self.upload(tag, "Foo v1.zip")
+        self.upload("mod-12345.pct-abc", "Foo v2.zip")
+        self.client.downloads[(tag, "Foo v1.zip")] = 3
+        self.client.downloads[("mod-12345.pct-abc", "Foo v2.zip")] = 4
+        p = self.payload(self.client.release_assets("mod-"))
+        self.assertEqual(p["mods"], {"12345.Pct": {"total": 3, "latest": 3},
+                                    "12345.Pct2": {"total": 4, "latest": 4}})
+
+    def test_inbox_release_never_contributes(self):
+        self.write_catalog([self.entry("12345.Foo", "mod-12345.foo-abc", "Foo.zip")])
+        self.upload("mod-12345.foo-abc", "Foo.zip")
+        self.client.create_release("inbox", "Inbox")
+        self.client.upload_asset("inbox", self.root / "src-Foo.zip", "inbox.zip")
+        self.client.downloads[("inbox", "inbox.zip")] = 7
+        assets = self.client.release_assets("mod-")
+        self.assertNotIn("inbox", assets)
+        p = self.payload(assets)
+        self.assertEqual(p["mods"], {"12345.Foo": {"total": 0, "latest": 0}})
+
+    def test_localclient_release_assets_and_get_release_carry_the_seam_counts(self):
+        self.upload("mod-12345.foo-abc", "Foo-1.0.0.zip")
+        self.upload("mod-12345.foo-abc", "Foo-2.0.0.zip")
+        self.client.downloads[("mod-12345.foo-abc", "Foo-1.0.0.zip")] = 5
+        assets = self.client.release_assets("mod-")
+        by_name = {a.name: a for a in assets["mod-12345.foo-abc"]}
+        self.assertEqual(by_name["Foo-1.0.0.zip"].downloads, 5)
+        self.assertEqual(by_name["Foo-2.0.0.zip"].downloads, 0)
+        self.assertEqual({a.name: a.downloads for a in self.client.get_release("mod-12345.foo-abc").assets},
+                        {"Foo-1.0.0.zip": 5, "Foo-2.0.0.zip": 0})
+
+    def test_output_is_stable_for_a_fixed_now(self):
+        self.write_catalog([self.entry("12345.Foo", "mod-12345.foo-abc", "Foo.zip"),
+                           self.entry("12345.Bar", "mod-12345.bar-def", "Bar.zip")])
+        self.upload("mod-12345.foo-abc", "Foo.zip")
+        self.upload("mod-12345.bar-def", "Bar.zip")
+        self.client.downloads[("mod-12345.foo-abc", "Foo.zip")] = 1
+        self.client.downloads[("mod-12345.bar-def", "Bar.zip")] = 2
+        with self.catalog.open(encoding="utf-8") as f:
+            catalog = json.load(f)
+        p1 = build.downloads_payload(catalog, self.client.release_assets("mod-"), "2026-01-01T00:00:00Z")
+        p2 = build.downloads_payload(catalog, self.client.release_assets("mod-"), "2026-01-01T00:00:00Z")
+        self.assertEqual(p1, p2)
+        self.assertEqual(json.dumps(p1, indent=2, ensure_ascii=False),
+                         json.dumps(p2, indent=2, ensure_ascii=False))
+        self.assertEqual(list(p1["mods"]), ["12345.Bar", "12345.Foo"])  # sorted keys
+
+    def test_zero_mods_catalog_gives_an_empty_mods_object(self):
+        self.write_catalog([])
+        p = self.payload(self.client.release_assets("mod-"))
+        self.assertEqual(p, {"generated": "2026-01-01T00:00:00Z", "mods": {}})
+
+
+class TestDownloadsCli(unittest.TestCase):
+    """The `downloads` subcommand: atomic write, fail hard (non-zero, no file)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        self.catalog = self.root / "catalog.json"
+        self.out = self.root / "downloads.json"
+        (self.root / "releases").mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def run_cli(self, extra: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(ROOT / "build.py"), "downloads",
+             "--client", "local", "--root", str(self.root),
+             "--catalog", str(self.catalog), "--out", str(self.out)] + extra,
+            capture_output=True, text=True, cwd=str(ROOT))
+
+    def test_missing_catalog_exits_non_zero_and_leaves_no_file(self):
+        p = self.run_cli([])
+        self.assertNotEqual(p.returncode, 0)
+        self.assertFalse(self.out.exists())
+        self.assertEqual(len([l for l in p.stderr.splitlines() if l.strip()]), 1)
+
+    def test_unreadable_catalog_exits_non_zero_and_leaves_no_file(self):
+        self.catalog.write_text("not json", encoding="utf-8")
+        p = self.run_cli([])
+        self.assertNotEqual(p.returncode, 0)
+        self.assertFalse(self.out.exists())
+
+    def test_writes_the_payload_and_zero_mods_is_empty(self):
+        self.catalog.write_text(json.dumps({"mods": []}), encoding="utf-8")
+        p = self.run_cli([])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(self.out.read_text(encoding="utf-8"))
+        self.assertEqual(data["mods"], {})
+        self.assertRegex(data["generated"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertTrue(self.out.read_text(encoding="utf-8").endswith("\n"))
+
+    def test_counts_flow_from_the_release_into_the_file(self):
+        client = build.LocalClient(self.root)
+        client.create_release("mod-12345.foo-abc", "Foo")
+        for name in ("Foo-1.0.0.zip", "Foo-1.1.0.zip"):
+            src = self.root / f"src-{name}"
+            src.write_bytes(b"x" * 8)
+            client.upload_asset("mod-12345.foo-abc", src, name)
+        self.catalog.write_text(json.dumps({"mods": [{
+            "id": "12345.Foo",
+            "file": f"https://github.com/{OWNER}/{REPO}/releases/download/mod-12345.foo-abc/Foo-1.1.0.zip"}]}),
+            encoding="utf-8")
+        p = self.run_cli([])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        # the fresh LocalClient reads no seam, so every count is 0 (shown, not omitted)
+        self.assertEqual(json.loads(self.out.read_text(encoding="utf-8"))["mods"],
+                        {"12345.Foo": {"total": 0, "latest": 0}})
+
+
 if __name__ == "__main__":
     unittest.main()

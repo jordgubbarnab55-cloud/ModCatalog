@@ -11,6 +11,7 @@ mod releases.
 | `python build.py process --from-dir DIR --as-uid ID --as-username NAME` | Treat the directory's zips as uploads by that Discord account (seeding); never notifies |
 | `python build.py rebuild` | Enumerate all `mod-*` releases and regenerate the whole catalog from scratch |
 | `python build.py retitle` | Re-apply only the catalog `name` and `description` from `site/config.json` |
+| `python build.py downloads` | Write `site/downloads.json`: per-mod download counts from the release assets' `download_count` (not committed; regenerated at deploy time) |
 | `python build.py notify --results PATH [--url URL] [--secret S]` | POST the run's events to the Worker |
 
 `--config` selects another config file. `--owner` and `--repo` default to
@@ -40,7 +41,41 @@ Reads each release's **newest** package (the entry, the `author` rename rule,
 the `content_hash`) plus the **oldest valid** one, probed oldest-first with
 fallback (the locked identifier; one download in practice). Cost is O(mods),
 not O(upload history). `--full` (the `rebuild.yml` input `full`) reads every
-package of every release.
+package of every release. Every read goes through the release URL, so a
+rebuild adds one or two to each mod's download count (`docs` section above).
+
+### `downloads`
+
+Writes `site/downloads.json` (gitignored, generated at deploy time; never in
+`catalog.json`, which stays deterministic). The document:
+
+```json
+{
+  "generated": "2026-11-15T14:00:00Z",
+  "mods": {
+    "123456789.FullMod": { "total": 482, "latest": 61 }
+  }
+}
+```
+
+Keyed by the catalog entry `id`. `total` is the sum of `download_count`
+over every `.zip` asset (case-insensitive extension) of the mod's release
+(covers and other assets excluded); `latest` is the count of the asset the
+entry's `file` URL points at. Entries whose `file` URL is not
+`/…/releases/download/<tag>/<asset>` (foreign host or shape) are skipped
+silently (the URL's tag and asset are percent-decoded); a mod with no
+matching release is omitted, not written as 0 — the page shows 0 as `0` and
+an absent mod as nothing. `latest` is omitted when the named asset is not
+in the release. `mods` keys are sorted; the write is atomic (temp file +
+replace, the `dump_catalog` JSON style). On any error (missing or
+unreadable catalog, API failure) the command prints one line to stderr and
+exits non-zero without writing; the callers decide whether that is fatal
+(`docs/workflows.md`). A catalog with zero mods writes an empty `mods`.
+The counts are GitHub's raw asset counters: every request to the release URL
+counts (browser, ModManager, bots, retries) and so do the pipeline's own
+reads — a `rebuild` downloads the newest and oldest package of every release
+(every package with `--full`), so it adds one or two to each mod, and
+deleting an asset removes its count, so a total can go down.
 
 ### `notify`
 
@@ -57,7 +92,13 @@ package of every release.
 
 ## Clients
 
-Both implement `PackageClient`.
+Both implement `PackageClient`. `release_assets(prefix)` returns `tag ->
+assets` for every release whose tag starts with `prefix`; `GhClient` makes
+one paginated `repos/{owner}/{repo}/releases` call (the same endpoint
+`list_tags` uses), `LocalClient` iterates its release folders and fills
+`Asset.downloads` from its `downloads` dict keyed `(tag, asset name)` (a
+test seam; default 0). `GhClient` reads `download_count` into
+`Asset.downloads` (a non-negative int; anything else is 0).
 
 - `GhClient` (default): shells out to the preinstalled `gh` CLI, auth via
   `GH_TOKEN`. Releases are GitHub release tags, assets are release assets.
