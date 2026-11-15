@@ -85,13 +85,15 @@ python build.py process --client local --root <dir> ...   # offline pipeline run
 - Always use the classic token in `secrets/github_tokenclassic.txt` for git
   and `gh` operations. The fine-grained `github_pat*.txt` tokens lack the
   `workflow` scope, so pushes touching `.github/` are rejected.
-- Never let git open an interactive login prompt for the owner. Set
-  `GIT_TERMINAL_PROMPT=0` and pass the token through a credential helper
-  that reads the file (never print it):
+- Never let git open an interactive login prompt for the owner. Do not use
+  `git -c credential.helper=...` (Git Credential Manager still shows its
+  dialog). Instead pass the token in a one-off URL so git never consults
+  any credential helper, with `GIT_TERMINAL_PROMPT=0` as a backstop
+  (never print the token):
   ```
-  GIT_TERMINAL_PROMPT=0 git \
-    -c credential.helper='!f() { echo username=x-access-token; echo password="$(cat secrets/github_tokenclassic.txt)"; }; f' \
-    push origin main
+  GIT_TERMINAL_PROMPT=0 git push \
+    "https://x-access-token:$(cat secrets/github_tokenclassic.txt)@github.com/jordgubbarnab55-cloud/ModCatalog.git" main
   ```
+  (the URL is used for the one invocation only; it is never stored)
 - For `gh`, use `GH_TOKEN="$(cat secrets/github_tokenclassic.txt)"` instead
   of `gh auth login`.
