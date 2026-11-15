@@ -52,6 +52,22 @@
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.residentevilcharacterssurviors-c77c898f/cover-260fd23e.png"
     },
     {
+      "id": "1509993694902878381.UnlockAllCosmetics",
+      "name": "Unlock All Cosmetics",
+      "author": "uncool_1234",
+      "version": "",
+      "description": "Unlocks all cosmetics, no DLC. Works on all platforms.",
+      "tags": [
+        "Blueprint"
+      ],
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.unlockallcosmetics-6dc08db4/Unlock-All-Cosmetics-package.zip",
+      "size": 84475354,
+      "sha256": "a0baf32ecd60d8947db146439fc637c7c33aa1c4f3575b6fdff7c0f629aaf229",
+      "uploader": "1509993694902878381",
+      "updated": "2026-11-15T13:39:14Z",
+      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.unlockallcosmetics-6dc08db4/cover-3b28e246.png"
+    },
+    {
       "id": "1571293769163219027.ZZTestFinal",
       "name": "ZZ Test Final",
       "author": "berry049516",
