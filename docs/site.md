@@ -60,11 +60,15 @@ The page mirrors the app.
 
 - Adonis dark palette: window `#2A2B34`, card `#32323F` / hover `#3D3D4C`,
   foreground `#F0F0F0` (75% secondary), accent `#206BD4` / hover `#3C81E2`.
-- Fixed 135x90 (3:2) cover (card is 92 px tall) over a letter placeholder (initial
-  plus the catalog `accent`, else a colour hashed from the mod id).
+- Fixed 135x90 (3:2) cover (card is 92 px tall, 104 px when a tag row is
+  shown; the cover stays centred while the card grows around it) over a
+  letter placeholder (initial plus the catalog `accent`, else a colour hashed
+  from the mod id).
 - Title 14 semibold; `author [• vVersion] [• [gameVersion]]`, each segment
   only when non-empty (the app's `VersionMetaConverter`; same in the details
-  view); single-line description.
+  view); single-line description; then a single-line tag row (chips plus a
+  `+N` overflow chip, re-fit on resize with the grid cards' `fitTagCutoff`)
+  when the mod has tags.
 - A 116 px right column with a 44x44 solid-accent button (Lucide download,
   20 px) and a `formatBytes` size hint.
 - 2 cards per row, 1 on narrow screens, catalog order.

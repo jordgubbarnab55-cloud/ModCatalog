@@ -86,7 +86,8 @@
     @media (max-width: 560px) { .grid.gridmode { grid-template-columns: 1fr; } }
     .empty { grid-column: 1 / -1; color: var(--fg2); font-size: 13px; margin: 8px 0; }
 
-    /* Card: fixed 135x90 (3:2) cover drives the height, info, download column */
+    /* Card: fixed 135x90 (3:2) cover, info (with an optional tag row) drives
+       the height, download column */
     .card {
         display: grid;
         grid-template-columns: auto 1fr auto;
@@ -156,6 +157,11 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+    }
+    .ltags {
+        display: flex;
+        flex-wrap: nowrap;
+        overflow: hidden;
     }
     /* The stack hugs the column's right edge and sizes to max(button, hint):
        the hint centers under the button, and when wider grows left only. */
@@ -888,8 +894,9 @@
     try { mode = localStorage.getItem('modcatalog.cardMode') === 'grid' ? 'grid' : 'list'; } catch { mode = 'list'; }
     const modeBtns = [...document.querySelectorAll('.modebtn')];
 
-    // Grid card tags: the row (chips + the `+N` chip) must fit beside the
-    // download-count chip; show all that fit; re-fit when a card's width changes
+    // Card tag rows: the row (chips + the `+N` chip) must fit — beside the
+    // download-count chip on grid cards, inside the info column on list cards;
+    // show all that fit; re-fit when a card's width changes
     const TAG_GAP = 6;   // the .tag chip's margin-right
     let tagFitScheduled = false;
     const tagFitObserved = [];
@@ -898,13 +905,13 @@
         tagFitScheduled = true;
         requestAnimationFrame(() => {
             tagFitScheduled = false;
-            fitGridTags();
+            fitCardTags();
         });
     });
 
-    function fitGridTags() {
+    function fitCardTags() {
         for (const { card } of entries) {
-            const twrap = card.querySelector('.gtags');
+            const twrap = card.querySelector('.gtags, .ltags');
             if (!twrap) continue;
             const plus = twrap.querySelector('.plus');
             const chips = [...twrap.querySelectorAll('span:not(.plus)')];
@@ -912,7 +919,9 @@
             chips.forEach((c) => { c.hidden = false; });
             plus.hidden = false;   // measurable
             const gcount = card.querySelector('.gcount');
-            const avail = card.clientWidth - 20 - (gcount ? gcount.offsetWidth + TAG_GAP : 0);
+            const avail = gcount
+                ? card.clientWidth - 20 - (gcount.offsetWidth + TAG_GAP)
+                : twrap.clientWidth;
             const { tags: k, plus: rem } = fitTagCutoff(
                 chips.map((c) => c.offsetWidth),
                 avail,
@@ -938,12 +947,11 @@
         }
         for (const c of tagFitObserved) tagFitObserver.unobserve(c);
         tagFitObserved.length = 0;
-        if (m === 'grid')
-            for (const { card } of entries) {
-                tagFitObserver.observe(card);
-                tagFitObserved.push(card);
-            }
-        fitGridTags();
+        for (const { card } of entries) {
+            tagFitObserver.observe(card);
+            tagFitObserved.push(card);
+        }
+        fitCardTags();
         applyDownloads();
         applyFilter();
     }
@@ -1039,6 +1047,14 @@
 
         const info = h('div', 'info');
         info.append(h('div', 'title', mod.name), metaLine('meta', mod), h('div', 'desc', singleLine(mod.description)));
+        if (mod.tags.length > 0) {
+            const lt = h('div', 'ltags');
+            for (const tag of mod.tags) lt.appendChild(h('span', 'tag', tag));
+            const plus = h('span', 'tag plus');
+            plus.hidden = true;
+            lt.appendChild(plus);
+            info.appendChild(lt);
+        }
 
         const dl = h('a', 'dlbtn');
         dl.href = mod.file;
