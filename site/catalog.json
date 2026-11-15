@@ -52,6 +52,23 @@
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.residentevilcharacterssurviors-c77c898f/cover-260fd23e.png"
     },
     {
+      "id": "1509993694902878381.SkullTrooper",
+      "name": "Skull Trooper",
+      "author": "uncool_1234",
+      "version": "1.0.1",
+      "gameVersion": "10.2.2",
+      "description": "`.apng` test.",
+      "tags": [
+        "VFX"
+      ],
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.skulltrooper-6916429d/Skull-Trooper-1.0.1.zip",
+      "size": 10148553,
+      "sha256": "af3cd28085f7247c4ed26878562b167d6351318e09716f7abac0be454e7d5603",
+      "uploader": "1509993694902878381",
+      "updated": "2026-11-15T13:53:41Z",
+      "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.skulltrooper-6916429d/cover-726833e8.png"
+    },
+    {
       "id": "1509993694902878381.UnlockAllCosmetics",
       "name": "Unlock All Cosmetics",
       "author": "uncool_1234",
