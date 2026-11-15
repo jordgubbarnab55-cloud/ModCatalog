@@ -60,10 +60,10 @@ The page mirrors the app.
 
 - Adonis dark palette: window `#2A2B34`, card `#32323F` / hover `#3D3D4C`,
   foreground `#F0F0F0` (75% secondary), accent `#206BD4` / hover `#3C81E2`.
-- Fixed 135x90 (3:2) cover (card is 92 px tall, 104 px when a tag row is
-  shown; the cover stays centred while the card grows around it) over a
-  letter placeholder (initial plus the catalog `accent`, else a colour hashed
-  from the mod id).
+- A 3:2 cover filling the card's height (135x90 in the 92 px card, about
+  152x101 in the 104 px card with a tag row) over a letter placeholder
+  (initial plus the catalog `accent`, else a colour hashed from the mod
+  id).
 - Title 14 semibold; `author [• vVersion] [• [gameVersion]]`, each segment
   only when non-empty (the app's `VersionMetaConverter`; same in the details
   view); single-line description; then a single-line tag row (chips plus a
