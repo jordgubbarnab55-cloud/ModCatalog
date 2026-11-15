@@ -17,7 +17,7 @@ export function configOk(uploadUrl) {
 /** Human-readable message for an upload HTTP status (or "network"). */
 export function statusMessage(status) {
   switch (status) {
-    case 202: return "Your mod is queued and being processed. You'll get a ping in Discord when it's live (usually 1-2 minutes) — or if it is rejected.";
+    case 202: return "Your mod is now being processed. It will be visible both here and on Discord in a little bit.";
     case 401: return "Token is not valid. Get a fresh one in Discord with /token.";
     case 411: return "The browser could not send the file size. Please try again.";
     case 413: return "One upload was over 100 MB. Upload the loose .utoc/.ucas/.pak files instead of a big .zip.";

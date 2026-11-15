@@ -827,7 +827,7 @@ export function createUploadFlow(ctx) {
       this.dismissEditor();
       heading.textContent = "Your mod is now processing";
       bar.remove();
-      setStatus(statusMessage(202), "wait");
+      setStatus(statusMessage(202));
       finish(button("Close", close, true));
     }
 

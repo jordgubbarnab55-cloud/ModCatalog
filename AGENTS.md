@@ -47,7 +47,6 @@ Read the ones your task touches before editing code.
 | `docs/site.md` | Editing the page, cards, filters, icons, or modal motion |
 | `docs/upload-flow.md` | Editing the upload modals or what the browser sends |
 | `docs/trailer-and-contract.md` | Touching the trailer format, `mod-contract/`, or the JS/Python twins |
-| `docs/conventions.md` | Writing code, comments, plans, tests, commit messages |
 | `docs/environment.md` | Running tools, git, `gh`, Python, or deploys on this machine |
 | `docs/agent-workspace.md` | Naming yourself and placing files |
 
@@ -83,8 +82,7 @@ python build.py process --client local --root <dir> ...   # offline pipeline run
 ## GitHub authentication
 
 - Always use the classic token in `secrets/github_tokenclassic.txt` for git
-  and `gh` operations. The fine-grained `github_pat*.txt` tokens lack the
-  `workflow` scope, so pushes touching `.github/` are rejected.
+  and `gh` operations.
 - Never let git open an interactive login prompt for the owner. Do not use
   `git -c credential.helper=...` (Git Credential Manager still shows its
   dialog). Instead pass the token in a one-off URL so git never consults
@@ -97,3 +95,62 @@ python build.py process --client local --root <dir> ...   # offline pipeline run
   (the URL is used for the one invocation only; it is never stored)
 - For `gh`, use `GH_TOKEN="$(cat secrets/github_tokenclassic.txt)"` instead
   of `gh auth login`.
+
+# Conventions
+
+## Comments
+
+Leave a comment only when something is particularly complex or non-obvious.
+A comment describes the current code: what it does, and why it must be that
+way when the reason is not evident (an invariant, an external constraint).
+Never reference decisions, plans, alternatives or past implementations, in
+comments, docstrings, error messages, or other user-facing text. Before
+writing one, ask whether it makes sense to someone who never saw the previous
+version. Rationale for a change belongs in the commit message or your summary
+to the user.
+
+Applies equally to files in `docs/` other than `docs/plans/`: they describe
+the system as it is now.
+
+## Commits
+
+The commit message carries what the docs and comments should not: what changed, why it changed, how it changed. If the change is simple enough to only motivate one or two of these "what/why/how", then it's fine to only include the relevant ones.
+
+## Plans
+
+Plans live in `docs/plans/` (a single-file plan, or a folder of numbered
+parts such as `docs/plans/v2-discord-forum-integration/`). A plan may record
+goals, decisions and alternatives. Code, comments and other docs do not point
+at plans.
+
+## Tests
+
+```
+python -m unittest discover -s tests     # repo root; stdlib unittest
+cd worker && node --test                 # Worker, site libs, contract fixtures
+```
+
+Both run offline. Python tests use `LocalClient`; Worker tests inject fakes
+for `fetch`, KV and D1 (`worker/test/helpers/fake-d1.js`). Add or update tests
+with every behavior change; the shared fixtures cover the trailer, catalog and
+package-shape rules.
+
+## Constraints by area
+
+| Area | Constraint |
+|---|---|
+| `build.py`, `trailer.py` | stdlib only; deterministic output |
+| `worker/` | zero runtime dependencies; no GitHub calls on `/discord`; no parsing in the Worker |
+| `site/` | no build step, framework, CDN or external JS; no package bytes at render time |
+| `site/catalog.json` | generated; never hand-edited |
+| `mod-contract/` | vendored; edit the canonical copy |
+| Repo | no package zips or cover images in git; no credentials tracked |
+
+## Generated and synced files
+
+- `site/catalog.json`: `python build.py process|rebuild|retitle`.
+- `site/tags.json`: copied from `mod-contract/tags.json` at deploy time
+  (gitignored; the tags UI hides when it is missing, for example in a local
+  preview).
+- The inline icon sprite in `site/index.html`: `python scripts/sync-icons.py`
+  after changing any `site/icons/*.svg`; commit both.

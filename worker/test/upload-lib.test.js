@@ -24,8 +24,7 @@ test("configOk rejects placeholders, empty, non-http and missing values", () => 
 
 test("statusMessage covers every documented status", () => {
   assert.match(statusMessage(202), /processed/i);
-  assert.match(statusMessage(202), /Discord/i);
-  assert.match(statusMessage(202), /1-2 minutes/i);
+  assert.match(statusMessage(202), /visible both here and on Discord/i);
   assert.match(statusMessage(401), /token/i);
   assert.match(statusMessage(411), /size/i);
   assert.match(statusMessage(413), /100 MB/i);

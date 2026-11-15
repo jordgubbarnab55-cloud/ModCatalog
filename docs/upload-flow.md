@@ -148,8 +148,8 @@ upload: manifest, `metadata.json`, and the files part-split at 90 MB, through
 - A failed request leaves the editor open underneath ("Back to the editor" or
   Esc keeps the form).
 - Once every request is accepted, the editor modal closes and the confirm
-  modal becomes a static "Your mod is now processing" result (spinner plus
-  `statusMessage(202)`, one Close button). It does not poll the catalog; the
+  modal becomes a static "Your mod is now processing" result
+  (`statusMessage(202)`, one Close button). It does not poll the catalog; the
   mod appears when the next inbox run finishes. Dismissing it ends the
   session.
 - Statuses come from `statusMessage`.
