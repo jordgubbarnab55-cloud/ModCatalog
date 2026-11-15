@@ -5,6 +5,22 @@
   "verifiedAuthors": true,
   "mods": [
     {
+      "id": "1571293769163219027.ExampleUEMod",
+      "name": "Example UE Mod",
+      "author": "berry049516",
+      "version": "1.0",
+      "description": "Sample UE 5.6 packaged container (.utoc/.ucas) for metadata trailer tooling.",
+      "tags": [
+        "Environment",
+        "VFX"
+      ],
+      "file": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1571293769163219027.exampleuemod-84f6a681/Example-UE-Mod-1.0.zip",
+      "size": 10185549,
+      "sha256": "daf1d41411d1fef747afaad7b822817745182ef0a4d52769b76ae118e7a8413f",
+      "uploader": "1571293769163219027",
+      "updated": "2026-11-15T09:41:10Z"
+    },
+    {
       "id": "1509993694902878381.RedLegacyNea",
       "name": "Red Legacy Nea 3",
       "author": "uncool_1234",
