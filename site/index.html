@@ -164,10 +164,11 @@
         flex-wrap: nowrap;
         overflow: hidden;
     }
-    /* The stack hugs the column's right edge and sizes to max(button, hint):
-       the hint centers under the button, and when wider grows left only. */
+    /* The stack hugs the column's right edge and sizes to max(button,
+       count): the count centers under the button, and when wider grows
+       left only. */
     .dl {
-        width: 116px;
+        width: 68px;
         margin: 12px 12px 12px 0;
         display: flex;
         flex-direction: column;
@@ -180,6 +181,7 @@
     }
     .dlbtn {
         align-self: flex-end;
+        position: relative;
         width: 44px;
         height: 44px;
         display: flex;
@@ -192,8 +194,35 @@
     }
     .dlbtn:hover { background: var(--accent-hover); }
     .dlbtn:active { background: var(--accent-active); }
-    .dlbtn svg { width: 20px; height: 20px; }
-    .hint { align-self: center; font-size: 11px; color: var(--fg2); white-space: nowrap; }
+    /* On hover the icon cross-fades to the size: the number over the unit,
+       fading in like the grid card's description (no darkened panel). */
+    .dlbtn svg { width: 20px; height: 20px; transition: opacity 160ms ease; }
+    .dlbtn .dlsize {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0;
+        line-height: 1.2;
+        opacity: 0;
+        transition: opacity 160ms ease;
+    }
+    .dlbtn .dlsize .num { font-size: 14px; font-weight: 600; }
+    .dlbtn .dlsize .unit { font-size: 10px; }
+    .dlbtn:hover svg, .dlbtn:focus-visible svg { opacity: 0; }
+    .dlbtn:hover .dlsize, .dlbtn:focus-visible .dlsize { opacity: 1; }
+    .dcount {
+        align-self: center;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 11px;
+        color: var(--fg2);
+        white-space: nowrap;
+    }
+    .dcount svg { width: 12px; height: 12px; }
 
     /* Grid mode: the polaroid card — a 3:2 photo flush with the top and
        sides, caption underneath. On hover a darkened, blurred panel slides in
@@ -311,7 +340,7 @@
     .card.grid:hover .gov, .card.grid:focus-visible .gov, .card.grid:has(a:focus-visible) .gov { opacity: 1; transform: none; }
     .card.grid:hover .gdlbtn, .card.grid:focus-visible .gdlbtn, .card.grid:has(a:focus-visible) .gdlbtn { opacity: 1; pointer-events: auto; }
     @media (prefers-reduced-motion: reduce) {
-        .card.grid .gcap, .card.grid .gov, .card.grid .gdlbtn { transition: none; }
+        .card.grid .gcap, .card.grid .gov, .card.grid .gdlbtn, .dlbtn svg, .dlbtn .dlsize { transition: none; }
     }
 
     /* Details lightbox: 720x240 panel, 240 cover */
@@ -855,6 +884,18 @@
         <use href="#i-download"></use>
     </svg>`;
 
+    // The list download button's hover text: the byte count ceiled into binary
+    // units (e.g. 10.0 MB -> "11", "MB"), as [number, unit]. Division by 1024
+    // is exact in floating point, so the ceil never overshoots.
+    function hoverSizeParts(bytes) {
+        const n = Number.isFinite(bytes) && bytes > 0 ? Math.floor(bytes) : 0;
+        let size = n, i = 0;
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+        const v = i === 0 ? n : Math.ceil(size);
+        return [new Intl.NumberFormat(undefined, { useGrouping: false }).format(v), units[i]];
+    }
+
     const grid = document.getElementById('grid');
     const countEl = document.getElementById('catCount');
     const searchEl = document.getElementById('search');
@@ -865,18 +906,23 @@
     loadDownloads();
 
     // downloads.json is optional: a missing, failed or malformed file leaves
-    // the map empty, and every count display then hides itself. The map
-    // never blocks card rendering; it applies whenever it arrives, and again
-    // on every re-render (setMode).
+    // the map empty, so the grid chips hide and the list text shows 0. The
+    // map never blocks card rendering; it applies whenever it arrives, and
+    // again on every re-render (setMode).
     function applyDownloads() {
         if (downloadsMap === null) return;
         for (const { mod, card } of entries) {
+            // gcount: the grid card's chip (hidden without a count); dcount:
+            // the list card's text (shows 0)
             const gcount = card.querySelector('.gcount');
-            if (!gcount) continue;
+            const dcount = card.querySelector('.dcount');
+            if (!gcount && !dcount) continue;
             const entry = downloadsMap.get(mod.id);
-            if (!entry) { gcount.hidden = true; continue; }
-            gcount.hidden = false;
-            gcount.querySelector('span').textContent = formatCount(entry.total);
+            if (gcount) {
+                gcount.hidden = !entry;
+                if (entry) gcount.querySelector('span').textContent = formatCount(entry.total);
+            }
+            if (dcount) dcount.querySelector('span').textContent = entry ? formatCount(entry.total) : "0";
         }
     }
     async function loadDownloads() {
@@ -1062,9 +1108,14 @@
         dl.setAttribute('download', fileNameOf(mod.file));
         dl.title = 'Download ' + mod.name;
         dl.setAttribute('aria-label', 'Download ' + mod.name);
-        dl.innerHTML = DOWNLOAD_ICON;
+        const [num, unit] = hoverSizeParts(mod.size);
+        dl.innerHTML = DOWNLOAD_ICON + `<span class="dlsize"><span class="num">${num}</span><span class="unit">${unit}</span></span>`;
+        // The download count, as icon plus text (the grid card shows the
+        // same pair in a chip); 0 until downloads.json provides a count.
+        const count = h('div', 'dcount');
+        count.innerHTML = DOWNLOAD_ICON + '<span>0</span>';
         const stack = h('div', 'dlstack');
-        stack.append(dl, h('div', 'hint', formatBytes(mod.size)));
+        stack.append(dl, count);
         const right = h('div', 'dl');
         right.appendChild(stack);
 

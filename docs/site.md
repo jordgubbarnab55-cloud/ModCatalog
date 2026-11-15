@@ -34,8 +34,9 @@ HTML**. The upload flow is in `docs/upload-flow.md`.
   file, generated at deploy time; `docs/build-pipeline.md`), fetched in
   parallel with `catalog.json` with `{cache: 'no-store'}`. The page never
   blocks card rendering on it, and a missing, failed or malformed file is
-  silent: the map stays empty and every count display hides (an absent
-  mod hides; a count of 0 shows `0`). The counts are GitHub's raw asset
+  silent: the map stays empty, the grid cards' chips hide, and the list
+  cards' count text shows `0` (as does a count of 0). The counts are
+  GitHub's raw asset
   counters, so the pipeline's own `rebuild` reads add one or two per mod
   and deleting an asset can lower a total.
 - The `download` attribute is ignored cross-origin, but GitHub serves release
@@ -69,8 +70,13 @@ The page mirrors the app.
   view); single-line description; then a single-line tag row (chips plus a
   `+N` overflow chip, re-fit on resize with the grid cards' `fitTagCutoff`)
   when the mod has tags.
-- A 116 px right column with a 44x44 solid-accent button (Lucide download,
-  20 px) and a `formatBytes` size hint.
+- A 68 px right column with a 44x44 solid-accent button (Lucide download,
+  20 px) that, on hover or focus, cross-fades the icon for the file size:
+  the value ceiled into binary units (e.g. 10 MB, 732 B), the number line
+  above the unit line, with the grid cards' 160 ms opacity fade and no
+  darkened panel. Beneath the button, the download count in short form with
+  a download icon (the grid card's chip as plain text, without its chip
+  styling); `0` until `downloads.json` provides a count.
 - 2 cards per row, 1 on narrow screens, catalog order.
 
 ### Details lightbox (`ModDetailsDialog`)
