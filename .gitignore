@@ -8,11 +8,9 @@ secrets/
 # copied from mod-contract/tags.json at deploy time
 site/tags.json
 
+# per-agent scratch folders (see AGENTS/)
+AGENTS/
+
 # local scratch / tool caches
 .local/
 .wrangler/
-
-# e2e session scratch (test zips, run logs, token dumps) and tool output
-.live/
-worker/d1out.txt
-pi-session-*.md

@@ -1,6 +1,6 @@
 # Plan — verified authors in the catalog
 
-**Prerequisite:** `docs/plan-upload-modal.md` is implemented (the runner
+**Prerequisite:** `docs/plans/plan-upload-modal.md` is implemented (the runner
 writes every stored trailer through one `apply_metadata`-style function; the
 web editor takes a `forced` input that greys fields). Read that plan and the
 code it produced first.

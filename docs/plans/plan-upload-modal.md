@@ -7,7 +7,7 @@ Two changes that ship together:
 2. **The contract.** The browser stops writing trailers. It uploads the
    package **unchanged** plus an optional `metadata.json`; the
    `process-inbox` runner writes the final trailer with `trailer.py`. A
-   follow-up plan (`docs/plan-verified-authors.md`, done after this one by
+   follow-up plan (`docs/plans/plan-verified-authors.md`, done after this one by
    another agent — **not in scope here**) builds on this to force the author
    and identifier on the server. Leave clean seams for it (below).
 

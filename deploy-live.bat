@@ -32,7 +32,6 @@ echo Tests passed.
 echo.
 echo [2/5] Commit
 git add -u
-git reset -q -- site/site-preview.log
 git diff --cached --quiet
 if errorlevel 1 (
     git commit -m "Deploy to live: site + worker updates"
@@ -43,14 +42,11 @@ if errorlevel 1 (
 
 echo.
 echo [3/5] Rebase + push (a site/** push triggers the Pages deploy)
-set "STASHED="
-git diff --quiet -- site/site-preview.log || (git stash push -q -- site/site-preview.log && set "STASHED=1")
 git fetch origin
 git rebase origin/main
 if errorlevel 1 goto :fail
 git push origin main
 if errorlevel 1 goto :fail
-if defined STASHED git stash pop -q
 
 echo.
 echo [4/5] Deploy the Cloudflare Worker
