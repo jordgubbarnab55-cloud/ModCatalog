@@ -86,7 +86,7 @@
     @media (max-width: 560px) { .grid.gridmode { grid-template-columns: 1fr; } }
     .empty { grid-column: 1 / -1; color: var(--fg2); font-size: 13px; margin: 8px 0; }
 
-    /* Card: fixed 90x90 cover drives the height, info, download column */
+    /* Card: fixed 135x90 (3:2) cover drives the height, info, download column */
     .card {
         display: grid;
         grid-template-columns: auto 1fr auto;
@@ -105,7 +105,7 @@
     .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
     .cover {
         position: relative;
-        width: 90px;
+        width: 135px;
         height: 90px;
         border-radius: 4px;
         overflow: hidden;
@@ -188,7 +188,7 @@
     .dlbtn svg { width: 20px; height: 20px; }
     .hint { align-self: center; font-size: 11px; color: var(--fg2); white-space: nowrap; }
 
-    /* Grid mode: the polaroid card — a square photo flush with the top and
+    /* Grid mode: the polaroid card — a 3:2 photo flush with the top and
        sides, caption underneath. On hover a darkened, blurred panel slides in
        over the photo with the description (clipped only when it runs out of
        space), and the caption area cross-fades to a centred Download button. */
@@ -201,7 +201,7 @@
     }
     .card.grid .gmedia {
         position: relative;
-        aspect-ratio: 1;
+        aspect-ratio: 3 / 2;
         margin: -10px -10px 0;
         border-radius: 7px 7px 4px 4px;
         overflow: hidden;
