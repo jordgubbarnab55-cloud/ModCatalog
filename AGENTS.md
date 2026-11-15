@@ -79,3 +79,19 @@ python -m unittest discover -s tests     # repo root
 cd worker && node --test                 # Worker, site libs, contract fixtures
 python build.py process --client local --root <dir> ...   # offline pipeline run
 ```
+
+## GitHub authentication
+
+- Always use the classic token in `secrets/github_tokenclassic.txt` for git
+  and `gh` operations. The fine-grained `github_pat*.txt` tokens lack the
+  `workflow` scope, so pushes touching `.github/` are rejected.
+- Never let git open an interactive login prompt for the owner. Set
+  `GIT_TERMINAL_PROMPT=0` and pass the token through a credential helper
+  that reads the file (never print it):
+  ```
+  GIT_TERMINAL_PROMPT=0 git \
+    -c credential.helper='!f() { echo username=x-access-token; echo password="$(cat secrets/github_tokenclassic.txt)"; }; f' \
+    push origin main
+  ```
+- For `gh`, use `GH_TOKEN="$(cat secrets/github_tokenclassic.txt)"` instead
+  of `gh auth login`.
