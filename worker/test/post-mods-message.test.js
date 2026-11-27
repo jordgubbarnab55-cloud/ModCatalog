@@ -3,7 +3,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildModsMessage, postModsMessage } from "../scripts/post-mods-message.mjs";
+import { buildModsMessage, postModsMessage, findModsMessages, deleteMessages } from "../scripts/post-mods-message.mjs";
 
 // ------------------------------------------------------------- fakes
 
@@ -80,4 +80,38 @@ test("a non-2xx Discord response (and a thrown error) is a failure with the deta
   assert.equal(r2.ok, false);
   assert.equal(r2.status, null);
   assert.match(r2.detail, /offline/);
+});
+
+// ------------------------------------------------ find / delete
+
+const button = (id) => [{ type: 1, components: [{ type: 2, custom_id: id }] }];
+
+test("findModsMessages: only the bot's own messages with the upload button, newest first", async () => {
+  const fetch = makeFetch((url) => {
+    if (url.endsWith("/users/@me")) return new Response(JSON.stringify({ id: "bot" }));
+    return new Response(JSON.stringify([
+      { id: "5", author: { id: "bot" }, components: button("mods_upload") },
+      { id: "4", author: { id: "bot" }, components: [] },
+      { id: "3", author: { id: "someone" }, components: button("mods_upload") },
+      { id: "2", author: { id: "bot" }, components: button("mods_upload") },
+    ]));
+  });
+  const r = await findModsMessages("T", "C", fetch);
+  assert.deepEqual(r, { ok: true, ids: ["5", "2"] });
+  assert.match(fetch.calls[1].url, /channels\/C\/messages\?limit=100$/);
+});
+
+test("findModsMessages: a failed listing is not ok", async () => {
+  const fetch = makeFetch(() => new Response("no", { status: 403 }));
+  const r = await findModsMessages("T", "C", fetch);
+  assert.equal(r.ok, false);
+});
+
+test("deleteMessages: DELETEs each id; 404 counts as deleted, other failures are returned", async () => {
+  const fetch = makeFetch((url) => new Response(null, {
+    status: url.endsWith("/1") ? 204 : url.endsWith("/2") ? 404 : 500,
+  }));
+  const failed = await deleteMessages("T", "C", ["1", "2", "3"], fetch);
+  assert.deepEqual(failed, ["3"]);
+  assert.ok(fetch.calls.every((c) => c.init.method === "DELETE"));
 });

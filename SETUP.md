@@ -42,6 +42,10 @@ Every step below is a live action. Do them **in order**.
      from step 9, e.g. `https://modcatalog.<you>.workers.dev`). Without
      them the workflow reports no outcomes and the button shows uploads as
      waiting.
+   - For the **Post #mods message** workflow: the variable
+     `MODS_CHANNEL_ID` (the #mods text channel; uses the same
+     `DISCORD_BOT_TOKEN` secret). Run it with `repost` once the bot is in
+     the server to post the button message.
 5. **Verify.**
    - Open `https://jordgubbarnab55-cloud.github.io/ModCatalog/` — the
      page loads (empty catalog at first).

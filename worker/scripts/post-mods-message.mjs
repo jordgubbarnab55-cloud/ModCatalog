@@ -2,7 +2,7 @@
 // message in the #mods text channel.
 //
 // Usage (owner, from anywhere; needs Node 18+):
-//   DISCORD_BOT_TOKEN=... MODS_CHANNEL_ID=... node scripts/post-mods-message.mjs [--edit <messageId>] [--dry-run]
+//   DISCORD_BOT_TOKEN=... MODS_CHANNEL_ID=... node scripts/post-mods-message.mjs [--edit <messageId> | --edit-current | --replace] [--dry-run]
 //
 // Env (read at run time, never stored):
 //   DISCORD_BOT_TOKEN   `Authorization: Bot <token>`
@@ -10,6 +10,11 @@
 // Flags:
 //   --edit <messageId>  PATCH the existing message instead of posting a new
 //                       one (to refresh the copy or the buttons later).
+//   --edit-current      PATCH the bot's newest button message in the channel
+//                       (found among the last 100 messages); posts a new one
+//                       when there is none.
+//   --replace           post a new message, then delete every earlier button
+//                       message of the bot among the last 100 messages.
 //   --dry-run           print the exact mutation request without sending it.
 //
 // The message carries three buttons in one action row:
@@ -80,17 +85,68 @@ export async function postModsMessage(token, channelId, fetchImpl, opts = {}) {
   return { ok: false, status: res.status, messageId: null, detail: detail.slice(0, 300) };
 }
 
+// The bot's own button messages (custom_id "mods_upload") among the last
+// 100 messages of the channel, newest first. Returns { ok, ids, detail }.
+export async function findModsMessages(token, channelId, fetchImpl) {
+  const headers = { Authorization: `Bot ${token}` };
+  try {
+    const me = await fetchImpl(`${API}/users/@me`, { headers });
+    if (!me.ok) return { ok: false, ids: [], detail: `users/@me HTTP ${me.status}` };
+    const botId = (await me.json()).id;
+    const res = await fetchImpl(`${API}/channels/${channelId}/messages?limit=100`, { headers });
+    if (!res.ok) return { ok: false, ids: [], detail: `messages HTTP ${res.status}` };
+    const ids = (await res.json())
+      .filter((m) => m.author && m.author.id === botId &&
+        (m.components || []).some((row) => (row.components || []).some((b) => b.custom_id === "mods_upload")))
+      .map((m) => m.id);
+    return { ok: true, ids };
+  } catch (err) {
+    return { ok: false, ids: [], detail: String(err) };
+  }
+}
+
+// Deletes the given messages; returns the ids that could not be deleted
+// (404 counts as deleted).
+export async function deleteMessages(token, channelId, ids, fetchImpl) {
+  const failed = [];
+  for (const id of ids) {
+    try {
+      const res = await fetchImpl(`${API}/channels/${channelId}/messages/${id}`,
+        { method: "DELETE", headers: { Authorization: `Bot ${token}` } });
+      if (!res.ok && res.status !== 404) failed.push(id);
+    } catch {
+      failed.push(id);
+    }
+  }
+  return failed;
+}
+
+function fail(msg) {
+  console.error(msg);
+  process.exit(1);
+}
+
 async function main() {
   const token = process.env.DISCORD_BOT_TOKEN;
   const channelId = process.env.MODS_CHANNEL_ID;
   const dryRun = process.argv.includes("--dry-run");
   const editIdx = process.argv.indexOf("--edit");
-  const messageId = editIdx > -1 && process.argv[editIdx + 1]
+  let messageId = editIdx > -1 && process.argv[editIdx + 1]
     ? process.argv[editIdx + 1]
     : null;
+  const editCurrent = process.argv.includes("--edit-current");
+  const replace = process.argv.includes("--replace");
   if (!token || !channelId) {
-    console.error("usage: DISCORD_BOT_TOKEN=... MODS_CHANNEL_ID=... node scripts/post-mods-message.mjs [--edit <messageId>] [--dry-run]");
+    console.error("usage: DISCORD_BOT_TOKEN=... MODS_CHANNEL_ID=... node scripts/post-mods-message.mjs [--edit <messageId> | --edit-current | --replace] [--dry-run]");
     process.exit(2);
+  }
+  let previous = [];
+  if (editCurrent || replace) {
+    const found = await findModsMessages(token, channelId, fetch);
+    if (!found.ok) fail(`could not list the channel: ${found.detail}`);
+    previous = found.ids;
+    console.log(`found ${previous.length} existing button message(s)`);
+    if (editCurrent && previous.length) messageId = previous[0];
   }
   const r = await postModsMessage(token, channelId, fetch, { messageId, dryRun });
   if (!r.ok) {
@@ -99,6 +155,15 @@ async function main() {
   }
   if (r.dryRun) console.log(`[dry-run] ${messageId ? "would PATCH" : "would POST"} the message (no request sent)`);
   else console.log(`${messageId ? "edited" : "posted"} message ${r.messageId}`);
+  if (replace && previous.length) {
+    if (dryRun) {
+      console.log(`[dry-run] would delete ${previous.join(", ")}`);
+      return;
+    }
+    const failed = await deleteMessages(token, channelId, previous, fetch);
+    console.log(`deleted ${previous.length - failed.length} earlier message(s)`);
+    if (failed.length) fail(`could not delete ${failed.join(", ")}`);
+  }
 }
 
 // Run as a CLI, not when imported by the test suite.

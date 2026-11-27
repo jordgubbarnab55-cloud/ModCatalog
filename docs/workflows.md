@@ -1,8 +1,9 @@
 # Workflows
 
-All workflows live in `.github/workflows/`, declare explicit `permissions`
-and share `concurrency: {group: catalog, cancel-in-progress: false}`, so
-catalog merges and deploys never race.
+All workflows live in `.github/workflows/` and declare explicit
+`permissions`. The catalog workflows share
+`concurrency: {group: catalog, cancel-in-progress: false}`, so catalog
+merges and deploys never race.
 
 ## `process-inbox.yml`
 
@@ -40,6 +41,16 @@ Discord account). Runs `python build.py process --from-dir legacy-assets
 Triggers on a push to `main` touching `site/**` or `mod-contract/tags.json`.
 Checkout, setup-python, then the `deploy-site` action. Bot pushes made with
 `GITHUB_TOKEN` do not trigger it, so there are no loops.
+
+## `mods-message.yml`
+
+`workflow_dispatch` with a `mode` choice. Runs
+`worker/scripts/post-mods-message.mjs` with the secret `DISCORD_BOT_TOKEN`
+and the variable `MODS_CHANNEL_ID`: `edit` updates the bot's current button
+message in #mods in place (`--edit-current`; posts one when none is found),
+`repost` posts a new one at the bottom and deletes the earlier ones
+(`--replace`). Only the newest 100 messages of the channel are searched.
+Not in the `catalog` concurrency group; it touches no catalog files.
 
 ## `refresh-downloads.yml`
 

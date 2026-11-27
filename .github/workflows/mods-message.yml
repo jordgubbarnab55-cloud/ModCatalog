@@ -1,0 +1,38 @@
+name: Post #mods message
+
+# Manual only. Refreshes the bot's button message in the #mods channel
+# (worker/scripts/post-mods-message.mjs):
+#   edit    - update the current message in place (posts one if none exists)
+#   repost  - post a new message at the bottom and delete the earlier ones
+# Needs the secret DISCORD_BOT_TOKEN and the variable MODS_CHANNEL_ID.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "edit = update in place, repost = new message at the bottom"
+        type: choice
+        options: [edit, repost]
+        default: edit
+
+permissions:
+  contents: read
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Post or edit the message
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          MODS_CHANNEL_ID: ${{ vars.MODS_CHANNEL_ID }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          if [ "$MODE" = repost ]; then flag=--replace; else flag=--edit-current; fi
+          node worker/scripts/post-mods-message.mjs "$flag"

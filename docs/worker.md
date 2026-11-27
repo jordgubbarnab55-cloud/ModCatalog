@@ -197,7 +197,10 @@ token makes uploads answer 502. Set a calendar reminder at creation.
 `scripts/register-commands.mjs` registers the slash commands, reading
 `DISCORD_APP_ID` and `DISCORD_BOT_TOKEN` from the environment at run time and
 storing nothing. `scripts/smoke-test.sh` runs an upload and polls the catalog.
-`scripts/post-mods-message.mjs` posts or edits the #mods message. Deployment
+`scripts/post-mods-message.mjs` posts or edits the #mods message
+(`--edit <id>`, `--edit-current`, or `--replace`, which posts a new one and
+deletes the bot's earlier button messages among the channel's last 100);
+the `mods-message.yml` workflow runs it. Deployment
 steps are in `SETUP.md`.
 
 ## Tests
