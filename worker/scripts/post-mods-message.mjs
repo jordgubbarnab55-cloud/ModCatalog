@@ -12,29 +12,33 @@
 //                       one (to refresh the copy or the buttons later).
 //   --dry-run           print the exact mutation request without sending it.
 //
-// The message carries two buttons in one action row:
+// The message carries three buttons in one action row:
 //   * "Upload or update a mod" (style 1)  -> custom_id "mods_upload"
 //     (the Worker mints a one-time login code and replies ephemerally with
 //     a link button to the site)
+//   * "Check upload status" (style 2)     -> custom_id "mods_status"
+//     (the Worker replies ephemerally with the clicker's last 3 uploads)
 //   * "Sign out everywhere" (style 2)     -> custom_id "mods_signout"
 //     (the Worker deletes all of the clicker's tokens)
-// The Worker's /discord endpoint dispatches both (worker/src/index.js).
+// The Worker's /discord endpoint dispatches all three (worker/src/index.js).
 
 const API = "https://discord.com/api/v10";
 
-// The message payload: explanatory content + one action row with the two
+// The message payload: explanatory content + one action row with the three
 // buttons. `buildModsMessage` is exported so a test can assert the shape.
 export function buildModsMessage() {
   return {
     content:
       "**Share a mod** — click **Upload or update a mod** and the bot gives you " +
       "a private link to the website's uploader. The link works **once** and " +
-      "expires in 5 minutes. **Sign out everywhere** revokes your site login " +
-      "(and your `/token` token) on all devices.",
+      "expires in 5 minutes. **Check upload status** shows whether your last " +
+      "uploads are waiting, published or rejected. **Sign out everywhere** " +
+      "revokes your site login (and your `/token` token) on all devices.",
     components: [{
-      type: 1, // one action row with both buttons
+      type: 1, // one action row with all three buttons
       components: [
         { type: 2, style: 1, label: "Upload or update a mod", custom_id: "mods_upload" },
+        { type: 2, style: 2, label: "Check upload status", custom_id: "mods_status" },
         { type: 2, style: 2, label: "Sign out everywhere", custom_id: "mods_signout" },
       ],
     }],

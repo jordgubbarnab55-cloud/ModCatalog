@@ -19,19 +19,22 @@ function makeFetch(handler) {
 
 // --------------------------------------------------- payload builder
 
-test("buildModsMessage: two buttons in one action row, the right styles and custom_ids", () => {
+test("buildModsMessage: three buttons in one action row, the right styles and custom_ids", () => {
   const msg = buildModsMessage();
   assert.ok(msg.content.length > 0, "explanatory copy");
   assert.ok(msg.content.includes("Upload or update a mod"));
   assert.equal(msg.components.length, 1);
   assert.equal(msg.components[0].type, 1, "one action row");
-  const [a, b] = msg.components[0].components;
+  const [a, c, b] = msg.components[0].components;
   assert.equal(a.custom_id, "mods_upload");
   assert.equal(a.style, 1, "primary");
   assert.equal(a.label, "Upload or update a mod");
   assert.equal(b.custom_id, "mods_signout");
   assert.equal(b.style, 2, "danger");
   assert.equal(b.label, "Sign out everywhere");
+  assert.equal(c.custom_id, "mods_status");
+  assert.equal(c.style, 2);
+  assert.equal(c.label, "Check upload status");
 });
 
 // --------------------------------------------------- post / edit

@@ -8,6 +8,7 @@ import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import worker, { handle, loginLinkUrl, clearInboxCache } from "../src/index.js";
 import { scheduleDelete, sweepDue } from "../src/ephemeral.js";
+import { recordWaiting } from "../src/uploads.js";
 import {
   sha256Hex, mintManualToken, mintLoginCode,
   redeemLoginCode, ASQL,
@@ -508,7 +509,7 @@ async function setPart({ filename, headers, bytes = 10 }) {
   });
   for (const [k, v] of Object.entries(headers)) req.headers.set(k, v);
   const res = await handle(req, makeEnv(kv, pub), f);
-  return { res, f, up: f.calls.find((c) => c.url.includes("uploads.github.com")) };
+  return { res, f, db: kv.DB, up: f.calls.find((c) => c.url.includes("uploads.github.com")) };
 }
 
 const SET = { "X-Upload-Id": "abc-123", "X-File-Idx": "0", "X-Part-Idx": "0", "X-Part-Count": "1" };
@@ -998,4 +999,184 @@ test("the first use of a /token token deletes the /token reply", async () => {
   assert.equal(who.status, 200);
   assert.equal(discordDeletes(f).length, 1);
   assert.equal(db.ephemeralRows().length, 0);
+});
+
+// ------------------------------------------------------ upload status
+
+test("a queued zip upload records a waiting row keyed by the asset name without the stamp", async () => {
+  const kv = {};
+  const pub = await publicKeyB64();
+  const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
+  const f = makeFetch((url) => {
+    if (url.includes("releases/tags/inbox")) return new Response(JSON.stringify({ id: 7 }), { status: 200 });
+    return new Response(null, { status: 201 });
+  });
+  const res = await handle(uploadRequest({
+    token, contentLength: 3, filename: "My Mod.zip",
+    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(3)); c.close(); } }),
+  }), makeEnv(kv, pub), f);
+  assert.equal(res.status, 202);
+  const [row] = kv.DB.uploadRows("42");
+  assert.equal(row.status, "waiting");
+  assert.equal(row.label, "My Mod.zip");
+  assert.match(row.upload_key, /^\d+__My-Mod\.zip$/);
+  const up = f.calls.find((c) => c.url.includes("uploads.github.com"));
+  assert.ok(decodeURIComponent(up.url).endsWith(`42-616c696365__${row.upload_key}`), "the key is the asset name tail");
+  assert.ok(Math.abs(Date.parse(row.uploaded_at) - Date.now()) < 5000);
+});
+
+test("a set's manifest records a waiting row keyed by the upload id; its parts do not", async () => {
+  const part = await setPart({ filename: "a.pak", headers: SET });
+  assert.deepEqual(part.db.uploadRows(), []);
+  const manifest = await setPart({ filename: "manifest.json", headers: { ...SET, "X-File-Idx": "-1" } });
+  const [row] = manifest.db.uploadRows("42");
+  assert.equal(row.upload_key, "abc-123");
+  assert.equal(row.status, "waiting");
+});
+
+test("a refused upload records nothing", async () => {
+  const kv = {};
+  const pub = await publicKeyB64();
+  const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
+  const f = makeFetch((url) =>
+    url.includes("releases/tags/inbox") ? new Response(JSON.stringify({ id: 7 }), { status: 200 })
+    : new Response(null, { status: 500 }));
+  const res = await handle(uploadRequest({
+    token, contentLength: 3, filename: "a.zip",
+    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(3)); c.close(); } }),
+  }), makeEnv(kv, pub), f);
+  assert.equal(res.status, 502);
+  assert.deepEqual(kv.DB.uploadRows(), []);
+});
+
+function resultsRequest(body, { auth = "Bearer s3cret", method = "POST" } = {}) {
+  const headers = {};
+  if (auth != null) headers.Authorization = auth;
+  return new Request("https://worker.local/uploads/results", {
+    method, headers, body: method === "POST" ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
+  });
+}
+
+const WAITING = "INSERT OR IGNORE INTO uploads (discord_id, upload_key, uploaded_at, label, status, updated_at) VALUES (?1, ?2, ?3, ?4, 'waiting', ?3)";
+
+test("/uploads/results: 503 without the secret, 401 for a wrong or missing one", async () => {
+  const kv = {};
+  const pub = await publicKeyB64();
+  const report = [{ key: "k", discord_id: "42", status: "published" }];
+  assert.equal((await handle(resultsRequest(report), makeEnv(kv, pub), makeFetch())).status, 503);
+  const env = makeEnv(kv, pub, { UPLOAD_RESULTS_SECRET: "s3cret" });
+  assert.equal((await handle(resultsRequest(report, { auth: "Bearer nope" }), env, makeFetch())).status, 401);
+  assert.equal((await handle(resultsRequest(report, { auth: null }), env, makeFetch())).status, 401);
+  assert.equal((await handle(resultsRequest(report, { auth: "s3cret" }), env, makeFetch())).status, 401);
+  assert.equal((await handle(resultsRequest(null, { method: "GET" }), env, makeFetch())).status, 405);
+  assert.deepEqual(kv.DB.uploadRows(), [], "nothing stored without the secret");
+});
+
+test("/uploads/results: upserts outcomes onto waiting rows and inserts unknown keys", async () => {
+  const kv = {};
+  const db = new FakeD1();
+  const pub = await publicKeyB64();
+  const env = makeEnv(kv, pub, { DB: db, UPLOAD_RESULTS_SECRET: "s3cret" });
+  await db.prepare(WAITING).bind("42", "k1", "2026-01-01T00:00:00.000Z", "a.zip").run();
+  const res = await handle(resultsRequest([
+    { key: "k1", discord_id: "42", status: "published", title: "Cool Mod", version: "1.2" },
+    { key: "k2", discord_id: "42", status: "rejected", reason: "bad package" },
+    { key: "", discord_id: "42", status: "published" },
+    { key: "k3", discord_id: "not-a-number", status: "published" },
+    { key: "k4", discord_id: "42", status: "waiting" },
+  ]), env, makeFetch());
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { stored: 2, skipped: 3 });
+  const rows = Object.fromEntries(db.uploadRows("42").map((r) => [r.upload_key, r]));
+  assert.equal(rows.k1.status, "published");
+  assert.equal(rows.k1.title, "Cool Mod");
+  assert.equal(rows.k1.version, "1.2");
+  assert.equal(rows.k1.uploaded_at, "2026-01-01T00:00:00.000Z", "the upload time is kept");
+  assert.equal(rows.k1.label, "a.zip");
+  assert.equal(rows.k2.status, "rejected");
+  assert.equal(rows.k2.reason, "bad package");
+  assert.ok(Math.abs(Date.parse(rows.k2.uploaded_at) - Date.now()) < 5000, "unknown key: now");
+});
+
+test("/uploads/results: bad json, a non-list, too many reports and a big body are refused", async () => {
+  const kv = {};
+  const pub = await publicKeyB64();
+  const env = makeEnv(kv, pub, { UPLOAD_RESULTS_SECRET: "s3cret" });
+  assert.equal((await handle(resultsRequest("{oops"), env, makeFetch())).status, 400);
+  assert.equal((await handle(resultsRequest({ key: "k" }), env, makeFetch())).status, 400);
+  const many = Array.from({ length: 21 }, (_, i) => ({ key: `k${i}`, discord_id: "42", status: "published" }));
+  assert.equal((await handle(resultsRequest(many), env, makeFetch())).status, 400);
+  const big = [{ key: "k", discord_id: "42", status: "rejected", reason: "x".repeat(70000) }];
+  assert.equal((await handle(resultsRequest(big), env, makeFetch())).status, 413);
+});
+
+test("only the newest 20 rows of a user are kept", async () => {
+  const db = new FakeD1();
+  for (let i = 0; i < 25; i++)
+    await recordWaiting(db, { discordId: "42", key: `k${i}`, label: "a.zip", now: new Date(Date.UTC(2026, 0, 1, 0, 0, i)) });
+  await recordWaiting(db, { discordId: "7", key: "other", label: "b.zip", now: new Date() });
+  const keys = db.uploadRows("42").map((r) => r.upload_key);
+  assert.equal(keys.length, 20);
+  assert.equal(keys[0], "k24");
+  assert.ok(!keys.includes("k4") && keys.includes("k5"));
+  assert.equal(db.uploadRows("7").length, 1, "another user's rows are untouched");
+});
+
+async function status(db, who = "42") {
+  const env = makeEnv({}, await publicKeyB64(), { DB: db });
+  const f = discordFetch();
+  const res = await interact(env, f, fakeCtx(), {
+    type: 3, token: "itok", data: { custom_id: "mods_status" },
+    member: { id: who, user: { id: who, username: "alice" } },
+  });
+  assert.equal(f.calls.filter((c) => !c.url.startsWith("https://discord.com/")).length, 0, "no GitHub calls");
+  return { res, body: await res.json() };
+}
+
+test("mods_status: nothing uploaded yet", async () => {
+  const { res, body } = await status(new FakeD1());
+  assert.equal(res.status, 200);
+  assert.equal(body.type, 4);
+  assert.equal(body.data.flags, 64, "ephemeral");
+  assert.deepEqual(body.data.allowed_mentions, { parse: [] });
+  assert.match(body.data.content, /haven't uploaded anything yet/);
+});
+
+test("mods_status: the last 3 uploads, newest first, with Discord timestamps and statuses", async () => {
+  const db = new FakeD1();
+  const rows = [
+    ["k1", "2026-01-01T00:00:00.000Z", "old.zip", "published", "Old Mod", "1.0", null],
+    ["k2", "2026-01-02T00:00:00.000Z", "b.zip", "published", "Cool Mod", "1.2", null],
+    ["k3", "2026-01-03T00:00:00.000Z", "c.zip", "rejected", "Bad @everyone [x](http://e.com) `y`", null,
+      "invalid package: no <@1> metadata trailer"],
+    ["k4", "2026-01-04T00:00:00.000Z", "mod upload", "waiting", null, null, null],
+  ];
+  for (const [key, at, label, st, title, version, reason] of rows) {
+    await db.prepare(WAITING).bind("42", key, at, label).run();
+    Object.assign(db.uploads.get(`42/${key}`), { status: st, title, version, reason });
+  }
+  await db.prepare(WAITING).bind("99", "theirs", "2026-01-05T00:00:00.000Z", "x.zip").run();
+  const { body } = await status(db);
+  const text = body.data.content;
+  const ts = (iso) => Math.floor(Date.parse(iso) / 1000);
+  assert.match(text, /^\*\*Your last 3 uploads\*\*\n1\. /);
+  const i4 = text.indexOf(`<t:${ts("2026-01-04T00:00:00.000Z")}:f>`);
+  const i3 = text.indexOf(`<t:${ts("2026-01-03T00:00:00.000Z")}:f>`);
+  const i2 = text.indexOf(`<t:${ts("2026-01-02T00:00:00.000Z")}:f>`);
+  assert.ok(i4 > -1 && i4 < i3 && i3 < i2, "newest first");
+  assert.ok(text.includes(`<t:${ts("2026-01-04T00:00:00.000Z")}:R>`));
+  assert.ok(!text.includes("Old Mod") && !text.includes("x.zip"), "only the last 3 of the clicker");
+  assert.match(text, /\*\*mod upload\*\*: ⏳ Waiting to be processed/);
+  assert.match(text, /\*\*Cool Mod\*\* v1\.2: ✅ Published \(<https:\/\/pages\.example\.com\/>\)/);
+  assert.match(text, /❌ Rejected: invalid package: no 1 metadata trailer/);
+  assert.ok(!text.includes("@") && !text.includes("<@") && !text.includes("](http"), "user text is neutralized");
+  assert.ok(text.length <= 2000);
+});
+
+test("mods_status: one upload reads singular", async () => {
+  const db = new FakeD1();
+  await db.prepare(WAITING).bind("42", "k", "2026-01-01T00:00:00.000Z", "a.zip").run();
+  const { body } = await status(db);
+  assert.match(body.data.content, /^\*\*Your last upload\*\*/);
+  assert.match(body.data.content, /\*\*a\.zip\*\*: ⏳/);
 });

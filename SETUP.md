@@ -33,10 +33,15 @@ Every step below is a live action. Do them **in order**.
    - For the Discord announcements (`build.py announce`): the secret
      `DISCORD_BOT_TOKEN` (the bot token from step 1) and the variables
      `FORUM_CHANNEL_ID` (the forum the mod threads go to),
-     `NOTICES_CHANNEL_ID` (rejection notices; blank = none),
      `FORUM_TAG_IDS` (JSON object, catalog tag → forum tag id; `{}` for
      none) and `SITE_URL` (the Pages URL, ending in `/`). Without the token
-     or the forum id the step is a no-op.
+     or the forum id no forum threads are posted.
+   - For the #mods "Check upload status" button: the secret
+     `UPLOAD_RESULTS_SECRET` (a long random string; the same value goes into
+     the Worker in step 8) and the variable `WORKER_URL` (the Worker's URL
+     from step 9, e.g. `https://modcatalog.<you>.workers.dev`). Without
+     them the workflow reports no outcomes and the button shows uploads as
+     waiting.
 5. **Verify.**
    - Open `https://jordgubbarnab55-cloud.github.io/ModCatalog/` — the
      page loads (empty catalog at first).
@@ -67,7 +72,9 @@ Every step below is a live action. Do them **in order**.
      (= `ModCatalog`) and `ALLOWED_ORIGIN`
      (= `https://jordgubbarnab55-cloud.github.io`) in `wrangler.toml`.
 8. `npx wrangler secret put DISCORD_PUBLIC_KEY` (the key from step 1),
-   then `npx wrangler secret put GITHUB_TOKEN` (the token from step 2).
+   then `npx wrangler secret put GITHUB_TOKEN` (the token from step 2),
+   then `npx wrangler secret put UPLOAD_RESULTS_SECRET` (the value of the
+   GitHub secret of the same name from step 4).
 9. `npx wrangler deploy`. The first deploy asks you to register a
    `workers.dev` subdomain. Note the printed URL, e.g.
    `https://modcatalog.<you>.workers.dev`.

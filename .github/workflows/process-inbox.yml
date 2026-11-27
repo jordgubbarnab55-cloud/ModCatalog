@@ -51,16 +51,18 @@ jobs:
           commit_message: "Regenerate catalog from inbox"
 
       # After the Pages deploy (the site is live before the announcement):
-      # post the run's outcome events to Discord. always() + continue-on-error:
+      # post the run's published mods to Discord and report every outcome
+      # (published or rejected) to the Worker. always() + continue-on-error:
       # announcing never fails the run; a missing results file or missing
-      # Discord settings is a no-op.
+      # settings is a no-op.
       - name: Announce in Discord
         if: always()
         continue-on-error: true
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           FORUM_CHANNEL_ID: ${{ vars.FORUM_CHANNEL_ID }}
-          NOTICES_CHANNEL_ID: ${{ vars.NOTICES_CHANNEL_ID }}
           FORUM_TAG_IDS: ${{ vars.FORUM_TAG_IDS }}
           SITE_URL: ${{ vars.SITE_URL }}
+          WORKER_URL: ${{ vars.WORKER_URL }}
+          UPLOAD_RESULTS_SECRET: ${{ secrets.UPLOAD_RESULTS_SECRET }}
         run: python build.py announce --results inbox-results.json

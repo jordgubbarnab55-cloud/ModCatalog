@@ -6,9 +6,10 @@ devDependency run by the owner). Everything service-facing is injected:
 contract is in `worker/README.md` and `mod-contract/upload.md`;
 this doc covers behavior and invariants.
 
-Source: `src/index.js` (routing, `/discord`, `/upload`, `/whoami`),
-`src/auth.js` (D1 tokens and login codes), `src/quota.js` (the D1 daily
-upload quota), `src/ephemeral.js` (self-deleting Discord replies).
+Source: `src/index.js` (routing, `/discord`, `/upload`, `/uploads/results`,
+`/whoami`), `src/auth.js` (D1 tokens and login codes), `src/quota.js` (the D1
+daily upload quota), `src/ephemeral.js` (self-deleting Discord replies),
+`src/uploads.js` (the D1 upload status behind the status button).
 
 ## `POST /discord`
 
@@ -41,12 +42,57 @@ edited by `worker/scripts/post-mods-message.mjs`. Type-3 dispatch is on
 - `mods_upload` mints a login code and replies ephemerally with an "Open the
   uploader" link button (`SITE_URL` + `#login=<code>`: a fragment, never a
   query). The 6th click in 60 s is rate-limited.
+- `mods_status` ("Check upload status") replies ephemerally with the
+  clicker's last 3 uploads, newest first (see "Upload status"). Replies set
+  `allowed_mentions: {parse: []}`.
 - `mods_signout` runs `revokeAllTokens`: deletes every token of the clicker
   and invalidates unused codes.
 - Any other custom id answers 400.
 
 A type-7 response to a component interaction would edit the original
 message, so replies use type 4 with flags 64.
+
+## Upload status (D1 `uploads`, `src/uploads.js`)
+
+`/discord` makes no GitHub call, so the status button reads D1. One row per
+upload, primary key `(discord_id, upload_key)`:
+
+| Column | Meaning |
+|---|---|
+| `upload_key` | The upload id of a set, or `<ts>__<safe-name>.zip` for a zip package: the inbox asset name without the uploader stamp, so `build.py` (`parse_inbox_name`) derives the same key from the inbox |
+| `uploaded_at` | ISO time the Worker queued it |
+| `label` | The zip file name, or `mod upload` for a set |
+| `status` | `waiting`, `published` or `rejected` |
+| `title`, `version`, `reason` | Known once the runner reports the outcome |
+
+- `/upload` inserts a `waiting` row when it answers `202 queued` (a zip
+  package or a set's manifest; parts insert nothing). A D1 failure never
+  fails the upload.
+- The runner reports outcomes to `POST /uploads/results` (below), which
+  upserts them. Only the newest 20 rows of each user are kept (older ones are
+  deleted on every insert).
+- The status reply lists up to 3 rows: `<t:UNIX:f> (<t:UNIX:R>)` (Discord
+  renders these in the viewer's own time zone), the mod title and version (or
+  the label), and the status: waiting to be processed, published (with the
+  site link), or rejected with the reason. No rows: "You haven't uploaded
+  anything yet". Titles, labels and reasons are user-controlled: `@`, `<`,
+  `>` and backticks are removed and markdown characters escaped.
+
+## `POST /uploads/results`
+
+Called by the `announce` step of `process-inbox.yml`, not by browsers (no
+CORS). `Authorization: Bearer <UPLOAD_RESULTS_SECRET>` is compared in constant
+time: `503` when the secret is unset, `401` when wrong. The body is a JSON
+list of at most 20 reports, at most 64 KiB (`400` / `413` otherwise):
+
+```json
+[{ "key": "<upload_key>", "discord_id": "123", "status": "published|rejected",
+   "title": "…", "version": "…", "reason": "…" }]
+```
+
+Reports with a bad key, id or status are skipped. The answer is
+`200 {"stored": n, "skipped": m}`. A report for an unknown key inserts a row
+with the current time. The endpoint makes no GitHub call.
 
 ## Self-deleting replies
 
@@ -139,6 +185,9 @@ keeps an explicit allow overwrite: View, `SEND_MESSAGES`,
 `SEND_MESSAGES_IN_THREADS`, `EMBED_LINKS`.
 
 ## Secrets and tokens
+
+`UPLOAD_RESULTS_SECRET` is a long random string stored as a Worker secret and
+as the GitHub Actions secret of the same name.
 
 The fine-grained `GITHUB_TOKEN` expires after at most one year; an expired
 token makes uploads answer 502. Set a calendar reminder at creation.

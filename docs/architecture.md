@@ -8,7 +8,7 @@
 | GitHub Actions | Processing. Drains the inbox, validates, re-homes packages, regenerates `site/catalog.json`, deploys Pages |
 | GitHub Pages | Serves `site/` (the page, `config.json`, `catalog.json`) and nothing else; `downloads.json` (per-mod download counts, generated at deploy time) and `tags.json` ride along on each deploy |
 | Cloudflare Worker (`worker/`) | Discord interactions, token and login-code auth, streaming upload pass-through |
-| D1 (`DB`) | Tokens, login codes, daily upload quota |
+| D1 (`DB`) | Tokens, login codes, daily upload quota, per-user upload status |
 | ModManager's Browse tab | Reads `catalog.json`, downloads release assets |
 
 ## Data flow
@@ -22,7 +22,8 @@ browser / ModManager --upload--> Worker --stream--> release "inbox"
                                                          |
               release mod-<slug>-<hex> (zip + cover) + site/catalog.json
                                                          |
-                       Pages deploy  -->  announce  -->  Discord
+                       Pages deploy  -->  announce  -->  Discord (forum threads)
+                                              \-->  Worker /uploads/results (upload status)
 ```
 
 The Worker never parses a package: free-plan CPU is 10 ms and client-supplied

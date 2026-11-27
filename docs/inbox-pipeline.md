@@ -34,6 +34,11 @@ Two shapes:
 
 `__` never occurs inside a safe file name; the Worker collapses it.
 
+An upload's **key** is its asset name without the stamp for a zip package
+(`<unixts>__<safe-filename>.zip`) and its `<uploadId>` for a set. The Worker
+records it as the upload's status row and the runner's events carry it, so
+outcomes find their rows (`docs/worker.md`).
+
 The Worker dispatches `process-inbox.yml` as a **wake-up with no payload**
 only after a manifest or a zip-mode upload; a part upload alone dispatches
 nothing.

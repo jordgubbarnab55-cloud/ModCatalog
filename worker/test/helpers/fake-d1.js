@@ -1,11 +1,13 @@
 // A fake D1 matching prepared statements by their SQL string, with
 // SQLite-like transition semantics and changed-row counts
 // (`meta.changes`). Covers the auth statements (ASQL) and the quota
-// statements (QSQL) and the ephemeral-reply statements (ESQL). Nothing touches the network.
+// statements (QSQL), the ephemeral-reply statements (ESQL) and the upload
+// status statements (USQL). Nothing touches the network.
 
 import { ASQL } from "../../src/auth.js";
 import { QSQL } from "../../src/quota.js";
 import { ESQL } from "../../src/ephemeral.js";
+import { USQL } from "../../src/uploads.js";
 
 export class FakeD1 {
   constructor() {
@@ -13,12 +15,17 @@ export class FakeD1 {
     this.codes = new Map();     // login_codes: hash -> row
     this.quota = new Map();     // upload_quota: discord_id -> row
     this.ephemeral = new Map(); // ephemeral_deletes: interaction_token -> row
+    this.uploads = new Map();   // uploads: `${discord_id}/${upload_key}` -> row
   }
   // -- test introspection
   tokenRows() { return [...this.tokens.values()]; }
   codeRows() { return [...this.codes.values()]; }
   quotaRow(discordId) { return this.quota.get(discordId) || null; }
   ephemeralRows() { return [...this.ephemeral.values()]; }
+  uploadRows(discordId) {
+    return [...this.uploads.values()].filter((r) => !discordId || r.discord_id === discordId)
+      .sort((x, y) => (x.uploaded_at < y.uploaded_at ? 1 : x.uploaded_at > y.uploaded_at ? -1 : 0));
+  }
   prepare(sql) {
     const self = this;
     return {
@@ -133,6 +140,34 @@ export class FakeD1 {
           if (r.created_at < a[0]) { this.ephemeral.delete(t); n++; }
         return n;
       }
+      // ---- uploads (USQL)
+      case USQL.insertWaiting: {
+        const k = `${a[0]}/${a[1]}`;
+        if (this.uploads.has(k)) return 0;
+        this.uploads.set(k, { discord_id: a[0], upload_key: a[1], uploaded_at: a[2], label: a[3],
+          status: "waiting", title: null, version: null, reason: null, updated_at: a[2] });
+        return 1;
+      }
+      case USQL.upsertResult: {
+        const k = `${a[0]}/${a[1]}`;
+        const row = this.uploads.get(k);
+        if (!row) {
+          this.uploads.set(k, { discord_id: a[0], upload_key: a[1], uploaded_at: a[2], label: a[3],
+            status: a[4], title: a[5], version: a[6], reason: a[7], updated_at: a[2] });
+        } else {
+          Object.assign(row, { status: a[4], title: a[5], version: a[6], reason: a[7], updated_at: a[2] });
+        }
+        return 1;
+      }
+      case USQL.prune: {
+        const keep = new Set(this.uploadRows(a[0]).slice(0, 20).map((r) => r.upload_key));
+        let n = 0;
+        for (const [k, r] of this.uploads)
+          if (r.discord_id === a[0] && !keep.has(r.upload_key)) { this.uploads.delete(k); n++; }
+        return n;
+      }
+      case USQL.recent:
+        return this.uploadRows(a[0]).slice(0, 3);
       default:
         throw new Error(`FakeD1: unknown statement ${sql}`);
     }

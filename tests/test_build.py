@@ -1784,6 +1784,25 @@ class TestEvents(Base):
         sha = hashlib.sha256(self.client.asset_bytes(tag, pub["assetName"])).hexdigest()
         self.assertEqual(pub["eventId"], f"12345.stablemod:{sha}")
 
+    def test_events_carry_the_upload_key(self):
+        make_package(self.root / "bad.zip", no_trailer=True)
+        self.to_inbox(self.root / "bad.zip", "12345", f"{S('12345')}__7__bad.zip")
+        make_package(self.root / "good.zip", title="Keyed Mod")
+        self.to_inbox(self.root / "good.zip", "12345", f"{S('12345')}__8__good.zip")
+        self.run_process()
+        self.assertEqual(sorted(e["key"] for e in self.events()), ["7__bad.zip", "8__good.zip"])
+        self.assertEqual(self.by_status("rejected")[0]["eventId"], "rej:12345:7__bad.zip")
+
+    def test_set_events_use_the_upload_id_as_key(self):
+        self.client.create_release(build.INBOX_TAG, "inbox")
+        d = self.client._release_dir(build.INBOX_TAG)
+        stamp = S("111")
+        (d / f"{stamp}__setid__manifest.json").write_bytes(b"not json")
+        sources = build.inbox_items_from_release(self.client, [])
+        self.assertEqual([src.key for src in sources], ["setid"])
+        self.assertEqual(build.parse_inbox_name(f"{stamp}__3__a.zip")["key"], "3__a.zip")
+        self.assertEqual(build.parse_inbox_name(f"{stamp}__setid__f0__p0of1__a.pak")["key"], "setid")
+
 
 class TestResultsFile(Base):
     """`process --results-file`: the events as a JSON array (atomic write,
@@ -1853,7 +1872,8 @@ class TestAnnounce(Base):
     kept in the mod release's notes (offline: injected `http`, LocalClient)."""
 
     ENV = {"DISCORD_BOT_TOKEN": "tok-secret", "FORUM_CHANNEL_ID": "900",
-           "NOTICES_CHANNEL_ID": "800", "SITE_URL": "https://site.example/",
+           "WORKER_URL": "https://worker.example/", "UPLOAD_RESULTS_SECRET": "res-secret",
+           "SITE_URL": "https://site.example/",
            "FORUM_TAG_IDS": json.dumps({"Skin": "11", "Audio": 12})}
 
     def setUp(self):
@@ -1861,7 +1881,7 @@ class TestAnnounce(Base):
         self.discord = FakeDiscord()
 
     def published(self, version="1.0.0", identifier="12345.TestMod", **over) -> dict:
-        ev = {"eventId": f"{identifier.lower()}:{version}", "status": "published", "mode": "new",
+        ev = {"eventId": f"{identifier.lower()}:{version}", "key": "u1", "status": "published", "mode": "new",
               "uploaderId": "12345", "uploaderName": "user12345", "title": "Test Mod",
               "version": version, "description": "A mod", "identifier": identifier,
               "tags": ["Skin", "Nope", "Audio"], "coverUrl": "https://x/cover.png"}
@@ -1869,7 +1889,7 @@ class TestAnnounce(Base):
         return ev
 
     def rejected(self, **over) -> dict:
-        ev = {"eventId": "rej:12345:g", "status": "rejected", "mode": None, "uploaderId": "12345",
+        ev = {"eventId": "rej:12345:g", "key": "g", "status": "rejected", "mode": None, "uploaderId": "12345",
               "uploaderName": "user12345", "reason": "bad package", "title": "Test Mod",
               "version": None, "identifier": None}
         ev.update(over)
@@ -1933,22 +1953,48 @@ class TestAnnounce(Base):
         self.assertEqual(len(self.discord.calls), 1)
         self.assertEqual(self.notes(), "discord-thread: 77")
 
-    def test_rejection_notice(self):
-        ev = self.rejected(title="Ev`il @everyone", reason="x" * 400)
-        self.assertEqual(self.announce([ev]), (1, 1))
-        (call,) = self.discord.calls
-        self.assertEqual(call["url"], "https://discord.com/api/v10/channels/800/messages")
-        self.assertEqual(call["body"]["allowed_mentions"], {"parse": [], "users": ["12345"]})
-        self.assertEqual(call["body"]["content"],
-                         "<@12345> your upload of **Evil everyone** was not accepted: " + "x" * 300)
-
-    def test_rejection_without_a_notices_channel_is_only_logged(self):
-        env = {k: v for k, v in self.ENV.items() if k != "NOTICES_CHANNEL_ID"}
+    def test_rejections_post_no_discord_message(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(self.announce([self.rejected()], env), (1, 1))
+            self.assertEqual(self.announce([self.rejected(title="Ev`il @everyone")]), (0, 0))
         self.assertEqual(self.discord.calls, [])
-        self.assertIn("bad package", out.getvalue())
+
+    def reports(self, events, env=None) -> tuple:
+        calls = []
+
+        def http(method, url, headers, body):
+            calls.append({"method": method, "url": url, "headers": headers, "body": json.loads(body)})
+            return 200, b'{"ok":true}'
+
+        done = build.report_results(events, self.ENV if env is None else env, http=http)
+        return done, calls
+
+    def test_results_are_posted_to_the_worker(self):
+        evs = [self.published(key="k1", title="Test Mod"), self.rejected(key="k2", reason="bad package"),
+               {"status": "rejected", "uploaderId": "1"}]  # no key: not reported
+        done, calls = self.reports(evs)
+        self.assertEqual(done, (2, 2))
+        (call,) = calls
+        self.assertEqual((call["method"], call["url"]), ("POST", "https://worker.example/uploads/results"))
+        self.assertEqual(call["headers"]["Authorization"], "Bearer res-secret")
+        self.assertEqual(call["body"], [
+            {"key": "k1", "discord_id": "12345", "status": "published", "title": "Test Mod", "version": "1.0.0"},
+            {"key": "k2", "discord_id": "12345", "status": "rejected", "title": "Test Mod", "reason": "bad package"}])
+
+    def test_results_are_sent_in_chunks_and_failures_never_raise(self):
+        evs = [self.rejected(key=f"k{i}") for i in range(45)]
+        done, calls = self.reports(evs)
+        self.assertEqual((done, [len(c["body"]) for c in calls]), ((45, 45), [20, 20, 5]))
+
+        def failing(method, url, headers, body):
+            raise OSError("boom")
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(build.report_results(evs[:2], self.ENV, http=failing), (0, 2))
+            self.assertEqual(build.report_results(evs[:2], self.ENV, http=lambda *a: (401, b"")), (0, 2))
+        self.assertIn("HTTP 401", err.getvalue())
+        self.assertNotIn("res-secret", err.getvalue())
 
     def test_user_text_is_cleaned_and_clipped(self):
         ev = self.published(title="`@Big` " + "t" * 300, description="@here `code` " + "d" * 600,
@@ -1980,8 +2026,8 @@ class TestAnnounce(Base):
         events = [self.published(), self.published(identifier="12345.Other", title="Other"),
                   {"status": "published"}, "junk", self.rejected()]
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(self.announce(events), (2, 5))
-        self.assertEqual(len(self.discord.calls), 3)
+            self.assertEqual(self.announce(events), (1, 3))
+        self.assertEqual(len(self.discord.calls), 2)
         self.assertEqual(self.notes(), "")
         self.assertEqual(build.thread_id_from_notes(self.notes("12345.Other")), "5001")
 
@@ -2015,7 +2061,8 @@ class TestAnnounceCli(Base):
                              env=env, capture_output=True, text=True, cwd=str(ROOT))
 
     def clean_env(self) -> dict:
-        drop = ("DISCORD_BOT_TOKEN", "FORUM_CHANNEL_ID", "NOTICES_CHANNEL_ID", "FORUM_TAG_IDS", "SITE_URL")
+        drop = ("DISCORD_BOT_TOKEN", "FORUM_CHANNEL_ID", "WORKER_URL", "UPLOAD_RESULTS_SECRET",
+                "FORUM_TAG_IDS", "SITE_URL")
         return {k: v for k, v in os.environ.items() if k not in drop}
 
     def test_missing_env_is_a_noop(self):
@@ -2040,15 +2087,36 @@ class TestAnnounceCli(Base):
 
     def test_announce_cli_function_uses_the_injected_http(self):
         res = self.root / "res.json"
-        ev = {"eventId": "rej:1:g", "status": "rejected", "uploaderId": "1", "reason": "no", "title": None}
-        res.write_text(json.dumps([ev]), encoding="utf-8")
+        rej = {"eventId": "rej:1:g", "key": "g", "status": "rejected", "uploaderId": "1", "reason": "no", "title": None}
+        pub = {"eventId": "x:1", "key": "u1", "status": "published", "uploaderId": "1", "title": "T",
+               "version": "1", "identifier": "1.T"}
+        res.write_text(json.dumps([rej, pub]), encoding="utf-8")
+        fake = FakeDiscord()
+        self.client = build.LocalClient(self.root)
+        self.client.create_release(build.mod_tag("1.T"), "T")
+        args = build.argparse.Namespace(results=str(res), client="local", root=str(self.root),
+                                        owner=OWNER, repo=REPO)
+        env = {"DISCORD_BOT_TOKEN": "t", "FORUM_CHANNEL_ID": "1", "WORKER_URL": "https://w.example",
+               "UPLOAD_RESULTS_SECRET": "s"}
+        self.assertEqual(build.announce_cli(args, env, http=fake, sleep=fake.sleep), 0)
+        urls = [c["url"] for c in fake.calls]
+        self.assertEqual(urls, ["https://discord.com/api/v10/channels/1/threads",
+                                "https://w.example/uploads/results"])
+        self.assertEqual([r["status"] for r in fake.calls[1]["body"]], ["rejected", "published"])
+
+    def test_results_report_alone_without_discord_settings(self):
+        res = self.root / "res.json"
+        res.write_text(json.dumps([{"eventId": "rej:1:g", "key": "g", "status": "rejected",
+                                    "uploaderId": "1", "reason": "no"}]), encoding="utf-8")
         fake = FakeDiscord()
         args = build.argparse.Namespace(results=str(res), client="local", root=str(self.root),
                                         owner=OWNER, repo=REPO)
-        env = {"DISCORD_BOT_TOKEN": "t", "FORUM_CHANNEL_ID": "1", "NOTICES_CHANNEL_ID": "2"}
-        self.assertEqual(build.announce_cli(args, env, http=fake, sleep=fake.sleep), 0)
-        self.assertEqual([c["url"].rsplit("/", 2)[-2:] for c in fake.calls], [["2", "messages"]])
-        self.assertIn("unknown", fake.calls[0]["body"]["content"])
+        env = {"WORKER_URL": "https://w.example", "UPLOAD_RESULTS_SECRET": "s"}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(build.announce_cli(args, env, http=fake, sleep=fake.sleep), 0)
+        self.assertEqual([c["url"] for c in fake.calls], ["https://w.example/uploads/results"])
+        self.assertIn("DISCORD_BOT_TOKEN", out.getvalue())
 
 
 class TestAssetLabels(Base):

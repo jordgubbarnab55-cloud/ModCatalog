@@ -26,8 +26,8 @@ Usage:
                                                     # seed a dir's zips as that Discord user
   python build.py rebuild                           # regenerate from all mod-* releases
   python build.py retitle                           # only re-apply the name/description
-  python build.py announce --results PATH           # post the run's events to Discord
-                                                    # (DISCORD_BOT_TOKEN, FORUM_CHANNEL_ID, ...)
+  python build.py announce --results PATH           # post the run's events to Discord and the Worker
+                                                    # (DISCORD_BOT_TOKEN, FORUM_CHANNEL_ID, WORKER_URL, ...)
   python build.py downloads [--catalog PATH] [--out PATH]
                                                     # write downloads.json (per-mod download counts)
 
@@ -880,11 +880,13 @@ def downloads_payload(catalog: dict, assets_by_tag: dict, now: str) -> dict:
 
 
 def published_event(uploader: Uploader, entry: dict, mode: str,
-                   asset_name: str) -> dict:
+                   asset_name: str, key: str) -> dict:
     """The 'published' outcome event of `entry`: the catalog entry's fields
-    are reused as-is (built from entry_from_meta's output, not re-derived)."""
+    are reused as-is (built from entry_from_meta's output, not re-derived).
+    `key` is the upload's key (PackageSource.key)."""
     return {
         "eventId": f"{ident_key(entry['id'])}:{entry['sha256']}",
+        "key": key,
         "status": "published",
         "mode": mode,
         "uploaderId": uploader.uid,
@@ -904,14 +906,15 @@ def published_event(uploader: Uploader, entry: dict, mode: str,
     }
 
 
-def rejected_event(uploader: Uploader, gid: str, reason: str,
+def rejected_event(uploader: Uploader, key: str, reason: str,
                   title: str | None = None, version: str | None = None,
                   identifier: str | None = None) -> dict:
     """The 'rejected' outcome event: one human-readable line (<= 300 chars,
     collapsed to a single line), plus whatever of title/version/identifier is
-    known (else null)."""
+    known (else null). `key` is the upload's key (PackageSource.key)."""
     return {
-        "eventId": f"rej:{uploader.uid}:{gid}",
+        "eventId": f"rej:{uploader.uid}:{key}",
+        "key": key,
         "status": "rejected",
         "mode": None,
         "uploaderId": uploader.uid,
@@ -947,14 +950,16 @@ class Staged(NamedTuple):
 
 class PackageSource:
     """One inbox item: how to load it (-> Staged) and how to delete it.
-    `gid` is its inbox group or asset id (the id part of its outcome event)."""
+    `key` identifies the upload (parse_inbox_name's "key": the upload id of
+    a set, `<ts>__<safe-name>.zip` of a zip package); it is the id part of
+    its outcome event and the key the Worker's upload status rows use."""
 
-    def __init__(self, uploader: Uploader, load, delete, label: str, gid: str | None = None):
+    def __init__(self, uploader: Uploader, load, delete, label: str, key: str | None = None):
         self.uploader = uploader
         self._load = load  # () -> Staged
         self._delete = delete
         self.label = label
-        self.gid = gid or label
+        self.key = key or label
 
     def load(self) -> Staged:
         return self._load()
@@ -1012,7 +1017,7 @@ def inbox_items_from_release(client: PackageClient,
                 client.delete_asset(INBOX_TAG, a.name)
                 print(f"  stale inbox zip {a.name} (>{STALE_AFTER // 86400} days), removed")
                 if events is not None:
-                    events.append(rejected_event(info["uploader"], a.name, "incomplete upload expired"))
+                    events.append(rejected_event(info["uploader"], info["key"], "incomplete upload expired"))
                 continue
             def load(n: str = a.name) -> Staged:
                 with tempfile.TemporaryDirectory() as td:
@@ -1021,7 +1026,7 @@ def inbox_items_from_release(client: PackageClient,
                     return Staged(read_zip_package(p), None)
             sources.append(PackageSource(
                 info["uploader"], load,
-                (lambda n=a.name: client.delete_asset(INBOX_TAG, n)), a.name))
+                (lambda n=a.name: client.delete_asset(INBOX_TAG, n)), a.name, info["key"]))
         else:
             key = (info["uploader"].uid, info["upload_id"])
             groups.setdefault(key, []).append((info, a))
@@ -1052,7 +1057,9 @@ def parse_uploader(field: str) -> Uploader | None:
 
 def parse_inbox_name(name: str) -> dict | None:
     """Parses an inbox asset name; None when it matches neither shape or
-    carries no valid uploader stamp."""
+    carries no valid uploader stamp. "key" is the upload's key: the upload id
+    for a set's assets, `<ts>__<safe-name>.zip` for a zip package (the asset
+    name without the stamp)."""
     parts = name.split("__")
     if len(parts) < 3:
         return None
@@ -1060,12 +1067,14 @@ def parse_inbox_name(name: str) -> dict | None:
     if uploader is None:
         return None
     if len(parts) == 3 and parts[2].lower() == MANIFEST_PART:
-        return {"kind": "manifest", "uploader": uploader, "upload_id": parts[1]}
+        return {"kind": "manifest", "uploader": uploader, "upload_id": parts[1], "key": parts[1]}
     if len(parts) == 3 and parts[2].lower().endswith(".zip"):
-        return {"kind": "zip", "uploader": uploader, "name": name}
+        return {"kind": "zip", "uploader": uploader, "name": name,
+                "key": f"{parts[1]}__{parts[2]}"}
     if (len(parts) == 5 and re.fullmatch(r"f\d+", parts[2])
             and re.fullmatch(r"p\d+of\d+", parts[3])):
         return {"kind": "part", "uploader": uploader, "upload_id": parts[1],
+                "key": parts[1],
                 "file_idx": int(parts[2][1:]),
                 "part_idx": int(parts[3][1:].split("of")[0]),
                 "part_count": int(parts[3].split("of")[1]),
@@ -1130,7 +1139,7 @@ def rejecting_source(client: PackageClient, uploader: Uploader, label: str,
         raise PackageError(reason)
     return PackageSource(uploader, load,
                          (lambda: [client.delete_asset(INBOX_TAG, a.name) for _, a in items]),
-                         label, items[0][0].get("upload_id") or label)
+                         label, items[0][0]["key"])
 
 
 def raw_group_source(client: PackageClient, uploader: Uploader, uid: str,
@@ -1146,7 +1155,7 @@ def raw_group_source(client: PackageClient, uploader: Uploader, uid: str,
             client.delete_asset(INBOX_TAG, a.name)
         print(f"  REJECTED {label}: stalled for >{STALE_AFTER // 86400} days, removed", file=sys.stderr)
         if events is not None:
-            events.append(rejected_event(uploader, items[0][0]["upload_id"], "incomplete upload expired"))
+            events.append(rejected_event(uploader, items[0][0]["key"], "incomplete upload expired"))
         return None
 
     manifest_asset = next((a for i, a in items if i["kind"] == "manifest"), None)
@@ -1209,7 +1218,7 @@ def raw_group_source(client: PackageClient, uploader: Uploader, uid: str,
         for _, a in items:
             client.delete_asset(INBOX_TAG, a.name)
 
-    return PackageSource(uploader, load, delete, label)
+    return PackageSource(uploader, load, delete, label, uid)
 
 
 class Target(NamedTuple):
@@ -1302,7 +1311,7 @@ class Processor:
             fields = package_fields(staged.metadata, existing)
         except PackageError as ex:
             src.delete()
-            return False, None, rejected_event(uploader, src.gid, f"invalid package: {ex}")
+            return False, None, rejected_event(uploader, src.key, f"invalid package: {ex}")
 
         known = {"title": fields.get("title") or None,
                  "version": fields.get("version") or None,
@@ -1312,7 +1321,7 @@ class Processor:
             target = self._target(staged, fields, existing, uploader.uid, entries)
         except PackageError as ex:
             src.delete()
-            return False, None, rejected_event(uploader, src.gid, f"invalid package: {ex}", **known)
+            return False, None, rejected_event(uploader, src.key, f"invalid package: {ex}", **known)
 
         # an admin updating someone else's mod: the entry stays under its
         # owner, and the stored package carries the owner's (catalog) name
@@ -1330,7 +1339,7 @@ class Processor:
                 meta = validate_package(tmp)
             except PackageError as ex:
                 src.delete()
-                return False, None, rejected_event(uploader, src.gid, f"invalid package: {ex}",
+                return False, None, rejected_event(uploader, src.key, f"invalid package: {ex}",
                                                  title=fields.get("title") or None,
                                                  version=fields.get("version") or None,
                                                  identifier=target.identifier)
@@ -1342,7 +1351,7 @@ class Processor:
             if dup is not None:
                 src.delete()
                 return False, None, rejected_event(
-                    uploader, src.gid,
+                    uploader, src.key,
                     (f"duplicate of the existing mod {dup['name']!r} v{dup['version']} "
                      f"(id {dup['id']}): same content, title and version under another identifier"),
                     title=meta["title"], version=meta["version"], identifier=meta["identifier"])
@@ -1362,7 +1371,7 @@ class Processor:
                     elif parsed[1] == fingerprint:
                         src.delete()
                         return False, None, rejected_event(
-                            uploader, src.gid, f"already uploaded as {other}, nothing changed",
+                            uploader, src.key, f"already uploaded as {other}, nothing changed",
                             title=meta["title"], version=meta["version"], identifier=meta["identifier"])
             zip_name = free_asset_name(base_name, taken)
 
@@ -1377,7 +1386,7 @@ class Processor:
             except AssetExists:
                 src.delete()
                 return False, None, rejected_event(
-                    uploader, src.gid, f"asset name {zip_name} was taken meanwhile; upload again",
+                    uploader, src.key, f"asset name {zip_name} was taken meanwhile; upload again",
                     title=meta["title"], version=meta["version"], identifier=meta["identifier"])
 
             # cover (dedup: skip an identical one, never overwrite a different one)
@@ -1390,7 +1399,7 @@ class Processor:
                     if self.client.asset_bytes(tag, cname) != image["data"]:
                         src.delete()
                         return False, None, rejected_event(
-                            uploader, src.gid, f"cover name collision with different content: {cname}",
+                            uploader, src.key, f"cover name collision with different content: {cname}",
                             title=meta["title"], version=meta["version"], identifier=meta["identifier"])
                 else:
                     cover_path = pathlib.Path(td) / cname
@@ -1405,7 +1414,7 @@ class Processor:
                 size=tmp.stat().st_size, sha256=sha, uploader=target.owner, updated=_iso(now),
                 cover_url=asset_url(self.owner, self.repo, tag, cname) if image is not None else None)
             self._content[entry["file"]] = content
-            return True, entry, published_event(uploader, entry, mode, zip_name)
+            return True, entry, published_event(uploader, entry, mode, zip_name, src.key)
 
     # -- duplicates under another identifier ---------------------------
     def _entry_content(self, entry: dict) -> str | None:
@@ -1457,7 +1466,7 @@ class Processor:
                                                           datetime.now(timezone.utc))
             except Exception as ex:  # a client hiccup must not strand the rest
                 src.delete()
-                success, result, event = False, None, rejected_event(src.uploader, src.gid, f"error: {ex}")
+                success, result, event = False, None, rejected_event(src.uploader, src.key, f"error: {ex}")
             if success:
                 entries[ident_key(result["id"])] = result
                 for entry in entries.values():
@@ -1597,9 +1606,11 @@ def retitle(catalog_path: pathlib.Path, config_path: pathlib.Path = CONFIG_DEFAU
 
 # `announce` posts a results file's events to Discord through the REST API:
 # a published mod gets one forum thread (the first publish creates it, later
-# versions post a message in it) and a rejection becomes a notice in the
-# notices channel. The thread id lives in the mod release's notes as a
-# `discord-thread: <id>` line. The bot token is never printed.
+# versions post a message in it). The thread id lives in the mod release's
+# notes as a `discord-thread: <id>` line. Every published and rejected event
+# is also reported to the Worker (`report_results`), which keeps the per-user
+# upload status behind the #mods "Check upload status" button. The bot token
+# and the Worker secret are never printed.
 
 DISCORD_API = "https://discord.com/api/v10"
 DISCORD_USER_AGENT = "ModCatalog-Announce (https://github.com/jordgubbarnab55-cloud/ModCatalog, 1)"
@@ -1799,53 +1810,81 @@ def announce_published(api: DiscordApi, client: PackageClient, ev: dict, env: di
     return "created"
 
 
-def announce_rejected(api: DiscordApi, ev: dict, env: dict) -> str:
-    """The rejection notice in the notices channel (a log line when none is
-    configured). Returns "posted" or "logged"."""
-    channel = (env.get("NOTICES_CHANNEL_ID") or "").strip()
-    if not channel:
-        print(f"  announce: rejected {ev.get('eventId')} ({ev.get('uploaderName') or ev['uploaderId']}): "
-              f"{ev.get('reason') or 'no reason'}")
-        return "logged"
-    title = discord_clean(ev["title"], 200) if ev.get("title") else "unknown"
-    reason = discord_clean(ev.get("reason") or "no reason", 300)
-    posted = api.post_message(channel, {
-        "content": f"<@{ev['uploaderId']}> your upload of **{title}** was not accepted: {reason}"[:2000],
-        "allowed_mentions": {"parse": [], "users": [ev["uploaderId"]]}})
-    if posted is None:
-        raise DiscordError("notices channel not found (404)")
-    return "posted"
+RESULTS_CHUNK = 20  # events per request; the Worker accepts at most this many
+
+
+def result_report(ev) -> dict | None:
+    """The Worker's upload-status record of an outcome event (key, discord_id,
+    status, title, version, reason); None when the event cannot be reported."""
+    if not isinstance(ev, dict) or ev.get("status") not in ("published", "rejected"):
+        return None
+    key, uid = ev.get("key"), ev.get("uploaderId")
+    if not isinstance(key, str) or not key or not isinstance(uid, str) or not uid:
+        return None
+    report = {"key": key, "discord_id": uid, "status": ev["status"]}
+    for field in ("title", "version", "reason"):
+        if isinstance(ev.get(field), str) and ev[field]:
+            report[field] = ev[field]
+    return report
+
+
+def report_results(events: list, env: dict, *, http=_http_request) -> tuple[int, int]:
+    """POSTs every published/rejected event of the run to the Worker's
+    `/uploads/results` (Bearer `UPLOAD_RESULTS_SECRET`). Returns (reported,
+    total); a failing request is logged by status only and never raises."""
+    url = (env.get("WORKER_URL") or "").strip().rstrip("/") + "/uploads/results"
+    headers = {"Authorization": f"Bearer {(env.get('UPLOAD_RESULTS_SECRET') or '').strip()}",
+               "Content-Type": "application/json", "User-Agent": DISCORD_USER_AGENT}
+    reports = [r for r in map(result_report, events) if r is not None]
+    done = 0
+    for i in range(0, len(reports), RESULTS_CHUNK):
+        chunk = reports[i:i + RESULTS_CHUNK]
+        try:
+            status, _ = http("POST", url, headers, json.dumps(chunk, ensure_ascii=False).encode("utf-8"))
+        except Exception as ex:
+            print(f"  announce: upload status report failed: {type(ex).__name__}", file=sys.stderr)
+            continue
+        if 200 <= status < 300:
+            done += len(chunk)
+        else:
+            print(f"  announce: upload status report failed: HTTP {status}", file=sys.stderr)
+    return done, len(reports)
 
 
 def announce_events(client: PackageClient, events: list, env: dict, *,
                     http=_http_request, sleep=time.sleep) -> tuple[int, int]:
-    """Announces each event; one failing event never stops the others.
-    Returns (announced, total); never raises."""
+    """Announces each published event as a forum thread or message; one
+    failing event never stops the others. Returns (announced, published
+    events); never raises."""
     api = DiscordApi((env.get("DISCORD_BOT_TOKEN") or "").strip(),
                      (env.get("FORUM_CHANNEL_ID") or "").strip(), http, sleep)
-    done = 0
+    done = total = 0
     for ev in events:
+        if not isinstance(ev, dict) or ev.get("status") != "published":
+            continue
+        total += 1
         try:
             bad = bad_event(ev)
             if bad:
                 print(f"  announce: skipped an event: {bad}", file=sys.stderr)
                 continue
-            if ev["status"] == "published":
-                announce_published(api, client, ev, env)
-            else:
-                announce_rejected(api, ev, env)
+            announce_published(api, client, ev, env)
             done += 1
         except Exception as ex:
-            name = ev.get("eventId") if isinstance(ev, dict) else "?"
-            print(f"  announce: event {name} failed: {str(ex)[:200]}", file=sys.stderr)
-    return done, len(events)
+            print(f"  announce: event {ev.get('eventId')} failed: {str(ex)[:200]}", file=sys.stderr)
+    return done, total
 
 
 def announce_cli(args, env=None, http=_http_request, sleep=time.sleep) -> int:
     """The `announce` subcommand: exit 0 always (problems are logged)."""
     env = os.environ if env is None else env
-    if not (env.get("DISCORD_BOT_TOKEN") or "").strip() or not (env.get("FORUM_CHANNEL_ID") or "").strip():
-        print("announce: DISCORD_BOT_TOKEN / FORUM_CHANNEL_ID not set; nothing to do")
+    discord = bool((env.get("DISCORD_BOT_TOKEN") or "").strip() and (env.get("FORUM_CHANNEL_ID") or "").strip())
+    report = bool((env.get("WORKER_URL") or "").strip() and (env.get("UPLOAD_RESULTS_SECRET") or "").strip())
+    if not discord:
+        print("announce: DISCORD_BOT_TOKEN / FORUM_CHANNEL_ID not set; no forum threads")
+    if not report:
+        print("announce: WORKER_URL / UPLOAD_RESULTS_SECRET not set; no upload status report")
+    if not discord and not report:
         return 0
     path = pathlib.Path(args.results)
     if not path.is_file():
@@ -1860,10 +1899,17 @@ def announce_cli(args, env=None, http=_http_request, sleep=time.sleep) -> int:
         return 0
     if not events:
         return 0
-    owner, repo = resolve_repo(args.owner, args.repo)
-    client = make_client(args, owner, repo)
-    done, total = announce_events(client, events, env, http=http, sleep=sleep)
-    print(f"announce: {done}/{total} event(s) announced")
+    if discord:
+        try:
+            owner, repo = resolve_repo(args.owner, args.repo)
+            client = make_client(args, owner, repo)
+            done, total = announce_events(client, events, env, http=http, sleep=sleep)
+            print(f"announce: {done}/{total} forum announcement(s) posted")
+        except Exception as ex:
+            print(f"announce: forum announcements failed: {str(ex)[:200]}", file=sys.stderr)
+    if report:
+        done, total = report_results(events, env, http=http)
+        print(f"announce: {done}/{total} upload status report(s) sent")
     return 0
 
 

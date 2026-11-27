@@ -18,10 +18,10 @@ catalog merges and deploys never race.
   3. the `commit-and-deploy` composite action;
   4. after the deploy, `python build.py announce --results
      inbox-results.json` with `if: always()` and `continue-on-error: true`.
-     It reads the secret `DISCORD_BOT_TOKEN` and the repository variables
-     `FORUM_CHANNEL_ID`, `NOTICES_CHANNEL_ID`, `FORUM_TAG_IDS` and
-     `SITE_URL` (`docs/build-pipeline.md`). Missing settings or a missing
-     results file are no-ops.
+     It reads the secrets `DISCORD_BOT_TOKEN` and `UPLOAD_RESULTS_SECRET` and
+     the repository variables `FORUM_CHANNEL_ID`, `FORUM_TAG_IDS`, `SITE_URL`
+     and `WORKER_URL` (`docs/build-pipeline.md`). Missing settings or a
+     missing results file are no-ops.
 
 ## `rebuild.yml`
 

@@ -24,13 +24,17 @@ writes `[]` when there were none, including on the empty-inbox early return.
 `--from-dir` may use it too but never announces. Events:
 
 - `published`: the catalog entry's fields reused as-is, plus
-  `eventId` = `<identKeyLower>:<package sha256>`, `mode` = new/update,
+  `eventId` = `<identKeyLower>:<package sha256>`, `key`, `mode` = new/update,
   `uploaderId`, `uploaderName`, `title`, `version`, `description`, `author`,
   `identifier`, `tags`, `gameVersion`, `fileUrl`, `coverUrl`, `size`,
   `sha256`, `assetName`.
-- `rejected`: `eventId` = `rej:<uploaderId>:<inbox group or asset id>`, one
+- `rejected`: `eventId` = `rej:<uploaderId>:<key>`, `key`, one
   human-readable reason line (at most 300 characters), `mode` null, and
   whatever of title, version, identifier is known (else null).
+- `key` identifies the upload in the Worker's upload status table
+  (`docs/worker.md`): the upload id of a set, or `<ts>__<safe-name>.zip` for a
+  zip package (`parse_inbox_name`'s `key`, the inbox asset name without the
+  uploader stamp).
 - The over-7-day sweeps are `rejected` with the reason "incomplete upload
   expired".
 - Incomplete groups waiting for parts emit nothing; `rebuild` emits nothing.
@@ -80,22 +84,26 @@ down.
 
 ### `announce`
 
-Posts the results file's events to the Discord REST API (`urllib`, explicit
-`User-Agent`, `Authorization: Bot <token>`). It reads, from the environment:
+Posts the results file's published mods to the Discord REST API (`urllib`,
+explicit `User-Agent`, `Authorization: Bot <token>`) and reports every
+published and rejected event to the Worker. It reads, from the environment:
 
 | Variable | Meaning |
 |---|---|
 | `DISCORD_BOT_TOKEN` | Bot token (never printed) |
 | `FORUM_CHANNEL_ID` | The forum channel mods get threads in |
-| `NOTICES_CHANNEL_ID` | Channel for rejection notices; blank = log only |
 | `FORUM_TAG_IDS` | JSON object, catalog tag -> forum tag id (default `{}`; unknown tags ignored, at most 5 applied) |
 | `SITE_URL` | Link appended to the first message of a thread |
+| `WORKER_URL` | The Worker's base URL; outcomes go to `<WORKER_URL>/uploads/results` |
+| `UPLOAD_RESULTS_SECRET` | Bearer secret for that endpoint (never printed) |
 
 `--client`, `--root`, `--owner` and `--repo` behave as for the other commands
 (owner and repo are needed to reach the mod releases).
 
-- A missing token or forum channel prints one line and exits 0. A missing or
-  unreadable results file is a no-op. The command never raises and always
+- A missing token or forum channel skips the forum threads, and a missing
+  `WORKER_URL` or secret skips the status report; each prints one line.
+  Nothing set exits 0 at once. A missing or unreadable results file is a
+  no-op. The command never raises and always
   exits 0; one failing event is logged and never stops the others. There is
   no batching and no event-id dedup: each run announces its own events once.
 - `published`: `<@uploaderId> published **title** vVERSION` plus the cleaned
@@ -108,10 +116,15 @@ Posts the results file's events to the Discord REST API (`urllib`, explicit
   `set_release_notes`; the rest of the notes is preserved). A 404 or 403 on
   the post means the thread is gone: a new thread is created and the line
   rewritten.
-- `rejected`: `<@uploaderId> your upload of **title** was not accepted:
-  reason` in the notices channel (a log line when none is configured).
+- `rejected` events post nothing to Discord.
+- Upload status report: the published and rejected events are POSTed to
+  `<WORKER_URL>/uploads/results` as `{key, discord_id, status, title,
+  version, reason}` records, 20 per request, with `Authorization: Bearer
+  <UPLOAD_RESULTS_SECRET>` (`docs/worker.md`). Events without a `key` are
+  skipped; a failing request is logged by status only. The Worker shows the
+  result in the #mods "Check upload status" reply.
 - Text from events is cleaned: backticks and `@` removed, then truncated
-  (title 200, forum thread name 100, version 50, description 500, reason 300,
+  (title 200, forum thread name 100, version 50, description 500,
   message 2000). Every payload sets `allowed_mentions` to `parse: []` plus the
   uploader only, so user text can never ping `@everyone` or a role.
 - A 429 is retried once after the `retry_after` wait (capped at 5 s); a second

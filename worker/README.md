@@ -11,6 +11,23 @@ validate a token and to show the author name the upload will carry.
 `401 {"error"}` for a missing / unknown / revoked / expired token
 (rejected the same way on `/upload`).
 
+## `POST /uploads/results` (runner only)
+
+The `Process inbox` workflow reports each upload's outcome here; it feeds the
+#mods "Check upload status" button (`docs/worker.md`).
+
+```
+POST <worker-url>/uploads/results
+Authorization: Bearer <UPLOAD_RESULTS_SECRET>
+Content-Type: application/json
+
+[{"key": "<upload id | <ts>__<name>.zip>", "discord_id": "123",
+  "status": "published|rejected", "title": "…", "version": "…", "reason": "…"}]
+```
+
+At most 20 reports and 64 KiB per request. `200 {"stored", "skipped"}`;
+`401` wrong secret, `503` secret not configured, `400` / `413` bad body.
+
 ## Upload API contract (for the ModManager app)
 
 The client-facing contract is `mod-contract/upload.md` (shared with
@@ -73,7 +90,7 @@ included, stays well under the 100 MB per-upload limit.
 
 | Status | Meaning |
 |--------|---------|
-| `202` `{"status":"queued"}` | A zip package or a set's manifest was streamed to the `inbox` release and the processing workflow was woken. The mod appears in `catalog.json` within a few minutes. |
+| `202` `{"status":"queued"}` | A zip package or a set's manifest was streamed to the `inbox` release and the processing workflow was woken. The mod appears in `catalog.json` within a few minutes. The upload is also recorded as waiting for the uploader's "Check upload status". |
 | `202` `{"status":"stored"}` | A set's file part was streamed to the `inbox` release; the workflow is woken by the manifest. |
 | `401`  | Missing / unknown / revoked / expired token. |
 | `411`  | `Content-Length` header missing (required). |

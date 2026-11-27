@@ -20,6 +20,10 @@ import {
 } from "./auth.js";
 import { chargeQuota, refundQuota } from "./quota.js";
 import { scheduleDelete, deleteLinkedReplies, sweepDue } from "./ephemeral.js";
+import {
+  recordWaiting, validReport, storeResults, recentUploads, statusMessage,
+  MAX_RESULTS, MAX_RESULTS_BODY,
+} from "./uploads.js";
 
 const MAX_BODY_BYTES = 100 * 1024 * 1024; // Cloudflare free-plan request-body limit
 const DEFAULT_DAILY_BYTES = 2147483648; // 2 GiB of uploads per user per UTC day
@@ -142,7 +146,7 @@ export default {
  * @param {Request} request
  * @param {object} env  { DB: D1, DISCORD_PUBLIC_KEY, GITHUB_TOKEN, GITHUB_OWNER,
  *                       GITHUB_REPO, ALLOWED_ORIGIN, SITE_URL,
- *                       UPLOAD_DAILY_BYTES? }
+ *                       UPLOAD_DAILY_BYTES?, UPLOAD_RESULTS_SECRET? }
  * @param {(url:string, init?:object)=>Promise<Response>} fetchImpl
  * @param {{waitUntil:(p:Promise)=>void}} [ctx]  background work after the response
  */
@@ -150,6 +154,7 @@ export async function handle(request, env, fetchImpl, ctx) {
   const url = new URL(request.url);
   if (url.pathname === "/discord") return handleDiscord(request, env, fetchImpl, ctx);
   if (url.pathname === "/upload") return handleUpload(request, env, fetchImpl, ctx);
+  if (url.pathname === "/uploads/results") return handleUploadResults(request, env);
   if (url.pathname === "/whoami") return handleWhoami(request, env, fetchImpl, ctx);
   if (url.pathname === "/auth/redeem") return handleAuthRedeem(request, env, fetchImpl, ctx);
   if (url.pathname === "/auth/logout") return handleAuthLogout(request, env);
@@ -180,6 +185,7 @@ async function handleDiscord(request, env, fetchImpl, ctx) {
     const reply = replier(body, env, ctx);
     if (customId === "mods_upload") return handleModsUpload(body, env, reply);
     if (customId === "mods_signout") return handleModsSignout(body, env, reply);
+    if (customId === "mods_status") return handleModsStatus(body, env, reply);
     return json({ error: "unknown component" }, 400);
   }
 
@@ -216,7 +222,7 @@ async function handleDiscord(request, env, fetchImpl, ctx) {
 // replies are never type 7, which would edit the public #mods post in place.
 function replier(body, env, ctx) {
   return async (content, components, link = {}) => {
-    const data = { content, flags: 64 };
+    const data = { content, flags: 64, allowed_mentions: { parse: [] } };
     if (components) data.components = components;
     if (body.application_id && body.token) {
       await defer(ctx, scheduleDelete(env.DB, {
@@ -257,6 +263,14 @@ async function handleModsSignout(body, env, reply) {
   if (!discordId) return json({ error: "missing user id" }, 400);
   await revokeAllTokens(env.DB, discordId);
   return reply("Signed out everywhere. Your /token token and all browser sessions are revoked.");
+}
+
+// The #mods channel's "Check upload status" button: the clicker's last 3
+// uploads, newest first (the D1 `uploads` table; no GitHub call).
+async function handleModsStatus(body, env, reply) {
+  const { discordId } = interactionUser(body);
+  if (!discordId) return json({ error: "missing user id" }, 400);
+  return reply(statusMessage(await recentUploads(env.DB, discordId), env.SITE_URL));
 }
 
 // -------------------------------------------------------- POST /upload
@@ -301,6 +315,10 @@ async function handleUpload(request, env, fetchImpl, ctx) {
   const raw = uploadId.length > 0;
   const filename = request.headers.get("X-Filename") || "";
   let assetName;
+  // The upload's key in the status table: the set's upload id, or
+  // `<ts>__<safe-name>.zip` for a zip package (the asset name without the
+  // stamp; build.py's parse_inbox_name derives the same string).
+  let uploadKey;
   // The workflow runs after a zip package or a set's manifest (the last
   // upload of a set); a set's parts only wait in the inbox.
   let completes = true;
@@ -320,6 +338,7 @@ async function handleUpload(request, env, fetchImpl, ctx) {
         return json({ error: "bad manifest headers" }, 400, cors);
       }
       assetName = `${stamp}__${uploadId}__manifest.json`;
+      uploadKey = uploadId;
     } else {
       const lower = filename.toLowerCase();
       if (!RAW_EXTENSIONS.some((e) => lower.endsWith(e))) {
@@ -333,7 +352,8 @@ async function handleUpload(request, env, fetchImpl, ctx) {
     if (!filename.toLowerCase().endsWith(".zip")) {
       return json({ error: "X-Filename must end in .zip" }, 400, cors);
     }
-    assetName = `${stamp}__${Math.floor(Date.now() / 1000)}__${sanitizeFilename(filename)}`;
+    uploadKey = `${Math.floor(Date.now() / 1000)}__${sanitizeFilename(filename)}`;
+    assetName = `${stamp}__${uploadKey}`;
   }
 
   // 4. daily quota, by BYTES (a set costs one charge per upload): charged
@@ -385,6 +405,11 @@ async function handleUpload(request, env, fetchImpl, ctx) {
   }
   if (!completes) return json({ status: "stored" }, 202, cors);
 
+  // the upload now waits in the inbox; a D1 failure never fails the upload
+  await recordWaiting(env.DB, {
+    discordId, key: uploadKey, label: raw ? "mod upload" : filename, now: new Date(),
+  }).catch(() => {});
+
   // 7. wake the workflow (wake-up only; it drains the inbox and skips
   // incomplete raw groups)
   let dispatch;
@@ -408,6 +433,39 @@ async function handleUpload(request, env, fetchImpl, ctx) {
     return json({ error: `github dispatch failed: HTTP ${dispatch.status}` }, 502, cors);
   }
   return json({ status: "queued" }, 202, cors);
+}
+
+// ---------------------------------------------- POST /uploads/results
+// The runner's outcome reports: a JSON list of { key, discord_id, status:
+// "published"|"rejected", title?, version?, reason? }, authenticated with
+// the UPLOAD_RESULTS_SECRET bearer secret (503 when unset). No CORS: only the
+// workflow calls it.
+
+async function constantTimeEqual(a, b) {
+  const [ha, hb] = await Promise.all([sha256Hex(a), sha256Hex(b)]);
+  let diff = 0;
+  for (let i = 0; i < ha.length; i++) diff |= ha.charCodeAt(i) ^ hb.charCodeAt(i);
+  return diff === 0;
+}
+
+async function handleUploadResults(request, env) {
+  if (request.method !== "POST") return json({ error: "POST only" }, 405);
+  if (!env.UPLOAD_RESULTS_SECRET) return json({ error: "upload results are not configured" }, 503);
+  const auth = request.headers.get("Authorization") || "";
+  const given = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : "";
+  if (!(await constantTimeEqual(given, env.UPLOAD_RESULTS_SECRET)))
+    return json({ error: "bad secret" }, 401);
+  const declared = request.headers.get("Content-Length");
+  if (declared != null && Number(declared) > MAX_RESULTS_BODY) return json({ error: "body too large" }, 413);
+  const raw = await request.text();
+  if (new TextEncoder().encode(raw).length > MAX_RESULTS_BODY) return json({ error: "body too large" }, 413);
+  let list;
+  try { list = JSON.parse(raw); } catch { return json({ error: "bad json" }, 400); }
+  if (!Array.isArray(list) || list.length > MAX_RESULTS)
+    return json({ error: `expected a list of at most ${MAX_RESULTS} reports` }, 400);
+  const valid = list.filter(validReport);
+  const stored = await storeResults(env.DB, valid, new Date());
+  return json({ stored, skipped: list.length - valid.length });
 }
 
 // -------------------------------------------------------- GET /whoami

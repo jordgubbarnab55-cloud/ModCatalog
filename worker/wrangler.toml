@@ -28,9 +28,12 @@ crons = ["* * * * *"]
 #   DISCORD_PUBLIC_KEY  base64 public key from the Discord application
 #   GITHUB_TOKEN        fine-grained token: this repo only,
 #                       Contents: Read and write + Actions: Read and write
+#   UPLOAD_RESULTS_SECRET  shared with the workflow (same value as the GitHub
+#                       secret of that name); authorizes POST /uploads/results
 
 # D1 (binding `DB`): tokens and login codes (0002), the daily upload
-# quota (0005) and the ephemeral replies awaiting deletion (0006). Create it first:
+# quota (0005), the ephemeral replies awaiting deletion (0006) and the per-user
+# upload status (0007). Create it first:
 #   npx wrangler d1 create modcatalog-forum      (copy the database_id below)
 # then apply the migrations:
 #   npx wrangler d1 migrations apply modcatalog-forum --remote
