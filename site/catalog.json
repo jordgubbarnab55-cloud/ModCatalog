@@ -18,7 +18,7 @@
       "size": 10185549,
       "sha256": "daf1d41411d1fef747afaad7b822817745182ef0a4d52769b76ae118e7a8413f",
       "uploader": "1571293769163219027",
-      "updated": "2026-11-15T09:41:10Z"
+      "updated": "2026-11-15T09:41:15Z"
     },
     {
       "id": "1509993694902878381.RedLegacyNea",
@@ -65,7 +65,7 @@
       "size": 10148553,
       "sha256": "af3cd28085f7247c4ed26878562b167d6351318e09716f7abac0be454e7d5603",
       "uploader": "1509993694902878381",
-      "updated": "2026-11-15T13:53:41Z",
+      "updated": "2026-11-15T13:53:44Z",
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.skulltrooper-6916429d/cover-726833e8.png"
     },
     {
@@ -81,7 +81,7 @@
       "size": 84475354,
       "sha256": "a0baf32ecd60d8947db146439fc637c7c33aa1c4f3575b6fdff7c0f629aaf229",
       "uploader": "1509993694902878381",
-      "updated": "2026-11-15T13:39:14Z",
+      "updated": "2026-11-15T13:39:22Z",
       "cover": "https://github.com/jordgubbarnab55-cloud/ModCatalog/releases/download/mod-1509993694902878381.unlockallcosmetics-6dc08db4/cover-3b28e246.png"
     },
     {
@@ -94,7 +94,7 @@
       "size": 732,
       "sha256": "cf3acf5fed307a0906312a3019b9eebd4f10ffc1b531b6b54ac5e413b7b990dd",
       "uploader": "1571293769163219027",
-      "updated": "2026-11-14T23:34:58Z"
+      "updated": "2026-11-14T23:35:00Z"
     }
   ]
 }
