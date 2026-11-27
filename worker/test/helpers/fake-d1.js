@@ -1,21 +1,24 @@
 // A fake D1 matching prepared statements by their SQL string, with
 // SQLite-like transition semantics and changed-row counts
 // (`meta.changes`). Covers the auth statements (ASQL) and the quota
-// statements (QSQL). Nothing touches the network.
+// statements (QSQL) and the ephemeral-reply statements (ESQL). Nothing touches the network.
 
 import { ASQL } from "../../src/auth.js";
 import { QSQL } from "../../src/quota.js";
+import { ESQL } from "../../src/ephemeral.js";
 
 export class FakeD1 {
   constructor() {
     this.tokens = new Map();    // tokens: hash -> row
     this.codes = new Map();     // login_codes: hash -> row
     this.quota = new Map();     // upload_quota: discord_id -> row
+    this.ephemeral = new Map(); // ephemeral_deletes: interaction_token -> row
   }
   // -- test introspection
   tokenRows() { return [...this.tokens.values()]; }
   codeRows() { return [...this.codes.values()]; }
   quotaRow(discordId) { return this.quota.get(discordId) || null; }
+  ephemeralRows() { return [...this.ephemeral.values()]; }
   prepare(sql) {
     const self = this;
     return {
@@ -110,6 +113,25 @@ export class FakeD1 {
         if (!row || row.day !== a[1]) return 0;
         row.bytes = Math.max(row.bytes - a[2], 0);
         return 1;
+      }
+      // ---- ephemeral_deletes (ESQL)
+      case ESQL.insert:
+        this.ephemeral.set(a[0], { interaction_token: a[0], application_id: a[1],
+          created_at: a[2], delete_at: a[3], login_hash: a[4], token_hash: a[5] });
+        return 1;
+      case ESQL.byLogin:
+        return [...this.ephemeral.values()].filter((r) => r.login_hash === a[0]);
+      case ESQL.byToken:
+        return [...this.ephemeral.values()].filter((r) => r.token_hash === a[0]);
+      case ESQL.due:
+        return [...this.ephemeral.values()].filter((r) => r.delete_at <= a[0]);
+      case ESQL.remove:
+        return this.ephemeral.delete(a[0]) ? 1 : 0;
+      case ESQL.removeStale: {
+        let n = 0;
+        for (const [t, r] of this.ephemeral)
+          if (r.created_at < a[0]) { this.ephemeral.delete(t); n++; }
+        return n;
       }
       default:
         throw new Error(`FakeD1: unknown statement ${sql}`);

@@ -15,10 +15,11 @@
 //     applies the manifest's metadata and zips on the runner (this Worker
 //     cannot: 10 ms CPU, stateless).
 import {
-  authenticateToken, mintManualToken,
+  authenticateToken, mintManualToken, sha256Hex,
   redeemLoginCode, deleteWebToken, mintLoginCode, revokeAllTokens,
 } from "./auth.js";
 import { chargeQuota, refundQuota } from "./quota.js";
+import { scheduleDelete, deleteLinkedReplies, sweepDue } from "./ephemeral.js";
 
 const MAX_BODY_BYTES = 100 * 1024 * 1024; // Cloudflare free-plan request-body limit
 const DEFAULT_DAILY_BYTES = 2147483648; // 2 GiB of uploads per user per UTC day
@@ -100,13 +101,25 @@ export function loginLinkUrl(siteUrl, code) {
   return `${base}#login=${code}`;
 }
 
+// Runs background work after the response (ctx.waitUntil); without a ctx
+// (unit tests) the work is awaited.
+async function defer(ctx, promise) {
+  if (ctx && ctx.waitUntil) ctx.waitUntil(promise.catch(() => {}));
+  else await promise.catch(() => {});
+}
+
 // Looks the bearer token up in D1 (auth.js):
-// { rec: { discordId, username, kind } } or { response }.
-async function authenticate(request, env, cors) {
+// { rec: { discordId, username, kind } } or { response }. The first
+// successful use of a manual token deletes the /token reply that showed it.
+async function authenticate(request, env, cors, ctx, fetchImpl) {
   const auth = request.headers.get("Authorization") || "";
   if (!auth.startsWith("Bearer ")) return { response: json({ error: "missing bearer token" }, 401, cors) };
-  const rec = await authenticateToken(env.DB, auth.slice("Bearer ".length), new Date());
+  const token = auth.slice("Bearer ".length);
+  const rec = await authenticateToken(env.DB, token, new Date());
   if (!rec) return { response: json({ error: "unknown or revoked token" }, 401, cors) };
+  if (rec.kind === "manual")
+    await defer(ctx, sha256Hex(token).then(
+      (hash) => deleteLinkedReplies(env.DB, fetchImpl, "token", hash)));
   return { rec };
 }
 
@@ -115,8 +128,12 @@ async function authenticate(request, env, cors) {
 export default {
   // Wrangler entry point. `fetch` (the global) is passed through so the
   // same code path is unit-testable with an injected fetch.
-  async fetch(request, env) {
-    return handle(request, env, fetch);
+  async fetch(request, env, ctx) {
+    return handle(request, env, fetch, ctx);
+  },
+  // Cron trigger (every minute): deletes ephemeral replies that came due.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(sweepDue(env.DB, fetch, new Date()));
   },
 };
 
@@ -127,13 +144,14 @@ export default {
  *                       GITHUB_REPO, ALLOWED_ORIGIN, SITE_URL,
  *                       UPLOAD_DAILY_BYTES? }
  * @param {(url:string, init?:object)=>Promise<Response>} fetchImpl
+ * @param {{waitUntil:(p:Promise)=>void}} [ctx]  background work after the response
  */
-export async function handle(request, env, fetchImpl) {
+export async function handle(request, env, fetchImpl, ctx) {
   const url = new URL(request.url);
-  if (url.pathname === "/discord") return handleDiscord(request, env);
-  if (url.pathname === "/upload") return handleUpload(request, env, fetchImpl);
-  if (url.pathname === "/whoami") return handleWhoami(request, env);
-  if (url.pathname === "/auth/redeem") return handleAuthRedeem(request, env);
+  if (url.pathname === "/discord") return handleDiscord(request, env, fetchImpl, ctx);
+  if (url.pathname === "/upload") return handleUpload(request, env, fetchImpl, ctx);
+  if (url.pathname === "/whoami") return handleWhoami(request, env, fetchImpl, ctx);
+  if (url.pathname === "/auth/redeem") return handleAuthRedeem(request, env, fetchImpl, ctx);
   if (url.pathname === "/auth/logout") return handleAuthLogout(request, env);
   return json({ error: "not found" }, 404);
 }
@@ -144,7 +162,7 @@ export async function handle(request, env, fetchImpl) {
 // this handler makes NO GitHub calls. Every reply is the interaction
 // response itself: 200 with a JSON body.
 
-async function handleDiscord(request, env) {
+async function handleDiscord(request, env, fetchImpl, ctx) {
   if (request.method !== "POST") return json({ error: "POST only" }, 405);
   const rawBody = await request.text();
   const ok = await verifyDiscordSignature(
@@ -159,8 +177,9 @@ async function handleDiscord(request, env) {
 
   if (body.type === 3) {
     const customId = body.data && body.data.custom_id;
-    if (customId === "mods_upload") return handleModsUpload(body, env);
-    if (customId === "mods_signout") return handleModsSignout(body, env);
+    const reply = replier(body, env, ctx);
+    if (customId === "mods_upload") return handleModsUpload(body, env, reply);
+    if (customId === "mods_signout") return handleModsSignout(body, env, reply);
     return json({ error: "unknown component" }, 400);
   }
 
@@ -174,40 +193,51 @@ async function handleDiscord(request, env) {
   if (!username) return json({ error: "missing username" }, 400);
 
   const command = (body.data && body.data.name) || "";
+  const reply = replier(body, env, ctx);
 
   if (command === "token") {
     // One `manual` token per user: minting replaces the previous one
     // (re-minting is also the revoke path); web tokens are left alone.
     const token = await mintManualToken(env.DB, { discordId, username, now: new Date() });
-    return ephemeral(
+    return reply(
       "## 🔑 Your upload token:\n" + "```\n" + token + "\n```\n" +
       "**This token is only shown once. Copy it before you dismiss this message.**\n" +
-      "If you need a new token, or want to revoke your existing one, just regenerate a new one. The old one becomes invalid.");
+      "If you need a new token, or want to revoke your existing one, just regenerate a new one. The old one becomes invalid.",
+      undefined, { tokenHash: await sha256Hex(token) });
   }
 
   return json({ error: `unknown command ${command}` }, 400);
 }
 
-// An ephemeral reply (type 4 + flags 64): only the invoking user sees it.
-// Component replies are never type 7, which would edit the public #mods
-// post in place.
-function ephemeral(content, components) {
-  const data = { content, flags: 64 };
-  if (components) data.components = components;
-  return json({ type: 4, data });
+// Builds the reply function for an interaction: an ephemeral reply (type 4
+// + flags 64: only the invoking user sees it) that is recorded for deletion
+// after 5 minutes (ephemeral.js). `link` ties it to the login code or manual
+// token hash it carries, so using that secret deletes it early. Component
+// replies are never type 7, which would edit the public #mods post in place.
+function replier(body, env, ctx) {
+  return async (content, components, link = {}) => {
+    const data = { content, flags: 64 };
+    if (components) data.components = components;
+    if (body.application_id && body.token) {
+      await defer(ctx, scheduleDelete(env.DB, {
+        applicationId: body.application_id, token: body.token, now: new Date(), ...link,
+      }));
+    }
+    return json({ type: 4, data });
+  };
 }
 
 // The #mods channel's "Upload or update a mod" button: mints a one-time
 // login code and replies (ephemeral) with a link button to the site
 // carrying it (URL fragment, never a query string). The code is never
 // logged.
-async function handleModsUpload(body, env) {
+async function handleModsUpload(body, env, reply) {
   const { discordId, username } = interactionUser(body);
   if (!discordId) return json({ error: "missing user id" }, 400);
-  if (!username) return ephemeral("I couldn't find your Discord account name, so I can't sign you in.");
+  if (!username) return reply("I couldn't find your Discord account name, so I can't sign you in.");
   const res = await mintLoginCode(env.DB, { discordId, username, now: new Date() });
-  if (res.limited) return ephemeral("You're clicking too fast, try again in a minute.");
-  return ephemeral(
+  if (res.limited) return reply("You're clicking too fast, try again in a minute.");
+  return reply(
     "This link signs you in to the catalog uploader. " +
     "It works once and expires in 5 minutes. Don't share it.",
     [{
@@ -216,16 +246,17 @@ async function handleModsUpload(body, env) {
         type: 2, style: 5, label: "Open the uploader",
         url: loginLinkUrl(env.SITE_URL, res.code),
       }],
-    }]);
+    }],
+    { loginHash: await sha256Hex(res.code) });
 }
 
 // The #mods channel's "Sign out everywhere" button: deletes all the
 // clicker's tokens (manual + web) and invalidates unused codes.
-async function handleModsSignout(body, env) {
+async function handleModsSignout(body, env, reply) {
   const { discordId } = interactionUser(body);
   if (!discordId) return json({ error: "missing user id" }, 400);
   await revokeAllTokens(env.DB, discordId);
-  return ephemeral("Signed out everywhere. Your /token token and all browser sessions are revoked.");
+  return reply("Signed out everywhere. Your /token token and all browser sessions are revoked.");
 }
 
 // -------------------------------------------------------- POST /upload
@@ -233,7 +264,7 @@ async function handleModsSignout(body, env) {
 // X-Filename: <name>.zip      (zip mode; set mode: see mod-contract/upload.md)
 // body: the raw bytes, streamed straight through to GitHub (never buffered here).
 
-async function handleUpload(request, env, fetchImpl) {
+async function handleUpload(request, env, fetchImpl, ctx) {
   const cors = { "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN };
 
   if (request.method === "OPTIONS") {
@@ -249,7 +280,7 @@ async function handleUpload(request, env, fetchImpl) {
   if (request.method !== "POST") return json({ error: "POST only" }, 405, cors);
 
   // 1. token
-  const auth = await authenticate(request, env, cors);
+  const auth = await authenticate(request, env, cors, ctx, fetchImpl);
   if (auth.response) return auth.response;
   const { discordId, username } = auth.rec;
   const stamp = uploaderStamp(discordId, username);
@@ -382,7 +413,7 @@ async function handleUpload(request, env, fetchImpl) {
 // -------------------------------------------------------- GET /whoami
 // Bearer token -> the Discord account the catalog will publish uploads as.
 
-async function handleWhoami(request, env) {
+async function handleWhoami(request, env, fetchImpl, ctx) {
   const cors = { "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN };
   if (request.method === "OPTIONS") {
     return new Response(null, {
@@ -395,7 +426,7 @@ async function handleWhoami(request, env) {
     });
   }
   if (request.method !== "GET") return json({ error: "GET only" }, 405, cors);
-  const auth = await authenticate(request, env, cors);
+  const auth = await authenticate(request, env, cors, ctx, fetchImpl);
   if (auth.response) return auth.response;
   return json({ discordId: auth.rec.discordId, username: auth.rec.username }, 200, cors);
 }
@@ -444,12 +475,16 @@ function codeError(res, cors) {
   return json({ error: `code ${res.reason}`, reason: res.reason }, 410, cors);
 }
 
-async function handleAuthRedeem(request, env) {
+async function handleAuthRedeem(request, env, fetchImpl, ctx) {
   const read = await readCodeBody(request, env);
   if (read.response) return read.response;
   const res = await redeemLoginCode(env.DB, read.code, new Date());
-  if (res.ok)
+  if (res.ok) {
+    // The login link has been opened: its Discord reply is spent.
+    await defer(ctx, sha256Hex(read.code).then(
+      (hash) => deleteLinkedReplies(env.DB, fetchImpl, "login", hash)));
     return json({ token: res.token, discordId: res.discordId, username: res.username, expiresAt: res.expiresAt }, 200, authCors(env));
+  }
   return codeError(res, authCors(env));
 }
 

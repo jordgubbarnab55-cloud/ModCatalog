@@ -8,7 +8,7 @@ this doc covers behavior and invariants.
 
 Source: `src/index.js` (routing, `/discord`, `/upload`, `/whoami`),
 `src/auth.js` (D1 tokens and login codes), `src/quota.js` (the D1 daily
-upload quota).
+upload quota), `src/ephemeral.js` (self-deleting Discord replies).
 
 ## `POST /discord`
 
@@ -19,8 +19,8 @@ WebSocket bot).
   PING gets PONG.
 - Every reply is the interaction response itself: `200` with
   `Content-Type: application/json` and a body of `{type: 1}` (PONG) or
-  `{type: 4, data: {content, flags: 64}}`. The Worker makes no outbound call
-  and uses no bot token.
+  `{type: 4, data: {content, flags: 64}}`. The request path makes no outbound
+  call and uses no bot token.
 - The invoking user id is `member.user.id`; current member objects have no
   top-level `id`. DMs use `user`.
 - **No GitHub calls on this path.** Discord requires the reply within 3 s.
@@ -47,6 +47,25 @@ edited by `worker/scripts/post-mods-message.mjs`. Type-3 dispatch is on
 
 A type-7 response to a component interaction would edit the original
 message, so replies use type 4 with flags 64.
+
+## Self-deleting replies
+
+Every ephemeral reply is recorded in the D1 table `ephemeral_deletes`
+(`src/ephemeral.js`) with the interaction's `application_id` and `token`,
+written through `ctx.waitUntil`. The interaction token authorizes
+`DELETE https://discord.com/api/v10/webhooks/{application_id}/{token}/messages/@original`
+without a bot token, for 15 minutes.
+
+- A cron trigger (`* * * * *`, the `scheduled` handler) deletes replies 5
+  minutes after they were sent. A `404` counts as already deleted. A failed
+  delete is retried on the next run; rows older than 14 minutes are dropped
+  because their token has expired.
+- The login-link reply is deleted as soon as `POST /auth/redeem` succeeds for
+  its code. The `/token` reply is deleted the first time that manual token
+  authenticates a `/whoami` or `/upload` request. Both lookups go through the
+  hash stored with the reply (`login_hash`, `token_hash`), never the secret.
+- Replies to interactions without an `application_id` and `token` are not
+  recorded.
 
 ## `POST /upload`
 

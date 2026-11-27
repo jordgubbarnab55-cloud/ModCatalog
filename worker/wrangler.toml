@@ -20,18 +20,17 @@ UPLOAD_DAILY_BYTES = "2147483648"
 # link is SITE_URL + "#login=<code>" (URL fragment, never a query string)
 SITE_URL = "https://jordgubbarnab55-cloud.github.io/ModCatalog/"
 
-# No cron triggers (the explicit empty array removes any stray triggers
-# added out-of-band on deploy).
+# Every minute: deletes ephemeral Discord replies that came due.
 [triggers]
-crons = []
+crons = ["* * * * *"]
 
 # Secrets -- set with `npx wrangler secret put NAME`, never committed:
 #   DISCORD_PUBLIC_KEY  base64 public key from the Discord application
 #   GITHUB_TOKEN        fine-grained token: this repo only,
 #                       Contents: Read and write + Actions: Read and write
 
-# D1 (binding `DB`): tokens and login codes (0002) and the daily upload
-# quota (0005). Create it first:
+# D1 (binding `DB`): tokens and login codes (0002), the daily upload
+# quota (0005) and the ephemeral replies awaiting deletion (0006). Create it first:
 #   npx wrangler d1 create modcatalog-forum      (copy the database_id below)
 # then apply the migrations:
 #   npx wrangler d1 migrations apply modcatalog-forum --remote

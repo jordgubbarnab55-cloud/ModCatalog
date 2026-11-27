@@ -6,7 +6,8 @@
 
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { handle, loginLinkUrl, clearInboxCache } from "../src/index.js";
+import worker, { handle, loginLinkUrl, clearInboxCache } from "../src/index.js";
+import { scheduleDelete, sweepDue } from "../src/ephemeral.js";
 import {
   sha256Hex, mintManualToken, mintLoginCode,
   redeemLoginCode, ASQL,
@@ -883,4 +884,118 @@ test("the client cannot choose the stamped name: no header is read for it", asyn
       "X-Username": "mallory", "X-Discord-Id": "1" },
   }), makeEnv(kv, pub), f);
   assert.match(name, /^42-616c696365__/);
+});
+
+// ------------------------------------------------ ephemeral reply deletion
+
+const APP_ID = "app1";
+const member = { id: "42", user: { id: "42", username: "alice" } };
+
+function discordFetch(status = 204) {
+  return makeFetch((url) => {
+    if (url.startsWith("https://discord.com/")) return new Response(null, { status });
+    return new Response(null, { status: 204 });
+  });
+}
+
+function fakeCtx() {
+  const pending = [];
+  return { pending, waitUntil: (p) => pending.push(p), settle: () => Promise.all(pending) };
+}
+
+async function interact(env, f, ctx, obj) {
+  const res = await handle(await discordRequest({ application_id: APP_ID, member, ...obj }), env, f, ctx);
+  await ctx.settle();
+  return res;
+}
+
+const discordDeletes = (f) => f.calls.filter((c) => c.url.startsWith("https://discord.com/"));
+
+test("a reply schedules its own deletion 5 minutes out", async () => {
+  const db = new FakeD1();
+  const env = makeEnv({}, await publicKeyB64(), { DB: db });
+  const f = discordFetch();
+  const res = await interact(env, f, fakeCtx(), { type: 3, token: "itok1", data: { custom_id: "mods_signout" } });
+  assert.equal(res.status, 200);
+  const [row] = db.ephemeralRows();
+  assert.equal(row.interaction_token, "itok1");
+  assert.equal(row.application_id, APP_ID);
+  assert.equal(Date.parse(row.delete_at) - Date.parse(row.created_at), 5 * 60 * 1000);
+  assert.equal(discordDeletes(f).length, 0, "nothing is deleted yet");
+});
+
+test("the sweep deletes due replies and leaves not-yet-due ones", async () => {
+  const db = new FakeD1();
+  const t0 = new Date("2026-01-01T00:00:00Z");
+  await scheduleDelete(db, { applicationId: APP_ID, token: "early", now: t0 });
+  await scheduleDelete(db, { applicationId: APP_ID, token: "late", now: new Date(t0.getTime() + 4 * 60 * 1000) });
+  const f = discordFetch();
+  await sweepDue(db, f, new Date(t0.getTime() + 5 * 60 * 1000));
+  const calls = discordDeletes(f);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.method, "DELETE");
+  assert.equal(calls[0].url, `https://discord.com/api/v10/webhooks/${APP_ID}/early/messages/@original`);
+  assert.ok(calls[0].init.headers["User-Agent"]);
+  assert.deepEqual(db.ephemeralRows().map((r) => r.interaction_token), ["late"]);
+});
+
+test("a 404 on delete counts as done; a failure is retried until the token dies", async () => {
+  const db = new FakeD1();
+  const t0 = new Date("2026-01-01T00:00:00Z");
+  await scheduleDelete(db, { applicationId: APP_ID, token: "gone", now: t0 });
+  await sweepDue(db, discordFetch(404), new Date(t0.getTime() + 6 * 60 * 1000));
+  assert.equal(db.ephemeralRows().length, 0);
+
+  await scheduleDelete(db, { applicationId: APP_ID, token: "flaky", now: t0 });
+  await sweepDue(db, discordFetch(500), new Date(t0.getTime() + 6 * 60 * 1000));
+  assert.equal(db.ephemeralRows().length, 1, "kept for the next run");
+  await sweepDue(db, discordFetch(500), new Date(t0.getTime() + 15 * 60 * 1000));
+  assert.equal(db.ephemeralRows().length, 0, "dropped once the interaction token has expired");
+});
+
+test("the scheduled handler runs the sweep through waitUntil", async () => {
+  const ctx = fakeCtx();
+  await worker.scheduled({}, makeEnv({}, await publicKeyB64()), ctx);
+  assert.equal(ctx.pending.length, 1);
+  await ctx.settle();
+});
+
+test("redeeming a login code deletes the login-link reply at once", async () => {
+  const db = new FakeD1();
+  const env = makeEnv({}, await publicKeyB64(), { DB: db });
+  const f = discordFetch();
+  const res = await interact(env, f, fakeCtx(), { type: 3, token: "itok2", data: { custom_id: "mods_upload" } });
+  const link = (await res.json()).data.components[0].components[0].url;
+  const code = link.split("#login=")[1];
+  assert.equal(db.ephemeralRows().length, 1);
+
+  const bad = await handle(new Request("https://worker.local/auth/redeem", {
+    method: "POST", body: JSON.stringify({ code: "lc_nope" }) }), env, f, fakeCtx());
+  assert.equal(bad.status, 404);
+  assert.equal(discordDeletes(f).length, 0, "a failed redeem deletes nothing");
+
+  const ctx = fakeCtx();
+  const redeem = await handle(new Request("https://worker.local/auth/redeem", {
+    method: "POST", body: JSON.stringify({ code }) }), env, f, ctx);
+  await ctx.settle();
+  assert.equal(redeem.status, 200);
+  assert.equal(discordDeletes(f)[0].url, `https://discord.com/api/v10/webhooks/${APP_ID}/itok2/messages/@original`);
+  assert.equal(db.ephemeralRows().length, 0);
+});
+
+test("the first use of a /token token deletes the /token reply", async () => {
+  const db = new FakeD1();
+  const env = makeEnv({}, await publicKeyB64(), { DB: db });
+  const f = discordFetch();
+  const res = await interact(env, f, fakeCtx(), { type: 2, token: "itok3", data: { name: "token" } });
+  const token = (await res.json()).data.content.match(/(mm_[A-Za-z0-9_-]+)/)[1];
+  assert.equal(db.ephemeralRows().length, 1);
+
+  const ctx = fakeCtx();
+  const who = await handle(new Request("https://worker.local/whoami", {
+    headers: { Authorization: `Bearer ${token}` } }), env, f, ctx);
+  await ctx.settle();
+  assert.equal(who.status, 200);
+  assert.equal(discordDeletes(f).length, 1);
+  assert.equal(db.ephemeralRows().length, 0);
 });
