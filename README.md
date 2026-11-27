@@ -77,7 +77,7 @@ download; an unchanged re-upload is rejected), and the same files with the
 same title and version under another identifier are rejected as a duplicate
 of the existing mod. A new upload mints the mod's identifier
 `{discordId}.{Title}` (an identifier you already have is rejected: update that
-mod instead); an update (`metadata.json` `identifier`) must target one of your
+mod instead); an update (the manifest metadata's `identifier`) must target one of your
 own mods (admins from `ADMIN_DISCORD_IDS` bypass this). The author shown is
 always your Discord **username**, whatever the package says: the catalog
 rewrites the stored trailer's `author`, `identifier` and (fresh) `guid`.
@@ -86,7 +86,7 @@ rewrites the stored trailer's `author`, `identifier` and (fresh) `guid`.
 
 ```
 build.py                  generator + pipeline (stdlib only): process / rebuild /
-                         retitle / notify
+                         retitle / downloads / announce
 trailer.py                stdlib read/write/validate for the .utoc trailer format
 make_examples.py          dev tool: builds sample packages from a real UE pair
 site/

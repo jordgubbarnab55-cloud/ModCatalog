@@ -27,7 +27,7 @@ Example: `123.CoolMod!` becomes `mod-123.coolmod-<hex>`.
 
 - The uploader who mints a mod owns it. The catalog `uploader` field is the
   Discord user id, which is also the identifier's `{id}.` prefix.
-- An update of someone else's mod (by `metadata.json` `identifier`) is
+- An update of someone else's mod (by the manifest `metadata` `identifier`) is
   rejected and its inbox assets deleted. A zip or metadata-less upload that
   carries someone else's identifier becomes the uploader's own new mod.
 - Every package has an uploader; there are no `uploader: null` entries.
@@ -36,7 +36,7 @@ Example: `123.CoolMod!` becomes `mod-123.coolmod-<hex>`.
 
 Discord ids listed in the `ADMIN_DISCORD_IDS` repo variable (comma-separated,
 read from the environment) bypass the **ownership** check only, for updates by
-`metadata.json` `identifier`. The entry stays under its owner, and both the
+the manifest `metadata` `identifier`. The entry stays under its owner, and both the
 entry and the stored package carry the **owner's** catalog name, so `rebuild`
 attributes it correctly.
 
@@ -45,7 +45,7 @@ attributes it correctly.
 The catalog sets `"verifiedAuthors": true`. Every stored package's trailer has
 `author` = the uploader's Discord **`username`** at upload time (not the
 display name or nickname). `apply_metadata` forces it whatever the package or
-`metadata.json` says. In ModManager's editor and `io-trailer` the trailer
+the manifest `metadata` says. In ModManager's editor and `io-trailer` the trailer
 author remains plain text; only this catalog enforces it.
 
 ## Renames
@@ -62,16 +62,13 @@ Only the runner writes into `mod-*` releases, so a trailer identifier's id
 prefix is trusted.
 
 - One entry per release/identifier.
-- Identifier = the earliest valid package's (locked); owner = its uploader
-  (the id prefix).
-- The entry points at the newest package (`asset_order_key`).
+- The newest package (`asset_order_key`) is the only one read: the entry
+  points at it, its identifier is the locked one (`apply_metadata` stamps it
+  on every stored package) and its id prefix is the owner.
 - `author` = the author of the most recently uploaded package (any release)
   under that owner id.
 - Packages whose identifier has no id prefix, or maps to another release's
   tag, are skipped with a log line.
-- By default it reads the newest and the oldest valid package per release,
-  not the superseded ones in between. `--full` reads every version zip of
-  every release (audit mode).
 
 ## Seeding
 

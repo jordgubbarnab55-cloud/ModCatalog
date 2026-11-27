@@ -1,8 +1,8 @@
-// Metadata trailer for .utoc files — the browser/Node twin of trailer.py and
-// of the C# io-trailer reference, kept in lockstep by the shared fixtures in
-// mod-contract/fixtures (worker/test/contract.test.js). Spec:
-// mod-contract/trailer-spec.md. No dependencies. Loaded as an ES module by
-// upload.html (window-exposed at the bottom).
+// Read-only metadata trailer parser for .utoc files — the browser/Node twin of
+// the read path of trailer.py and of the C# io-trailer reference, kept in
+// lockstep by the shared read fixtures in mod-contract/fixtures
+// (worker/test/contract.test.js). Spec: mod-contract/trailer-spec.md. No
+// dependencies. Loaded as an ES module by upload-flow.js.
 //
 // Errors are TrailerError with a `kind` named like the C# TrailerErrorKind.
 
@@ -12,7 +12,6 @@ export const TOC_SUPPORTED_VERSION = 8;
 const TOC_BLOCK_ENTRY_SIZE = 12;
 const FLAG_SIGNED = 0x04;
 const FLAG_INDEXED = 0x08;
-const FLAG_ONDEMAND = 0x10;
 
 export const MAGIC = "UEMODMET";
 const FORMAT_VERSION = 1;
@@ -95,30 +94,6 @@ function upperOrdinal(s) {
 export function buildIdentifier(author, title) {
   const strip = (s) => [...s].filter((c) => !isSpace(c)).join("");
   return `${strip(author)}.${strip(title)}`;
-}
-
-const SHORT_ESCAPES = { '"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f" };
-const hex4 = (n) => n.toString(16).toUpperCase().padStart(4, "0");
-
-/** System.Text.Json with UnsafeRelaxedJsonEscaping (the C# writer). */
-function jsonString(s) {
-  let out = '"';
-  for (const ch of s) {
-    const cp = ch.codePointAt(0);
-    if (SHORT_ESCAPES[ch]) out += SHORT_ESCAPES[ch];
-    else if (cp < 0x20) out += "\\u" + hex4(cp);
-    else if (cp > 0xffff) {
-      const v = cp - 0x10000;
-      out += "\\u" + hex4(0xd800 + (v >> 10)) + "\\u" + hex4(0xdc00 + (v & 0x3ff));
-    } else out += ch;
-  }
-  return out + '"';
-}
-
-function base64Encode(bytes) {
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
 }
 
 function base64Decode(s) {
@@ -213,18 +188,6 @@ export function validateMetadata(meta) {
   return { ...s, guid, identifier, tags, image };
 }
 
-/** Validates, then serializes the compact payload byte-identically to C#. */
-export function buildPayload(meta) {
-  const m = validateMetadata(meta);
-  if (!m.guid) throw violation('payload is missing the required "guid" field');
-  const parts = [`"schema":${SCHEMA_VERSION}`];
-  for (const k of ["title", "author", "description", "version", "game_version", "guid", "identifier"])
-    parts.push(`${jsonString(k)}:${jsonString(m[k])}`);
-  if (m.tags.length) parts.push(`"tags":[${m.tags.map(jsonString).join(",")}]`);
-  if (m.image) parts.push(`"image":{"mime":${jsonString(m.image.mime)},"data":${jsonString(base64Encode(m.image.data))}}`);
-  return new TextEncoder().encode(`{${parts.join(",")}}`);
-}
-
 /** Parses + validates a payload (after the CRC check); returns normalized metadata. */
 export function parsePayload(payload) {
   let obj;
@@ -267,20 +230,6 @@ export function parsePayload(payload) {
 }
 
 // ----------------------------------------------------------------- trailer
-
-export function buildTrailer(payload) {
-  const total = Math.ceil((HEADER_SIZE + payload.length) / ALIGNMENT) * ALIGNMENT;
-  const out = new Uint8Array(total);
-  const dv = view(out);
-  out.set(MAGIC_BYTES, 0);
-  dv.setUint16(8, FORMAT_VERSION, true);
-  dv.setUint32(0x10, total % 4294967296, true);
-  dv.setUint32(0x14, Math.floor(total / 4294967296), true);
-  dv.setUint32(0x18, payload.length, true);
-  dv.setUint32(0x1c, crc32(payload), true);
-  out.set(payload, HEADER_SIZE);
-  return out;
-}
 
 /** Parses the trailer at `offset`: magic -> format_version -> reserved ->
  *  alignment -> size bounds -> CRC32 -> JSON -> schema -> image. */
@@ -333,32 +282,6 @@ export function readTrailer(buf) {
   return { trailer: null, warning: (warning ? warning + "; " : "") + "unknown trailing data (no recognized trailer)" };
 }
 
-/** C# TrailerOps.WriteTrailer on bytes: returns { bytes, replaced, tocEnd }.
- *  A null/empty `guid` preserves an existing trailer's GUID, else a v4 is generated. */
-export function writeTrailer(buf, meta) {
-  const utoc = toU8(buf);
-  const h = parseTocHeader(utoc);
-  if (h.flags & FLAG_ONDEMAND) throw new TrailerError("OnDemandRefused", "OnDemand containers must not be modified");
-  if (h.version !== TOC_SUPPORTED_VERSION)
-    throw new TrailerError("UnsupportedVersion", `TOC version ${h.version}; only ${TOC_SUPPORTED_VERSION} (UE 5.6) is supported`);
-  const end = tocEnd(h, utoc);
-  if (end < TOC_HEADER_SIZE || end > utoc.length) throw new TrailerError("TocEndMismatch", `computed TocEnd ${end} exceeds file size ${utoc.length}`);
-  let replaced = false, preserved = null;
-  if (utoc.length > end) {
-    if (!startsWith(utoc, MAGIC_BYTES, end)) throw new TrailerError("ForeignTrailer", `unknown data at offset ${end}; refusing to clobber it`);
-    const existing = parseAt(utoc, end);
-    if (utoc.length !== end + existing.totalSize) throw new TrailerError("ForeignTrailer", "unknown data after the existing trailer");
-    replaced = true;
-    preserved = existing.meta.guid;
-  }
-  const guid = meta.guid || preserved || crypto.randomUUID();
-  const trailer = buildTrailer(buildPayload({ ...meta, guid }));
-  const out = new Uint8Array(end + trailer.length);
-  out.set(utoc.subarray(0, end), 0);
-  out.set(trailer, end);
-  return { bytes: out, replaced, tocEnd: end };
-}
-
 // ------------------------------------------------------- page conveniences
 
 /** True when the .utoc bytes carry a fully valid metadata trailer. */
@@ -374,18 +297,4 @@ export function readTrailerMeta(buf) {
     if (e instanceof TrailerError) return null;
     throw e;
   }
-}
-
-/** Writes the trailer and returns the new .utoc bytes (throws TrailerError). */
-export function appendTrailer(utoc, meta) {
-  return writeTrailer(utoc, meta).bytes;
-}
-
-// upload.html loads this as <script type="module">; expose the helpers
-// (module scope is not global). No-op under Node (tests import directly).
-if (typeof window !== "undefined") {
-  window.hasTrailer = hasTrailer;
-  window.readTrailerMeta = readTrailerMeta;
-  window.appendTrailer = appendTrailer;
-  window.TrailerError = TrailerError;
 }

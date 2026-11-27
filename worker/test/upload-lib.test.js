@@ -5,8 +5,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   configOk, statusMessage, findNewMod, findNewModByName, POLL_MAX_MS,
-  whoamiUrl, authUrl, peekCode, redeemCode, logoutToken, parseLoginHash,
-  checkToken, forcedFields, authorMismatchNote, resolveForm, buildMetadataJson,
+  whoamiUrl, authUrl, redeemCode, logoutToken, parseLoginHash,
+  checkToken, forcedFields, authorMismatchNote, resolveForm, buildMetadata,
   classifySelection, selectionLabel, uploadedText, confirmText,
   ownMods, filterPickerMods, editorPrefillFromEntry, updatePrefill, NO_OWN_MODS_TEXT,
 } from "../../site/upload-lib.js";
@@ -109,10 +109,10 @@ test("parseLoginHash rejects empty, wrong prefix, extra params, query style, sho
 });
 
 test("authUrl sits next to the upload URL, under /auth/", () => {
-  assert.equal(authUrl("https://w.example.workers.dev/upload", "peek"), "https://w.example.workers.dev/auth/peek");
+  assert.equal(authUrl("https://w.example.workers.dev/upload", "redeem"), "https://w.example.workers.dev/auth/redeem");
   assert.equal(authUrl("https://w.example.workers.dev/upload/", "redeem"), "https://w.example.workers.dev/auth/redeem");
   assert.equal(authUrl("https://example.com/api/upload?x=1#h", "logout"), "https://example.com/api/auth/logout");
-  assert.equal(authUrl("https://w.example.workers.dev", "peek"), "https://w.example.workers.dev/auth/peek");
+  assert.equal(authUrl("https://w.example.workers.dev", "redeem"), "https://w.example.workers.dev/auth/redeem");
 });
 
 function codeFetch(status, body, seen = {}) {
@@ -122,34 +122,6 @@ function codeFetch(status, body, seen = {}) {
     return { status, json: async () => { if (body === undefined) throw new Error("no json"); return body; } };
   };
 }
-
-test("peekCode: 200 gives the identity, posting the code (no token)", async () => {
-  const seen = {};
-  const r = await peekCode("https://w/auth/peek", CODE, codeFetch(200, { discordId: "42", username: "alice", expiresAt: "2026-01-01T00:00:00Z" }, seen));
-  assert.deepEqual(r, { ok: true, discordId: "42", username: "alice", expiresAt: "2026-01-01T00:00:00Z" });
-  assert.equal(seen.url, "https://w/auth/peek");
-  assert.equal(seen.init.method, "POST");
-  assert.deepEqual(JSON.parse(seen.init.body), { code: CODE });
-  assert.ok(!seen.init.headers.Authorization, "no bearer token on a peek");
-});
-
-test("peekCode: 404 is unknown, 410 is the server's reason, network is neither", async () => {
-  const r404 = await peekCode("u", CODE, codeFetch(404, { error: "unknown code", reason: "unknown" }));
-  assert.deepEqual([r404.ok, r404.reason], [false, "unknown"]);
-  assert.match(r404.message, /Discord/);
-  const r410e = await peekCode("u", CODE, codeFetch(410, { error: "code expired", reason: "expired" }));
-  assert.deepEqual([r410e.ok, r410e.reason], [false, "expired"]);
-  const r410u = await peekCode("u", CODE, codeFetch(410, { error: "code used", reason: "used" }));
-  assert.deepEqual([r410u.ok, r410u.reason], [false, "used"]);
-  assert.match(r410u.message, /already been used/);
-  const r410plain = await peekCode("u", CODE, codeFetch(410, { error: "code expired" }));
-  assert.equal(r410plain.reason, "expired", "410 without a reason defaults to expired");
-  const down = await peekCode("u", CODE, async () => { throw new TypeError("fetch failed"); });
-  assert.deepEqual([down.ok, down.reason], [false, "network"]);
-  assert.match(down.message, /network/i);
-  const boom = await peekCode("u", CODE, codeFetch(500, {}));
-  assert.deepEqual([boom.ok, boom.reason], [false, "network"]);
-});
 
 test("redeemCode: 200 gives the token; a 200 without one does not", async () => {
   const seen = {};
@@ -162,6 +134,12 @@ test("redeemCode: 200 gives the token; a 200 without one does not", async () => 
   assert.deepEqual([used.ok, used.reason], [false, "used"]);
   const unknown = await redeemCode("u", CODE, codeFetch(404, { error: "unknown code", reason: "unknown" }));
   assert.deepEqual([unknown.ok, unknown.reason], [false, "unknown"]);
+  const expired = await redeemCode("u", CODE, codeFetch(410, { error: "code expired" }));
+  assert.deepEqual([expired.ok, expired.reason], [false, "expired"], "410 without a reason is expired");
+  const down = await redeemCode("u", CODE, async () => { throw new TypeError("fetch failed"); });
+  assert.deepEqual([down.ok, down.reason], [false, "network"]);
+  const boom = await redeemCode("u", CODE, codeFetch(500, {}));
+  assert.deepEqual([boom.ok, boom.reason], [false, "network"]);
 });
 
 test("logoutToken: posts the bearer token, never rejects", async () => {
@@ -219,10 +197,10 @@ test("forcedFields: the author is the username, the identifier follows the title
   assert.equal(resolveForm({ title: "", author: "x" }, forced).identifier, "");
 });
 
-test("the forced author is what the metadata.json carries", () => {
+test("the forced author is what the manifest metadata carries", () => {
   const forced = forcedFields({ discordId: "42", username: "alice" });
   const r = resolveForm({ title: "T", author: "Other" }, forced);
-  assert.equal(JSON.parse(buildMetadataJson({ title: "T", author: r.author, version: "", gameVersion: "", description: "", tags: [] })).author, "alice");
+  assert.equal(buildMetadata({ title: "T", author: r.author, version: "", gameVersion: "", description: "", tags: [] }).author, "alice");
 });
 
 test("authorMismatchNote only warns when the package names another author", () => {
@@ -327,8 +305,8 @@ test("confirmText / uploadedText for an update", () => {
   assert.equal(confirmText("My Mod", "", true), "Update “My Mod”?");
   assert.equal(uploadedText("My Mod", "1.3", true), "The update of “My Mod” is now uploaded");
   assert.equal(uploadedText("My Mod", "", true), "The update of “My Mod” is now uploaded");
-  // and the update's metadata.json names its mod
-  const body = JSON.parse(buildMetadataJson({ title: "New Title", author: "alice", version: "1.3", targetIdentifier: "42.OldName" }));
+  // and the update's metadata names its mod
+  const body = buildMetadata({ title: "New Title", author: "alice", version: "1.3", targetIdentifier: "42.OldName" });
   assert.equal(body.identifier, "42.OldName");
   assert.ok(!("image" in body));
 });

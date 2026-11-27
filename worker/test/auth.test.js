@@ -1,32 +1,26 @@
 // Offline tests for the D1 auth store (node --test, Node 20+):
-// login-code mint/peek/redeem, web tokens, manual tokens via /token,
+// login-code mint/redeem, web tokens, manual tokens via /token,
 // and the /auth/* + /whoami + /upload handler behavior. Nothing
 // touches the network.
 
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
-  mintManualToken, mintLoginCode, peekLoginCode, redeemLoginCode,
+  mintManualToken, mintLoginCode, redeemLoginCode,
   authenticateToken, deleteWebToken, revokeAllTokens,
 } from "../src/auth.js";
-import { handle } from "../src/index.js";
+import { handle, clearInboxCache } from "../src/index.js";
 import { FakeD1 } from "./helpers/fake-d1.js";
 
 // ------------------------------------------------------------- fakes
 
-class FakeKV {
-  constructor() { this.map = new Map(); }
-  async get(k) { return this.map.has(k) ? this.map.get(k) : null; }
-  async put(k, v) { this.map.set(k, v); }
-  async delete(k) { this.map.delete(k); }
-}
+beforeEach(() => clearInboxCache());
 
 function makeFetch() {
   const calls = [];
   const fn = async (url, init = {}) => {
     calls.push({ url, init });
     if (url.includes("/releases/tags/inbox")) return Response.json({ id: 7 });
-    if (url.includes("/interactions/")) return new Response(null, { status: 200 });
     if (url.includes("/dispatches")) return new Response(null, { status: 204 });
     return new Response(null, { status: 201 });
   };
@@ -61,20 +55,16 @@ async function tokenViaDiscord(env, f, id = "42", username = "alice") {
     type: 2, data: { name: "token" },
     member: { id, user: { id, username } },
   }), env, f);
-  assert.equal(res.status, 202);
-  const cb = f.calls.filter((c) => c.url.includes("/interactions/") && c.url.includes("/callback")).at(-1);
-  assert.equal(cb.init.headers.Authorization, "Bot bot_test_token", "the callback is authenticated with the bot token");
-  const m = JSON.parse(cb.init.body).data.content.match(/(mm_[A-Za-z0-9_-]+)/);
+  assert.equal(res.status, 200);
+  const m = (await res.json()).data.content.match(/(mm_[A-Za-z0-9_-]+)/);
   assert.ok(m, "token in reply");
   return m[1];
 }
 
 function makeEnv(db, overrides = {}) {
   return {
-    TOKENS: new FakeKV(),
     DB: db,
     DISCORD_PUBLIC_KEY: "",
-    DISCORD_BOT_TOKEN: "bot_test_token",
     GITHUB_TOKEN: "gh_test_token",
     GITHUB_OWNER: "octo",
     GITHUB_REPO: "repo",
@@ -94,14 +84,10 @@ async function seedCode(db, now = NOW, discordId = "42", username = "alice") {
 
 // ------------------------------------------------------------ unit tests
 
-test("mint/peek/redeem happy path: the web token authenticates, 90-day expiry", async () => {
+test("mint/redeem happy path: the web token authenticates, 90-day expiry", async () => {
   const db = new FakeD1();
   const code = await seedCode(db);
   assert.match(code, /^lc_/);
-
-  const peek = await peekLoginCode(db, code, NOW);
-  assert.deepEqual(peek, { ok: true, discordId: "42", username: "alice",
-    expiresAt: LATER(300 * 1000).toISOString() });
 
   const red = await redeemLoginCode(db, code, NOW);
   assert.equal(red.ok, true);
@@ -115,35 +101,23 @@ test("mint/peek/redeem happy path: the web token authenticates, 90-day expiry", 
   assert.deepEqual(rec, { discordId: "42", username: "alice", kind: "web" });
 });
 
-test("peek is read-only: two peeks leave the code usable", async () => {
-  const db = new FakeD1();
-  const code = await seedCode(db);
-  assert.equal((await peekLoginCode(db, code, NOW)).ok, true);
-  assert.equal((await peekLoginCode(db, code, NOW)).ok, true, "second peek: still ok");
-  const red = await redeemLoginCode(db, code, NOW);
-  assert.equal(red.ok, true, "the code was still usable");
-});
-
 test("redeem twice: the second fails 'used'", async () => {
   const db = new FakeD1();
   const code = await seedCode(db);
   assert.equal((await redeemLoginCode(db, code, NOW)).ok, true);
   assert.deepEqual(await redeemLoginCode(db, code, NOW), { ok: false, reason: "used" });
-  assert.deepEqual(await peekLoginCode(db, code, NOW), { ok: false, reason: "used" });
 });
 
-test("a code expires after 5 minutes (peek and redeem -> 'expired')", async () => {
+test("a code expires after 5 minutes (redeem -> 'expired')", async () => {
   const db = new FakeD1();
   const code = await seedCode(db);
   const expired = LATER(301 * 1000);
-  assert.deepEqual(await peekLoginCode(db, code, expired), { ok: false, reason: "expired" });
   assert.deepEqual(await redeemLoginCode(db, code, expired), { ok: false, reason: "expired" });
   assert.ok(!db.tokenRows().some((t) => t.kind === "web"), "no token on an expired redeem");
 });
 
-test("an unknown code is 'unknown' for peek and redeem", async () => {
+test("an unknown code is 'unknown'", async () => {
   const db = new FakeD1();
-  assert.deepEqual(await peekLoginCode(db, "lc_nope", NOW), { ok: false, reason: "unknown" });
   assert.deepEqual(await redeemLoginCode(db, "lc_nope", NOW), { ok: false, reason: "unknown" });
 });
 
@@ -152,9 +126,8 @@ test("a newer code invalidates the older one", async () => {
   const c1 = await seedCode(db, NOW);
   const { code: c2 } = await mintLoginCode(db, { discordId: "42", username: "alice", now: LATER(1000) });
   assert.notEqual(c1, c2);
-  assert.deepEqual(await peekLoginCode(db, c1, LATER(2000)), { ok: false, reason: "used" }, "older code invalidated");
-  assert.equal((await peekLoginCode(db, c2, LATER(2000))).ok, true, "newer code usable");
-  assert.equal((await redeemLoginCode(db, c1, LATER(2000))).reason, "used");
+  assert.deepEqual(await redeemLoginCode(db, c1, LATER(2000)), { ok: false, reason: "used" }, "older code invalidated");
+  assert.equal((await redeemLoginCode(db, c2, LATER(2000))).ok, true, "newer code usable");
 });
 
 test("rate limit: the 6th code within 60 s is refused", async () => {
@@ -239,37 +212,6 @@ test("the 24 h sweep deletes old codes on mint (unused and used alike)", async (
 
 // -------------------------------------------------- handler-level tests
 
-test("POST /auth/peek: 200 with identity; 404 unknown; 410 expired and used", async () => {
-  const db = new FakeD1();
-  const env = makeEnv(db, { DISCORD_PUBLIC_KEY: await publicKeyB64() });
-  const post = (code, body) => handle(new Request("https://worker.local/auth/peek", {
-    method: "POST", body: body ?? JSON.stringify({ code }),
-    headers: { "Content-Type": "application/json" },
-  }), env, makeFetch());
-
-  const now = new Date();
-  const code = await seedCode(db, now);
-  const ok = await post(code);
-  assert.equal(ok.status, 200);
-  assert.deepEqual(await ok.json(), { discordId: "42", username: "alice",
-    expiresAt: new Date(now.getTime() + 300 * 1000).toISOString() });
-  assert.equal(ok.headers.get("Access-Control-Allow-Origin"), "https://pages.example.com");
-
-  assert.deepEqual(await (await post("lc_nope")).json(), { error: "unknown code", reason: "unknown" });
-  assert.equal((await post("lc_nope")).status, 404);
-
-  const expired = new Date(NOW.getTime() - 24 * 3600 * 1000);
-  const { code: cExpired } = await mintLoginCode(db, { discordId: "42", username: "alice", now: expired });
-  const e = await post(cExpired);
-  assert.equal(e.status, 410);
-  assert.deepEqual(await e.json(), { error: "code expired", reason: "expired" });
-
-  await redeemLoginCode(db, code, NOW);
-  const u = await post(code);
-  assert.equal(u.status, 410);
-  assert.deepEqual(await u.json(), { error: "code used", reason: "used" });
-});
-
 test("POST /auth/redeem: 200 with a web token; a second call is 410 'used'", async () => {
   const db = new FakeD1();
   const env = makeEnv(db, { DISCORD_PUBLIC_KEY: await publicKeyB64() });
@@ -302,26 +244,24 @@ test("/auth/* reject non-JSON and oversize bodies with 400, non-POST with 405", 
     method, body, headers: { "Content-Type": "application/json" },
   }), env, makeFetch());
 
-  assert.equal((await post("/auth/peek", "not json")).status, 400);
-  assert.equal((await post("/auth/peek", JSON.stringify({}))).status, 400, "missing code");
-  assert.equal((await post("/auth/peek", "x".repeat(1025))).status, 400, "oversize");
+  assert.equal((await post("/auth/redeem", "not json")).status, 400);
+  assert.equal((await post("/auth/redeem", JSON.stringify({}))).status, 400, "missing code");
+  assert.equal((await post("/auth/redeem", "x".repeat(1025))).status, 400, "oversize");
   // 400 '€' = 1,200 bytes (> 1 KB) but only 411 characters: the limit is
   // in BYTES, not characters
   const euro = "{" + `\"code\":\"${"€".repeat(400)}\"` + "}";
   assert.ok(new TextEncoder().encode(euro).length > 1024);
   assert.ok(euro.length < 1024, "fewer characters than the byte limit");
-  assert.equal((await post("/auth/peek", euro)).status, 400, "oversize multibyte");
+  assert.equal((await post("/auth/redeem", euro)).status, 400, "oversize multibyte");
   const smallEuro = JSON.stringify({ code: "€".repeat(300) }); // 900 bytes: under the limit
   assert.ok(new TextEncoder().encode(smallEuro).length < 1024);
-  assert.equal((await post("/auth/peek", smallEuro)).status, 404, "ordinary small bodies still pass the size check (unknown code 404)");
-  assert.equal((await post("/auth/redeem", "not json")).status, 400);
-  assert.equal((await post("/auth/peek", undefined, "GET")).status, 405);
+  assert.equal((await post("/auth/redeem", smallEuro)).status, 404, "ordinary small bodies still pass the size check (unknown code 404)");
   assert.equal((await post("/auth/redeem", undefined, "GET")).status, 405);
 });
 
 test("OPTIONS /auth/*: CORS preflight with the allowed origin and headers", async () => {
   const env = makeEnv(new FakeD1());
-  for (const path of ["/auth/peek", "/auth/redeem", "/auth/logout"]) {
+  for (const path of ["/auth/redeem", "/auth/logout"]) {
     const res = await handle(new Request(`https://worker.local${path}`, { method: "OPTIONS" }), env, makeFetch());
     assert.equal(res.status, 204);
     assert.equal(res.headers.get("Access-Control-Allow-Origin"), "https://pages.example.com");
@@ -395,7 +335,7 @@ test("/token via the interaction mints into D1; a re-mint replaces, no revoke su
     type: 2, data: { name: "token", options: [{ type: 2, name: "revoke" }] },
     member: { id: "42", user: { id: "42", username: "alice" } },
   }), env, makeFetch());
-  assert.equal(res.status, 202);
+  assert.equal(res.status, 200);
   assert.equal(db.tokenRows().length, 1, "replaced again (the subcommand is gone; a plain /token mint)");
   assert.ok(db.tokenRows().every((r) => r.kind === "manual"));
 });

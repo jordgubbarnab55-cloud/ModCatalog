@@ -28,6 +28,7 @@ jobs:
     env:
       # `gh` CLI reads GH_TOKEN; the build never hand-rolls asset HTTP
       GH_TOKEN: ${{ github.token }}
+      ADMIN_DISCORD_IDS: ${{ vars.ADMIN_DISCORD_IDS }}
     steps:
       - uses: actions/checkout@v4
 
@@ -39,7 +40,7 @@ jobs:
       # merge into site/catalog.json. Invalid packages are rejected and
       # removed without blocking the rest of the run. The outcome events
       # (published/rejected, plus the stalled-upload sweeps) go to
-      # inbox-results.json for the notify step below.
+      # inbox-results.json for the announce step below.
       - name: Drain the inbox release
         run: python build.py process --from-inbox --results-file inbox-results.json
 
@@ -49,14 +50,17 @@ jobs:
           commit_path: site/catalog.json
           commit_message: "Regenerate catalog from inbox"
 
-      # After the Pages deploy (the site is live before the ping): POST the
-      # run's outcome events to the Worker's /catalog/events. always() +
-      # continue-on-error: the callback never fails the run; a missing results
-      # file or missing secrets is a no-op (exit 0).
-      - name: Notify the catalog event endpoint
+      # After the Pages deploy (the site is live before the announcement):
+      # post the run's outcome events to Discord. always() + continue-on-error:
+      # announcing never fails the run; a missing results file or missing
+      # Discord settings is a no-op.
+      - name: Announce in Discord
         if: always()
         continue-on-error: true
         env:
-          CATALOG_CALLBACK_URL: ${{ secrets.CATALOG_CALLBACK_URL }}
-          CATALOG_CALLBACK_SECRET: ${{ secrets.CATALOG_CALLBACK_SECRET }}
-        run: python build.py notify --results inbox-results.json
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          FORUM_CHANNEL_ID: ${{ vars.FORUM_CHANNEL_ID }}
+          NOTICES_CHANNEL_ID: ${{ vars.NOTICES_CHANNEL_ID }}
+          FORUM_TAG_IDS: ${{ vars.FORUM_TAG_IDS }}
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: python build.py announce --results inbox-results.json

@@ -1,8 +1,8 @@
 # ModCatalog Worker (Cloudflare, free plan)
 #
-# Deployed by the project owner (npx wrangler login / kv:namespace / secret /
-# deploy). NOTHING in this repo requires installing wrangler; the tests run
-# with bare `node --test` (Node 20+).
+# Deployed by the project owner (npx wrangler login / d1 / secret / deploy).
+# NOTHING in this repo requires installing wrangler; the tests run with bare
+# `node --test` (Node 20+).
 
 name = "modcatalog"
 main = "src/index.js"
@@ -20,17 +20,8 @@ UPLOAD_DAILY_BYTES = "2147483648"
 # link is SITE_URL + "#login=<code>" (URL fragment, never a query string)
 SITE_URL = "https://jordgubbarnab55-cloud.github.io/ModCatalog/"
 
-# The /catalog/events mirror (worker/src/mirror.js):
-#   FORUM_CHANNEL_ID  the forum channel the mod threads are mirrored into
-#   FORUM_TAG_IDS     a JSON object mapping the catalog tag vocabulary to the
-#                    forum channel's tag ids ({} = no tags are ever applied)
-#   NOTICES_CHANNEL_ID  the text channel for rejection notices (blank = log only)
-FORUM_CHANNEL_ID = "1570021563602829374"
-FORUM_TAG_IDS = "{}"
-NOTICES_CHANNEL_ID = "1571189289562407117"
-
-# No cron triggers (the old forum-poller schedule is gone; the explicit
-# empty array removes any stray triggers added out-of-band on deploy).
+# No cron triggers (the explicit empty array removes any stray triggers
+# added out-of-band on deploy).
 [triggers]
 crons = []
 
@@ -38,22 +29,9 @@ crons = []
 #   DISCORD_PUBLIC_KEY  base64 public key from the Discord application
 #   GITHUB_TOKEN        fine-grained token: this repo only,
 #                       Contents: Read and write + Actions: Read and write
-#   DISCORD_BOT_TOKEN   the bot token (the /catalog/events mirror creates the
-#                       forum threads and posts the notices with it; the bot
-#                       needs View Channel, Send Messages in Threads and Embed
-#                       Links in the forum and the notices channels)
-#   CATALOG_CALLBACK_SECRET  shared HMAC secret the process-inbox workflow
-#                       signs /catalog/events with (also a GitHub Actions secret)
 
-# Upload quotas (`quota:<id>`) and the inbox release-id cache only;
-# tokens and login codes live in D1 (binding `DB`, below).
-[[kv_namespaces]]
-binding = "TOKENS"
-id = "a0739f0e764f41d69db0345c8c3d7a6f"
-
-# D1 (binding `DB`): tokens / login codes (0002) + the /catalog/events
-# mirror state (0003). 0001's forum_posts table is dropped by 0004 (the old
-# forum-ingestion system is gone). Create it first:
+# D1 (binding `DB`): tokens and login codes (0002) and the daily upload
+# quota (0005). Create it first:
 #   npx wrangler d1 create modcatalog-forum      (copy the database_id below)
 # then apply the migrations:
 #   npx wrangler d1 migrations apply modcatalog-forum --remote

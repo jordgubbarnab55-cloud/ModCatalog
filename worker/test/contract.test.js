@@ -1,10 +1,11 @@
-// site/trailer.js and site/upload-lib.js against the shared mod-contract fixtures.
+// site/trailer.js (read path only) and site/upload-lib.js against the shared
+// mod-contract fixtures.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { readTrailer, writeTrailer, TrailerError } from "../../site/trailer.js";
+import { readTrailer, TrailerError } from "../../site/trailer.js";
 import { classifyRawSet } from "../../site/upload-lib.js";
 
 const FIXTURES = new URL("../../mod-contract/fixtures/", import.meta.url);
@@ -35,20 +36,6 @@ for (const c of cases.read) {
     assert.ok(trailer, "expected a trailer");
     assert.equal(trailer.offset, c.expect.offset);
     assert.deepEqual(reported(trailer.meta), c.expect.metadata);
-  });
-}
-
-for (const c of cases.write) {
-  test(`trailer write: ${c.file}`, () => {
-    const bytes = fixture(c.file);
-    if (c.expect.result === "error") return assertKind(() => writeTrailer(bytes, c.metadata), c.expect.kind);
-    const { bytes: out, replaced, tocEnd } = writeTrailer(bytes, c.metadata);
-    assert.equal(tocEnd, c.expect.toc_end);
-    assert.equal(replaced, c.expect.replaced);
-    const size = new DataView(out.buffer).getUint32(tocEnd + 0x18, true);
-    assert.equal(new TextDecoder().decode(out.subarray(tocEnd + 0x20, tocEnd + 0x20 + size)), c.expect.payload);
-    assert.equal(out.length, c.expect.size);
-    assert.equal(sha256(out), c.expect.sha256);
   });
 }
 

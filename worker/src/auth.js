@@ -88,15 +88,6 @@ export async function mintLoginCode(db, { discordId, username, now }) {
   return { code };
 }
 
-// Read-only check (page load / link prefetch must never burn the code).
-export async function peekLoginCode(db, code, now) {
-  const row = (await q(db, "getCode", await sha256Hex(code))).row;
-  if (!row) return { ok: false, reason: "unknown" };
-  if (row.used_at) return { ok: false, reason: "used" };
-  if (Date.parse(row.expires_at) <= now.getTime()) return { ok: false, reason: "expired" };
-  return { ok: true, discordId: row.discord_id, username: row.username, expiresAt: row.expires_at };
-}
-
 // The atomic single-use burn: the UPDATE succeeds only when exactly one
 // row changed (a concurrent redeem, or a mint that invalidated the code,
 // won the race). Then mints the 90-day `web` token.

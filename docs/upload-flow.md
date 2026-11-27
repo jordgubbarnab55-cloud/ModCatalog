@@ -18,7 +18,8 @@ Pure helpers: `upload-lib.js`, `zip-lib.js`, `trailer.js` (exercised by
 ## What the browser sends
 
 The browser sends the package bytes **unchanged** and never writes a trailer.
-Metadata travels as `metadata.json` (`buildMetadataJson`):
+Metadata travels inside the manifest as its `metadata` object
+(`buildMetadata`):
 
 - `image` omitted: keep the package's cover; `null`: remove it;
 - never a `guid`;
@@ -40,17 +41,14 @@ Only via `#login=<code>`. `parseLoginHash` accepts only `#login=` + `lc_` +
 `history.replaceState`, so the code never stays in the address bar or history.
 `flow.start(btn, { loginCode })`.
 
-- `Session.begin()` goes straight to `stepLoginPeek`: **`POST /auth/peek`**
-  (non-burning). A stored token is ignored in this session; the link wins.
-- On ok, the identity comes from the peek, the code is kept as `pendingCode`,
-  and the choice step shows "Signed in as …".
-- **The redeem (`POST /auth/redeem`, the burn) happens only on the explicit
-  click** of "Upload a new mod" or "Update a mod" (`choose()`). It stores the
-  web token (replacing the stored one) and continues.
-- A code that is dead by then (expired or used): the stored token takes over
-  (a one-line note on the choice step) or, without one, an explanatory modal
+- `Session.begin()` goes straight to `stepLogin`, which redeems the code at
+  once: **`POST /auth/redeem`**. A stored token is ignored in this session; the
+  link wins. On ok, the web token replaces the stored one and the choice step
+  shows "Signed in as …".
+- A dead code (unknown, expired or used): the stored token takes over (a
+  one-line note on the choice step) or, without one, an explanatory modal
   ("Click the upload button in Discord again" plus "Paste a token instead"). A
-  dead code at page load does the same. A network failure gets a retry modal.
+  network failure gets a retry modal.
 - `GET /whoami` is not called in a link session.
 
 ### 1. Token
@@ -142,11 +140,15 @@ ModManager's `DevelopmentEditor` on the web:
 
 "Upload ‹title› v‹version›?" (an update: "Update ‹title› to v‹version›?") over
 the editor. Cancel returns to the editor with the values kept. Then the
-upload: manifest, `metadata.json`, and the files part-split at 90 MB, through
-`XMLHttpRequest` with a progress bar (not dismissible while sending).
+upload: the files part-split at 90 MB, then the manifest (which carries the
+metadata) last, through `XMLHttpRequest` with a progress bar (not dismissible
+while sending). The Worker starts processing on the manifest (`planRequests`
+orders the requests).
 
 - A failed request leaves the editor open underneath ("Back to the editor" or
   Esc keeps the form).
+- Parts answer `202 {"status":"stored"}` and the manifest
+  `202 {"status":"queued"}`; any non-202 fails the upload.
 - Once every request is accepted, the editor modal closes and the confirm
   modal becomes a static "Your mod is now processing" result
   (`statusMessage(202)`, one Close button). It does not poll the catalog; the

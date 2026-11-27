@@ -179,7 +179,7 @@ export function whoamiUrl(uploadUrl) {
   return u.toString();
 }
 
-/** The Worker's /auth/<name> ("peek" | "redeem" | "logout") URL next to its
+/** The Worker's /auth/<name> ("redeem" | "logout") URL next to its
  *  /upload URL. */
 export function authUrl(uploadUrl, name) {
   const u = new URL(uploadUrl);
@@ -189,13 +189,11 @@ export function authUrl(uploadUrl, name) {
   return u.toString();
 }
 
-/** Asks the Worker about `code`. `peek` is the read-only check (a page load
- *  or link prefetch must never burn it); `redeem` is the atomic single-use
- *  burn that returns the web token. Resolves to
- *  { ok: true, discordId, username, expiresAt } (redeem adds `token`) or
+/** Redeems the login `code`: the atomic single-use burn that returns the web
+ *  token. Resolves to { ok: true, token, discordId, username, expiresAt } or
  *  { ok: false, reason: "unknown" | "expired" | "used" | "network", message }.
  */
-async function codeRequest(url, code, withToken, fetchImpl) {
+export async function redeemCode(url, code, fetchImpl = fetch) {
   let res;
   try {
     res = await fetchImpl(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }), cache: "no-store" });
@@ -204,15 +202,10 @@ async function codeRequest(url, code, withToken, fetchImpl) {
   }
   let body = null;
   try { body = await res.json(); } catch { /* not JSON */ }
-  const ok = res.status === 200
-    && body
-    && (body.discordId != null)
-    && typeof body.username === "string" && body.username
-    && (!withToken || typeof body.token === "string" && body.token);
-  if (ok)
-    return withToken
-      ? { ok: true, token: body.token, discordId: String(body.discordId), username: body.username, expiresAt: body.expiresAt }
-      : { ok: true, discordId: String(body.discordId), username: body.username, expiresAt: body.expiresAt };
+  if (res.status === 200 && body && body.discordId != null
+      && typeof body.username === "string" && body.username
+      && typeof body.token === "string" && body.token)
+    return { ok: true, token: body.token, discordId: String(body.discordId), username: body.username, expiresAt: body.expiresAt };
   if (res.status === 404)
     return { ok: false, reason: "unknown", message: "This link is not valid. Click the upload button in Discord again." };
   if (res.status === 410) {
@@ -220,14 +213,6 @@ async function codeRequest(url, code, withToken, fetchImpl) {
     return { ok: false, reason, message: `This link has ${reason === "used" ? "already been used" : "expired"}. Click the upload button in Discord again.` };
   }
   return { ok: false, reason: "network", message: statusMessage(res.status) };
-}
-
-export function peekCode(url, code, fetchImpl = fetch) {
-  return codeRequest(url, code, false, fetchImpl);
-}
-
-export function redeemCode(url, code, fetchImpl = fetch) {
-  return codeRequest(url, code, true, fetchImpl);
 }
 
 /** Best-effort logout (the Worker deletes the token only when it is a `web`
@@ -279,13 +264,13 @@ export function resolveForm(form, forced = {}) {
   return { author, identifier, authorForced, identifierForced };
 }
 
-/** The metadata.json body (mod-contract/upload.md). `image` undefined keeps the
+/** The manifest's `metadata` object (mod-contract/upload.md). `image` undefined keeps the
  *  package's cover (an update with none reuses the mod's current one), null
  *  removes it, { mime, data: Uint8Array } replaces it. `form.targetIdentifier`
  *  (optional) makes the upload an UPDATE of that mod; without it the server
  *  mints a new mod's identifier from the title. No `guid` is ever sent: the
  *  server writes a fresh revision GUID. */
-export function buildMetadataJson(form) {
+export function buildMetadata(form) {
   const body = {
     title: (form.title ?? "").trim(),
     author: (form.author ?? "").trim(),
@@ -298,7 +283,7 @@ export function buildMetadataJson(form) {
   if (target) body.identifier = target;
   if (form.image === null) body.image = null;
   else if (form.image) body.image = { mime: form.image.mime, data: bytesToBase64(form.image.data) };
-  return JSON.stringify(body);
+  return body;
 }
 
 /** "Upload ‹title› v‹version› to the catalog?", or for an update
@@ -343,9 +328,8 @@ export function titleFromBase(base) {
 
 /** Part-split size: under the Worker's 100 MB request cap, with headroom. */
 export const PART_SIZE = 90 * 1024 * 1024;
-/** X-File-Idx of the manifest and of metadata.json (mod-contract/upload.md). */
+/** X-File-Idx of the manifest (mod-contract/upload.md). */
 export const MANIFEST_IDX = -1;
-export const METADATA_IDX = -2;
 
 export const partCount = (size) => Math.max(1, Math.ceil(size / PART_SIZE));
 
@@ -354,26 +338,28 @@ export function partRange(i, size) {
   return [i * PART_SIZE, Math.min(size, (i + 1) * PART_SIZE)];
 }
 
-/** The manifest of an upload set. `files`: [{ name, sha256, size }] in package order. */
-export function buildManifest(files, metadataSha256) {
+/** The manifest of an upload set. `files`: [{ name, sha256, size }] in package
+ *  order; `metadata` (optional): the object `buildMetadata` returns. */
+export function buildManifest(files, metadata) {
   const manifest = {
     files: files.map((f) => ({ name: f.name, sha256: f.sha256, parts: partCount(f.size) })),
   };
-  if (metadataSha256) manifest.metadata = { sha256: metadataSha256 };
+  if (metadata) manifest.metadata = metadata;
   return manifest;
 }
 
-/** The requests of a set, in send order: manifest, metadata, then every part.
+/** The requests of a set, in send order: every part, then the manifest (the
+ *  Worker starts processing on the manifest).
  *  Each: { kind, filename, fileIdx, partIdx, partCount, file?, range? }. */
-export function planRequests(files, hasMetadata) {
-  const reqs = [{ kind: "manifest", filename: "manifest.json", fileIdx: MANIFEST_IDX, partIdx: 0, partCount: 1 }];
-  if (hasMetadata) reqs.push({ kind: "metadata", filename: "metadata.json", fileIdx: METADATA_IDX, partIdx: 0, partCount: 1 });
+export function planRequests(files) {
+  const reqs = [];
   files.forEach((f, idx) => {
     const n = partCount(f.size);
     for (let i = 0; i < n; i++) {
       reqs.push({ kind: "part", filename: f.name, fileIdx: idx, partIdx: i, partCount: n, file: f.name, range: partRange(i, f.size) });
     }
   });
+  reqs.push({ kind: "manifest", filename: "manifest.json", fileIdx: MANIFEST_IDX, partIdx: 0, partCount: 1 });
   return reqs;
 }
 
@@ -468,5 +454,5 @@ export function updatePrefill(entry, packagePrefill, vocabulary = null) {
 // The pages load this as <script type="module">; expose the helpers
 // (module scope is not global). No-op under Node (tests import directly).
 if (typeof window !== "undefined") {
-  Object.assign(window, { configOk, whoamiUrl, authUrl, statusMessage, parseLoginHash, peekCode, redeemCode, logoutToken, findNewMod, findNewModByName, findPublishedMod, classifyRawSet, POLL_MAX_MS });
+  Object.assign(window, { configOk, whoamiUrl, authUrl, statusMessage, parseLoginHash, redeemCode, logoutToken, findNewMod, findNewModByName, findPublishedMod, classifyRawSet, POLL_MAX_MS });
 }

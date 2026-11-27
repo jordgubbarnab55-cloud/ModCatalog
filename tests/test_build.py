@@ -6,8 +6,6 @@ Run: python -m unittest discover -s tests
 import base64
 import contextlib
 import hashlib
-import hmac
-import http.server
 import io
 import json
 import os
@@ -16,7 +14,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import uuid
 import unittest
@@ -439,21 +436,19 @@ class TestIdentity(Base):
 
     def set_upload(self, uid: str, upload_id: str, metadata: dict | None = None,
                    utoc: bytes | None = None, payload: bytes = b"PAK", username: str | None = None) -> None:
-        """A loose set (+ optional metadata.json) in the inbox."""
+        """A loose set in the inbox: the parts, then the manifest (with the
+        optional `metadata` object) last."""
         self.client.create_release(build.INBOX_TAG, "inbox")
         d = self.client._release_dir(build.INBOX_TAG)
         files = [("mod.pak", payload), ("mod.ucas", b"UCAS"), ("mod.utoc", utoc or fake_toc())]
         manifest: dict = {"files": [{"name": n, "sha256": hashlib.sha256(b).hexdigest(), "parts": 1}
                                     for n, b in files]}
-        raw = json.dumps(metadata).encode("utf-8") if metadata is not None else None
-        if raw is not None:
-            manifest["metadata"] = {"sha256": hashlib.sha256(raw).hexdigest()}
+        if metadata is not None:
+            manifest["metadata"] = metadata
         stamp = S(uid, username)
-        (d / f"{stamp}__{upload_id}__manifest.json").write_bytes(json.dumps(manifest).encode("utf-8"))
         for idx, (n, b) in enumerate(files):
             (d / f"{stamp}__{upload_id}__f{idx}__p0of1__{n}").write_bytes(b)
-        if raw is not None:
-            (d / f"{stamp}__{upload_id}__metadata.json").write_bytes(raw)
+        (d / f"{stamp}__{upload_id}__manifest.json").write_bytes(json.dumps(manifest).encode("utf-8"))
 
     @staticmethod
     def meta(title: str = "Cool Mod", version: str = "1.0", **over) -> dict:
@@ -603,8 +598,7 @@ class TestIdentity(Base):
         self.set_upload("111", "u1", self.meta("Cool Mod", "1.0", identifier=5))
         self.assertEqual(self.run_process(), {"ok": 0, "rejected": 1})
         for blank in (None, "", "  "):  # = a new mod
-            self.assertIsNone(build.parse_upload_metadata(
-                json.dumps(self.meta(identifier=blank)).encode())["target"])
+            self.assertIsNone(build.parse_upload_metadata(self.meta(identifier=blank))["target"])
 
     def test_fresh_guid_per_upload(self):
         guid = str(uuid.uuid4())
@@ -663,13 +657,13 @@ class TestIdentity(Base):
         self.set_upload("111", "u1", self.meta("Cool Mod", "1.0", image={"mime": "image/png", "data": data}))
         self.run_process()
         cover = self.catalog_mods()["111.CoolMod"]["cover"]
-        # metadata.json update, image absent, a package WITH its own cover: the current cover wins
+        # manifest-metadata update, image absent, a package WITH its own cover: the current cover wins
         self.set_upload("111", "u2", self.meta("Cool Mod", "2.0", identifier="111.CoolMod"),
                         utoc=with_cover("Cool Mod", "2.0", jpeg), payload=b"P2")
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
         self.assertEqual(self.catalog_mods()["111.CoolMod"]["cover"], cover)
         self.assertEqual(self.stored("111.CoolMod", "Cool-Mod-2.0.zip")[1]["image"], png)
-        # no metadata.json (zip mode): the package's own trailer is the intent, its cover is kept
+        # no manifest metadata (zip mode): the package's own trailer is the intent, its cover is kept
         make_package(self.root / "z.zip", title="Cool Mod", version="3.0", identifier="111.CoolMod", image=jpeg)
         self.to_inbox(self.root / "z.zip", "111")
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
@@ -774,7 +768,7 @@ class TestOwnership(Base):
         self.assertEqual(self.stored("777.TestMod", "Test-Mod-1.0.0.zip")[1]["identifier"], "777.TestMod")
 
         # 777 owns it now: an update by 444 is rejected
-        self.assertEqual(build.parse_upload_metadata(b'{"title":"T","author":"a","identifier":"777.TestMod"}')
+        self.assertEqual(build.parse_upload_metadata({"title": "T", "author": "a", "identifier": "777.TestMod"})
                          ["target"], "777.TestMod")
         target = build.Staged({}, {"target": "777.TestMod"})
         with self.assertRaisesRegex(build.PackageError, "belongs to 777"):
@@ -879,16 +873,16 @@ class TestRebuild(Base):
         self.assertEqual(data["name"], build.load_catalog_identity()[0])
 
 
-class TestRebuildSelective(Base):
-    """The selective rebuild reads only the newest + oldest valid package per release."""
+class TestRebuildNewestOnly(Base):
+    """`rebuild` reads only the newest package of each release."""
 
     def setUp(self):
         super().setUp()
-        self.downloads = 0
+        self.downloads: list[str] = []
         orig = self.client.download_asset
 
         def counting(tag, name, dest):
-            self.downloads += 1
+            self.downloads.append(name)
             orig(tag, name, dest)
 
         self.client.download_asset = counting
@@ -907,7 +901,7 @@ class TestRebuildSelective(Base):
             m.pop("updated", None)
         return data
 
-    def test_selective_reads_newest_plus_oldest_and_agrees_with_full(self):
+    def test_reads_one_package_per_release_and_agrees_with_the_live_catalog(self):
         guid, ident = str(uuid.uuid4()), "12345.SelMod"
         for i, (ver, payload) in enumerate(
                 (("1.0", "A"), ("1.1", "B"), ("1.1", "C"), ("2.0", "D")), start=1):
@@ -916,37 +910,44 @@ class TestRebuildSelective(Base):
             self.to_inbox(self.root / f"p{i}.zip", "12345", f"{S('12345')}__{i}__p{i}.zip")
             self.run_process()
         tag = build.mod_tag(ident)
-        names = [a.name for a in self.client.list_assets(tag)]
-        self.assertEqual(len(names), 4)
+        self.assertEqual(len(self.client.list_assets(tag)), 4)
         self._stamp_oldest_first(tag, ["Sel-Mod-1.0.zip", "Sel-Mod-1.1-2.zip",
                                        "Sel-Mod-1.1.zip", "Sel-Mod-2.0.zip"])
 
         live = self._minus_updated(self.catalog.read_bytes())
         self.catalog.unlink()
-        self.downloads = 0
+        self.downloads.clear()
         build.rebuild(self.client, OWNER, REPO, self.catalog)
         self.assertEqual(self._minus_updated(self.catalog.read_bytes()), live)
-        # one release: the newest + the oldest valid probe, not all four zips
-        self.assertEqual(self.downloads, 2)
+        self.assertEqual(self.downloads, ["Sel-Mod-2.0.zip"])
 
-        # an invalid oldest asset: the probe falls back to the next one
+    def test_an_invalid_oldest_package_does_not_matter(self):
+        guid, ident = str(uuid.uuid4()), "12345.SelMod"
+        make_package(self.root / "p.zip", title="Sel Mod", version="2.0", guid=guid, identifier=ident)
+        self.to_inbox(self.root / "p.zip", "12345", f"{S('12345')}__1__p.zip")
+        self.run_process()
+        tag = build.mod_tag(ident)
         (self.root / "bad.zip").write_bytes(b"not a zip " + uuid.uuid4().bytes * 4)
         self.client.upload_asset(tag, self.root / "bad.zip", "Sel-Mod-0.9.9.zip")
-        self._stamp_oldest_first(tag, ["Sel-Mod-0.9.9.zip", "Sel-Mod-1.0.zip",
-                                       "Sel-Mod-1.1-2.zip", "Sel-Mod-1.1.zip",
-                                       "Sel-Mod-2.0.zip"])
+        self._stamp_oldest_first(tag, ["Sel-Mod-0.9.9.zip", "Sel-Mod-2.0.zip"])
+        live = self._minus_updated(self.catalog.read_bytes())
         self.catalog.unlink()
-        self.downloads = 0
+        self.downloads.clear()
         build.rebuild(self.client, OWNER, REPO, self.catalog)
         self.assertEqual(self._minus_updated(self.catalog.read_bytes()), live)
-        self.assertEqual(self.downloads, 3)  # the bad one + the oldest valid + the newest
+        self.assertEqual(self.downloads, ["Sel-Mod-2.0.zip"])
 
-        # the --full audit reads every package, and still gets the same catalog
-        self.catalog.unlink()
-        self.downloads = 0
-        build.rebuild(self.client, OWNER, REPO, self.catalog, full=True)
-        self.assertEqual(self._minus_updated(self.catalog.read_bytes()), live)
-        self.assertEqual(self.downloads, 5)
+    def test_an_invalid_newest_package_skips_the_release(self):
+        make_package(self.root / "p.zip", title="Sel Mod", version="1.0", identifier="12345.SelMod")
+        self.to_inbox(self.root / "p.zip", "12345", f"{S('12345')}__1__p.zip")
+        self.run_process()
+        tag = build.mod_tag("12345.SelMod")
+        (self.root / "bad.zip").write_bytes(b"not a zip " + uuid.uuid4().bytes * 4)
+        self.client.upload_asset(tag, self.root / "bad.zip", "Sel-Mod-9.9.zip")
+        self._stamp_oldest_first(tag, ["Sel-Mod-1.0.zip", "Sel-Mod-9.9.zip"])
+        with contextlib.redirect_stderr(io.StringIO()):
+            build.rebuild(self.client, OWNER, REPO, self.catalog)
+        self.assertEqual(json.loads(self.catalog.read_text(encoding="utf-8"))["mods"], [])
 
 
 class TestCatalogConfig(Base):
@@ -1158,8 +1159,8 @@ class TestRawUploads(Base):
 
 
 class TestUploadSets(Base):
-    """Upload sets: loose files or one .zip, plus an optional metadata.json
-    that the runner applies with `apply_metadata`."""
+    """Upload sets: loose files or one .zip, plus an optional manifest
+    `metadata` object that the runner applies with `apply_metadata`."""
 
     def upload_raw_bytes(self, name: str, data: bytes) -> None:
         d = self.client._release_dir(build.INBOX_TAG)
@@ -1173,17 +1174,18 @@ class TestUploadSets(Base):
         return fake_toc() + build.trailer.build_trailer(payload)
 
     def set_upload(self, uploader: str, uid: str, files: list, metadata: bytes | None = None,
-                   declare_metadata: bool = True, sha: str | None = None) -> None:
+                   with_manifest: bool = True) -> None:
+        """The parts, then the manifest last; `metadata` is the JSON text of the
+        manifest's `metadata` value."""
         self.client.create_release(build.INBOX_TAG, "inbox")
         manifest: dict = {"files": [{"name": n, "sha256": hashlib.sha256(b).hexdigest(), "parts": 1}
                                     for n, b in files]}
-        if metadata is not None and declare_metadata:
-            manifest["metadata"] = {"sha256": sha or hashlib.sha256(metadata).hexdigest()}
-        self.upload_raw_bytes(f"{S(uploader)}__{uid}__manifest.json", json.dumps(manifest).encode("utf-8"))
+        if metadata is not None:
+            manifest["metadata"] = json.loads(metadata)
         for idx, (n, b) in enumerate(files):
             self.upload_raw_bytes(f"{S(uploader)}__{uid}__f{idx}__p0of1__{n}", b)
-        if metadata is not None:
-            self.upload_raw_bytes(f"{S(uploader)}__{uid}__metadata.json", metadata)
+        if with_manifest:
+            self.upload_raw_bytes(f"{S(uploader)}__{uid}__manifest.json", json.dumps(manifest).encode("utf-8"))
 
     @staticmethod
     def meta_json(**over) -> bytes:
@@ -1313,7 +1315,7 @@ class TestUploadSets(Base):
         self.assertEqual(self.inbox_names(), [])
 
     def test_invalid_metadata_is_rejected_and_assets_deleted(self):
-        bad = [self.meta_json(title=""), self.meta_json(tags=["a"] * 11), b"{not json",
+        bad = [self.meta_json(title=""), self.meta_json(tags=["a"] * 11), b'"text"',
                self.meta_json(image={"mime": "image/png", "data": "***"}),
                self.meta_json(image={"mime": "image/gif", "data": ""}), b"[]"]
         for n, raw in enumerate(bad):
@@ -1322,23 +1324,43 @@ class TestUploadSets(Base):
         self.assertEqual(self.inbox_names(), [])
         self.assertEqual(self.client.list_tags(build.MOD_TAG_PREFIX), [])
 
-    def test_metadata_sha_mismatch_is_rejected(self):
-        self.set_upload("555", "m-11", self.loose(fake_toc()), self.meta_json(), sha="0" * 64)
-        self.assertEqual(self.run_process(), {"ok": 0, "rejected": 1})
+    def test_set_without_its_manifest_waits(self):
+        self.set_upload("555", "m-12", self.loose(fake_toc()), self.meta_json(), with_manifest=False)
+        self.assertEqual(self.run_process(), {"ok": 0, "rejected": 0})
+        self.assertEqual(len(self.inbox_names()), 3)
+        self.upload_raw_bytes(f"{S('555')}__m-12__manifest.json", json.dumps({
+            "files": [{"name": n, "sha256": hashlib.sha256(b).hexdigest(), "parts": 1}
+                      for n, b in self.loose(fake_toc())],
+            "metadata": json.loads(self.meta_json())}).encode("utf-8"))
+        self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
         self.assertEqual(self.inbox_names(), [])
 
-    def test_declared_metadata_not_yet_arrived_waits(self):
-        self.set_upload("555", "m-12", self.loose(fake_toc()), self.meta_json())
-        self.client.delete_asset(build.INBOX_TAG, f"{S('555')}__m-12__metadata.json")
+    def test_manifest_declaring_a_missing_part_waits_until_the_stale_sweep(self):
+        self.set_upload("555", "m-13", self.loose(fake_toc()), self.meta_json())
+        self.client.delete_asset(build.INBOX_TAG, f"{S('555')}__m-13__f1__p0of1__mod.ucas")
         self.assertEqual(self.run_process(), {"ok": 0, "rejected": 0})
-        self.assertEqual(len(self.inbox_names()), 4)
+        self.assertEqual(len(self.inbox_names()), 3)
+        old = time.time() - build.STALE_AFTER - 60
+        for name in self.inbox_names():
+            os.utime(self.client._release_dir(build.INBOX_TAG) / name, (old, old))
+        events: list = []
+        self.assertEqual(build.inbox_items_from_release(self.client, events), [])
+        self.assertEqual([e["reason"] for e in events], ["incomplete upload expired"])
+        self.assertEqual(self.inbox_names(), [])
 
-    def test_undeclared_metadata_is_ignored(self):
+    def test_metadata_is_part_of_the_manifest_only(self):
         guid = str(uuid.uuid4())
-        self.set_upload("555", "m-13", self.loose(self.trailer_utoc(guid, "Untouched")),
-                        self.meta_json(), declare_metadata=False)
+        self.set_upload("555", "m-14b", self.loose(self.trailer_utoc(guid, "Untouched")))
         self.assertEqual(self.run_process(), {"ok": 1, "rejected": 0})
         self.assertEqual(self.catalog_mods()["555.Untouched"]["name"], "Untouched")
+        self.assertEqual(self.inbox_names(), [])
+
+    def test_manifest_metadata_must_be_an_object(self):
+        self.upload_raw_bytes(f"{S('555')}__m-14c__f0__p0of1__mod.pak", b"PAK")
+        self.upload_raw_bytes(f"{S('555')}__m-14c__manifest.json", json.dumps({
+            "files": [{"name": "mod.pak", "sha256": hashlib.sha256(b"PAK").hexdigest(), "parts": 1}],
+            "metadata": "text"}).encode("utf-8"))
+        self.assertEqual(self.run_process(), {"ok": 0, "rejected": 1})
         self.assertEqual(self.inbox_names(), [])
 
     def test_zip_with_other_files_is_rejected(self):
@@ -1356,17 +1378,17 @@ class TestUploadSets(Base):
         self.set_upload("555", "m-15", [("Pack.zip", buf.getvalue())], self.meta_json())
         self.assertEqual(self.run_process(), {"ok": 0, "rejected": 1})
 
-    def test_parse_inbox_name_metadata(self):
-        self.assertEqual(build.parse_inbox_name(f"{S('555')}__u-1__metadata.json"),
-                         {"kind": "metadata", "uploader": build.Uploader("555", "user555"), "upload_id": "u-1"})
+    def test_a_metadata_json_asset_is_not_an_inbox_name(self):
+        self.assertIsNone(build.parse_inbox_name(f"{S('555')}__u-1__metadata.json"))
+        self.assertEqual(build.parse_inbox_name(f"{S('555')}__u-1__manifest.json")["kind"], "manifest")
 
     def test_apply_metadata_unit(self):
-        meta = build.parse_upload_metadata(self.meta_json(guid=None))
+        meta = build.parse_upload_metadata(json.loads(self.meta_json(guid=None)))
         out = build.apply_metadata(fake_toc(), meta, None, author="alice", identifier="555.EditedTitle")
         got = build.trailer.read_trailer(out)
         self.assertEqual((got["title"], got["author"], got["identifier"], got["tags"]),
                          ("Edited Title", "alice", "555.EditedTitle", ["Skin"]))
-        again = build.apply_metadata(out, build.parse_upload_metadata(self.meta_json(title="Second")),
+        again = build.apply_metadata(out, build.parse_upload_metadata(json.loads(self.meta_json(title="Second"))),
                                      build.existing_trailer(out), author="alice", identifier="555.EditedTitle")
         a = build.trailer.read_trailer(again)
         self.assertNotEqual(a["guid"], got["guid"])  # a fresh revision GUID on every write
@@ -1409,7 +1431,7 @@ class TestUploadSets(Base):
 
 class TestVerifiedAuthors(Base):
     """The catalog's author is the uploader's Discord username, whatever the
-    package or metadata.json says."""
+    package or the manifest metadata says."""
 
     def upload(self, uid: str, name: str, *, username: str | None = None, title: str = "Verified Mod",
                version: str = "1.0.0", identifier: str | None = None, author: str = "Self Declared") -> str:
@@ -1801,150 +1823,342 @@ class TestResultsFile(Base):
         self.assertFalse((self.root / "res.json").exists())
 
 
-class _NotifyHandler(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        self.server.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
-        code = self.server.statuses.pop(0) if self.server.statuses else 200
-        self.send_response(code)
-        self.end_headers()
-        if code == 200:
-            self.wfile.write(b"{}")
+class FakeDiscord:
+    """An injectable `http` for `announce`: records every call and answers with
+    the next scripted (status, body) per call, else 200 with a fresh id."""
 
-    def log_message(self, *args):
-        pass
-
-
-class _StubServer:
     def __init__(self):
-        self._httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _NotifyHandler)
-        self.requests: list[dict] = []
-        self._httpd.requests = self.requests
-        self._httpd.statuses = []
-        self.port = self._httpd.server_address[1]
+        self.calls: list[dict] = []
+        self.script: list = []  # (status, dict|None) or a callable(call) -> (status, dict|None)
+        self.sleeps: list[float] = []
+        self._next_id = 5000
 
-    @property
-    def statuses(self) -> list[int]:
-        return self._httpd.statuses
+    def __call__(self, method, url, headers, body):
+        call = {"method": method, "url": url, "headers": headers, "body": json.loads(body.decode("utf-8"))}
+        self.calls.append(call)
+        if self.script:
+            step = self.script.pop(0)
+            status, doc = step(call) if callable(step) else step
+        else:
+            self._next_id += 1
+            status, doc = 200, {"id": str(self._next_id)}
+        return status, (json.dumps(doc).encode("utf-8") if doc is not None else b"")
 
-    @statuses.setter
-    def statuses(self, v: list[int]) -> None:
-        self._httpd.statuses = v
-
-    def start(self):
-        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._httpd.shutdown()
-        self._httpd.server_close()
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
 
 
-class TestNotify(unittest.TestCase):
-    """`build.py notify`: the signed callback to the Worker (a local HTTP stub
-    on 127.0.0.1; the signature is recomputed with hmac)."""
+class TestAnnounce(Base):
+    """`build.py announce`: Discord posts from the run's events, the thread id
+    kept in the mod release's notes (offline: injected `http`, LocalClient)."""
+
+    ENV = {"DISCORD_BOT_TOKEN": "tok-secret", "FORUM_CHANNEL_ID": "900",
+           "NOTICES_CHANNEL_ID": "800", "SITE_URL": "https://site.example/",
+           "FORUM_TAG_IDS": json.dumps({"Skin": "11", "Audio": 12})}
 
     def setUp(self):
-        self.server = _StubServer()
-        self.server.start()
-        self.addCleanup(self.server.stop)
-        self.url = f"http://127.0.0.1:{self.server.port}"
-        self.secret = "test-secret"
+        super().setUp()
+        self.discord = FakeDiscord()
 
-    def events(self, n: int) -> list[dict]:
-        return [{"eventId": f"e{i}", "status": "published"} for i in range(n)]
+    def published(self, version="1.0.0", identifier="12345.TestMod", **over) -> dict:
+        ev = {"eventId": f"{identifier.lower()}:{version}", "status": "published", "mode": "new",
+              "uploaderId": "12345", "uploaderName": "user12345", "title": "Test Mod",
+              "version": version, "description": "A mod", "identifier": identifier,
+              "tags": ["Skin", "Nope", "Audio"], "coverUrl": "https://x/cover.png"}
+        ev.update(over)
+        return ev
 
-    def check_signatures(self) -> None:
-        self.assertTrue(self.server.requests)
-        for req in self.server.requests:
-            want = hmac.new(self.secret.encode("utf-8"), req["body"], hashlib.sha256).hexdigest()
-            self.assertEqual(req["headers"].get("X-Catalog-Signature"), want)
-            self.assertEqual(req["headers"].get("Content-Type"), "application/json")
-            doc = json.loads(req["body"])
-            self.assertIsInstance(doc["ts"], int)
-            self.assertIsInstance(doc["events"], list)
+    def rejected(self, **over) -> dict:
+        ev = {"eventId": "rej:12345:g", "status": "rejected", "mode": None, "uploaderId": "12345",
+              "uploaderName": "user12345", "reason": "bad package", "title": "Test Mod",
+              "version": None, "identifier": None}
+        ev.update(over)
+        return ev
 
-    def run_cli(self, results: str, env: dict | None = None) -> subprocess.CompletedProcess:
-        e = dict(os.environ) if env is None else env
-        return subprocess.run([sys.executable, str(ROOT / "build.py"), "notify",
-                              "--results", results], env=e, capture_output=True,
-                             text=True, cwd=str(ROOT))
+    def announce(self, events, env=None) -> tuple[int, int]:
+        self.client.create_release(build.mod_tag("12345.TestMod"), "Test Mod")
+        return build.announce_events(self.client, events, self.ENV if env is None else env,
+                                     http=self.discord, sleep=self.discord.sleep)
 
-    def test_body_shape_signature_and_header(self):
-        sent, total = build.notify_events(self.url, self.secret, self.events(3), delay=0.0)
-        self.assertEqual((sent, total), (1, 1))
-        self.assertEqual(len(self.server.requests), 1)
-        self.assertEqual(self.server.requests[0]["path"], "/catalog/events")
-        self.check_signatures()
-        self.assertEqual(len(json.loads(self.server.requests[0]["body"])["events"]), 3)
+    def notes(self, identifier="12345.TestMod") -> str:
+        return self.client.release_notes(build.mod_tag(identifier))
 
-    def test_chunking_25_events_into_3_requests(self):
-        sent, total = build.notify_events(self.url, self.secret, self.events(25), delay=0.0)
-        self.assertEqual((sent, total), (3, 3))
-        self.assertEqual([len(json.loads(r["body"])["events"]) for r in self.server.requests],
-                         [10, 10, 5])
-        self.check_signatures()
+    def test_first_publish_creates_a_thread_and_records_its_id(self):
+        self.assertEqual(self.announce([self.published()]), (1, 1))
+        (call,) = self.discord.calls
+        self.assertEqual(call["url"], "https://discord.com/api/v10/channels/900/threads")
+        self.assertEqual(call["headers"]["Authorization"], "Bot tok-secret")
+        self.assertTrue(call["headers"]["User-Agent"])
+        body = call["body"]
+        self.assertEqual(body["name"], "Test Mod")
+        self.assertEqual(body["applied_tags"], ["11", "12"])
+        msg = body["message"]
+        self.assertEqual(msg["content"],
+                         "<@12345> published **Test Mod** v1.0.0\nA mod\nhttps://site.example/")
+        self.assertEqual(msg["allowed_mentions"], {"parse": [], "users": ["12345"]})
+        self.assertEqual(msg["embeds"], [{"footer": {"text": "mod-id: 12345.TestMod"},
+                                          "image": {"url": "https://x/cover.png"}}])
+        self.assertEqual(build.thread_id_from_notes(self.notes()), "5001")
 
-    def test_no_events_no_request(self):
-        sent, total = build.notify_events(self.url, self.secret, [], delay=0.0)
-        self.assertEqual((sent, total), (0, 0))
-        self.assertEqual(self.server.requests, [])
+    def test_follow_up_posts_into_the_recorded_thread(self):
+        self.announce([self.published()])
+        self.discord.calls.clear()
+        self.assertEqual(self.announce([self.published("1.1.0")]), (1, 1))
+        (call,) = self.discord.calls
+        self.assertEqual(call["url"], "https://discord.com/api/v10/channels/5001/messages")
+        self.assertEqual(call["body"]["content"], "<@12345> uploaded **v1.1.0**\nA mod")
+        self.assertEqual(call["body"]["allowed_mentions"], {"parse": [], "users": ["12345"]})
+        self.assertEqual(build.thread_id_from_notes(self.notes()), "5001")
 
-    def test_retry_on_5xx_then_success(self):
-        self.server.statuses = [500, 503]  # both attempts 5xx: a failure, one retry
-        sent, total = build.notify_events(self.url, self.secret, self.events(1), delay=0.0)
-        self.assertEqual((sent, total), (0, 1))
-        self.assertEqual(len(self.server.requests), 2)
-        self.server.statuses = [500, 200]
-        sent, total = build.notify_events(self.url, self.secret, self.events(1), delay=0.0)
-        self.assertEqual((sent, total), (1, 1))
-        self.assertEqual(len(self.server.requests), 4)
+    def test_a_deleted_thread_is_recreated_and_the_line_rewritten(self):
+        tag = build.mod_tag("12345.TestMod")
+        self.client.create_release(tag, "Test Mod")
+        self.client.set_release_notes(tag, "Some text\n\ndiscord-thread: 77\n\nmore text")
+        for status in (404, 403):
+            self.client.set_release_notes(tag, "Some text\n\ndiscord-thread: 77\n\nmore text")
+            self.discord.calls.clear()
+            self.discord.script = [(status, {"message": "gone"})]
+            self.assertEqual(self.announce([self.published("2.0.0")]), (1, 1))
+            self.assertEqual([c["url"].rsplit("/", 2)[-2:] for c in self.discord.calls],
+                             [["77", "messages"], ["900", "threads"]])
+            self.assertEqual(self.notes(), f"Some text\n\ndiscord-thread: {self.discord._next_id}\n\nmore text")
 
-    def test_4xx_is_not_retried(self):
-        self.server.statuses = [404]
-        sent, total = build.notify_events(self.url, self.secret, self.events(1), delay=0.0)
-        self.assertEqual((sent, total), (0, 1))
-        self.assertEqual(len(self.server.requests), 1)
+    def test_other_discord_errors_leave_the_mapping_alone(self):
+        tag = build.mod_tag("12345.TestMod")
+        self.client.create_release(tag, "Test Mod")
+        self.client.set_release_notes(tag, "discord-thread: 77")
+        self.discord.script = [(500, None)]
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.announce([self.published()]), (0, 1))
+        self.assertEqual(len(self.discord.calls), 1)
+        self.assertEqual(self.notes(), "discord-thread: 77")
 
-    def test_server_down_is_a_clean_failure(self):
-        import socket
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-        s.close()  # nothing listens there anymore
-        sent, total = build.notify_events(f"http://127.0.0.1:{port}", self.secret,
-                                         self.events(1), delay=0.0)
-        self.assertEqual((sent, total), (0, 1))
+    def test_rejection_notice(self):
+        ev = self.rejected(title="Ev`il @everyone", reason="x" * 400)
+        self.assertEqual(self.announce([ev]), (1, 1))
+        (call,) = self.discord.calls
+        self.assertEqual(call["url"], "https://discord.com/api/v10/channels/800/messages")
+        self.assertEqual(call["body"]["allowed_mentions"], {"parse": [], "users": ["12345"]})
+        self.assertEqual(call["body"]["content"],
+                         "<@12345> your upload of **Evil everyone** was not accepted: " + "x" * 300)
 
-    def test_cli_missing_env_exits_zero_without_a_request(self):
-        env = {k: v for k, v in os.environ.items() if not k.startswith("CATALOG_CALLBACK")}
-        p = self.run_cli("does-not-exist.json", env)
+    def test_rejection_without_a_notices_channel_is_only_logged(self):
+        env = {k: v for k, v in self.ENV.items() if k != "NOTICES_CHANNEL_ID"}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.announce([self.rejected()], env), (1, 1))
+        self.assertEqual(self.discord.calls, [])
+        self.assertIn("bad package", out.getvalue())
+
+    def test_user_text_is_cleaned_and_clipped(self):
+        ev = self.published(title="`@Big` " + "t" * 300, description="@here `code` " + "d" * 600,
+                            version="v@1" + "9" * 80)
+        self.announce([ev])
+        body = self.discord.calls[0]["body"]
+        self.assertEqual(body["name"], ("Big " + "t" * 300)[:100])
+        content = body["message"]["content"]
+        self.assertNotIn("@here", content)
+        self.assertNotIn("`", content)
+        self.assertLessEqual(len(content), 2000)
+        self.assertEqual(body["message"]["allowed_mentions"]["parse"], [])
+
+    def test_forum_tags_are_capped_and_a_bad_map_is_ignored(self):
+        env = dict(self.ENV, FORUM_TAG_IDS=json.dumps({f"T{i}": str(i) for i in range(9)}))
+        self.announce([self.published(tags=[f"T{i}" for i in range(9)])], env)
+        self.assertEqual(self.discord.calls[0]["body"]["applied_tags"], ["0", "1", "2", "3", "4"])
+        self.discord.calls.clear()
+        self.client.set_release_notes(build.mod_tag("12345.TestMod"), "")
+        for bad in ("{oops", "[]"):
+            self.discord.calls.clear()
+            self.client.set_release_notes(build.mod_tag("12345.TestMod"), "")
+            self.announce([self.published()], dict(self.ENV, FORUM_TAG_IDS=bad))
+            self.assertEqual(self.discord.calls[0]["body"]["applied_tags"], [])
+
+    def test_a_failing_event_does_not_stop_the_others(self):
+        self.client.create_release(build.mod_tag("12345.Other"), "Other")
+        self.discord.script = [(500, None)]
+        events = [self.published(), self.published(identifier="12345.Other", title="Other"),
+                  {"status": "published"}, "junk", self.rejected()]
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.announce(events), (2, 5))
+        self.assertEqual(len(self.discord.calls), 3)
+        self.assertEqual(self.notes(), "")
+        self.assertEqual(build.thread_id_from_notes(self.notes("12345.Other")), "5001")
+
+    def test_a_rate_limit_is_retried_once(self):
+        self.discord.script = [(429, {"retry_after": 0.5}), (200, {"id": "42"})]
+        self.assertEqual(self.announce([self.published()]), (1, 1))
+        self.assertEqual(self.discord.sleeps, [0.5])
+        self.assertEqual(len(self.discord.calls), 2)
+        self.assertEqual(build.thread_id_from_notes(self.notes()), "42")
+
+    def test_the_rate_limit_wait_is_capped_and_a_second_429_fails(self):
+        self.discord.script = [(429, {"retry_after_ms": 60000}), (429, {"retry_after": 1})]
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.announce([self.published()]), (0, 1))
+        self.assertEqual(self.discord.sleeps, [5.0])
+        self.assertEqual(len(self.discord.calls), 2)
+        self.assertEqual(self.notes(), "")
+
+    def test_notes_line_helpers(self):
+        self.assertIsNone(build.thread_id_from_notes("nothing here"))
+        self.assertEqual(build.thread_id_from_notes("a\r\ndiscord-thread: 9\r\nb"), "9")
+        self.assertEqual(build.notes_with_thread("", "5"), "discord-thread: 5")
+        self.assertEqual(build.notes_with_thread("Mod\n", "5"), "Mod\n\ndiscord-thread: 5")
+        self.assertEqual(build.notes_with_thread("x\ndiscord-thread: 1\ny", "5"), "x\ndiscord-thread: 5\ny")
+
+
+class TestAnnounceCli(Base):
+    def run_cli(self, results: str, env: dict) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(ROOT / "build.py"), "announce", "--results", results,
+                              "--client", "local", "--root", str(self.root)],
+                             env=env, capture_output=True, text=True, cwd=str(ROOT))
+
+    def clean_env(self) -> dict:
+        drop = ("DISCORD_BOT_TOKEN", "FORUM_CHANNEL_ID", "NOTICES_CHANNEL_ID", "FORUM_TAG_IDS", "SITE_URL")
+        return {k: v for k, v in os.environ.items() if k not in drop}
+
+    def test_missing_env_is_a_noop(self):
+        res = self.root / "res.json"
+        res.write_text(json.dumps([{"status": "rejected"}]), encoding="utf-8")
+        p = self.run_cli(str(res), self.clean_env())
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("not set", p.stdout)
-        self.assertEqual(self.server.requests, [])
+        env = dict(self.clean_env(), DISCORD_BOT_TOKEN="t")  # no forum channel
+        p = self.run_cli(str(res), env)
+        self.assertEqual((p.returncode, "not set" in p.stdout), (0, True))
 
-    def test_cli_missing_results_file_is_a_noop(self):
-        env = dict(os.environ)
-        env["CATALOG_CALLBACK_URL"] = self.url
-        env["CATALOG_CALLBACK_SECRET"] = self.secret
-        p = self.run_cli("does-not-exist.json", env)
-        self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(self.server.requests, [])
+    def test_missing_or_broken_results_file_exits_zero(self):
+        env = dict(self.clean_env(), DISCORD_BOT_TOKEN="tok-secret", FORUM_CHANNEL_ID="1")
+        self.assertEqual(self.run_cli(str(self.root / "nope.json"), env).returncode, 0)
+        bad = self.root / "bad.json"
+        bad.write_text("{oops", encoding="utf-8")
+        p = self.run_cli(str(bad), env)
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("not valid JSON", p.stderr)
+        self.assertNotIn("tok-secret", p.stdout + p.stderr)
 
-    def test_cli_sends_and_never_prints_the_secret(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            json.dump(self.events(2), f)
-            name = f.name
-        self.addCleanup(os.unlink, name)
-        env = dict(os.environ)
-        env["CATALOG_CALLBACK_URL"] = self.url
-        env["CATALOG_CALLBACK_SECRET"] = self.secret
-        p = self.run_cli(name, env)
-        self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("sent 1/1", p.stdout)
-        self.assertEqual(len(self.server.requests), 1)
-        self.check_signatures()
-        self.assertNotIn(self.secret, p.stdout + p.stderr)
+    def test_announce_cli_function_uses_the_injected_http(self):
+        res = self.root / "res.json"
+        ev = {"eventId": "rej:1:g", "status": "rejected", "uploaderId": "1", "reason": "no", "title": None}
+        res.write_text(json.dumps([ev]), encoding="utf-8")
+        fake = FakeDiscord()
+        args = build.argparse.Namespace(results=str(res), client="local", root=str(self.root),
+                                        owner=OWNER, repo=REPO)
+        env = {"DISCORD_BOT_TOKEN": "t", "FORUM_CHANNEL_ID": "1", "NOTICES_CHANNEL_ID": "2"}
+        self.assertEqual(build.announce_cli(args, env, http=fake, sleep=fake.sleep), 0)
+        self.assertEqual([c["url"].rsplit("/", 2)[-2:] for c in fake.calls], [["2", "messages"]])
+        self.assertIn("unknown", fake.calls[0]["body"]["content"])
+
+
+class TestAssetLabels(Base):
+    """Package zips carry `<content_hash>:<package_fingerprint>` labels; the
+    duplicate and nothing-changed checks read them without downloading."""
+
+    def upload(self, uid: str, name: str, **kw) -> None:
+        make_package(self.root / f"{name}.zip", **kw)
+        self.to_inbox(self.root / f"{name}.zip", uid, f"{S(uid)}__{self.next_ts()}__{name}.zip")
+
+    def mod_downloads(self) -> list[str]:
+        calls: list[str] = []
+        orig = self.client.download_asset
+
+        def counting(tag, name, dest):
+            if tag != build.INBOX_TAG:
+                calls.append(f"{tag}/{name}")
+            orig(tag, name, dest)
+
+        self.client.download_asset = counting
+        return calls
+
+    def test_uploaded_zip_label_matches_its_content_and_fingerprint(self):
+        self.upload("12345", "a", title="Lab Mod")
+        self.run_process()
+        (asset,) = [a for a in self.client.list_assets(build.mod_tag("12345.LabMod")) if a.name.endswith(".zip")]
+        with tempfile.TemporaryDirectory() as td:
+            z = pathlib.Path(td) / "p.zip"
+            self.client.download_asset(build.mod_tag("12345.LabMod"), asset.name, z)
+            members = build.zip_members(z.read_bytes())
+        self.assertEqual(asset.label, f"{build.content_hash(members)}:{build.package_fingerprint(members)}")
+        self.assertEqual(build.parse_asset_label(asset.label),
+                         (build.content_hash(members), build.package_fingerprint(members)))
+
+    def test_label_files_are_not_listed_as_assets(self):
+        self.upload("12345", "a", title="Lab Mod")
+        self.run_process()
+        names = [a.name for a in self.client.list_assets(build.mod_tag("12345.LabMod"))]
+        self.assertEqual(sorted(names), ["Lab-Mod-1.0.0.zip"])
+        self.client.delete_asset(build.mod_tag("12345.LabMod"), "Lab-Mod-1.0.0.zip")
+        self.assertEqual(self.client.list_assets(build.mod_tag("12345.LabMod")), [])
+        self.assertEqual(list((self.root / "meta" / build.mod_tag("12345.LabMod") / "labels").iterdir()), [])
+
+    def test_parse_asset_label(self):
+        good = "a" * 64 + ":" + "b" * 64
+        self.assertEqual(build.parse_asset_label(good), ("a" * 64, "b" * 64))
+        for bad in ("", None, "a" * 64, "a" * 64 + ":" + "b" * 63, "X" * 64 + ":" + "b" * 64):
+            self.assertIsNone(build.parse_asset_label(bad))
+
+    def test_nothing_changed_and_duplicates_download_nothing_from_mod_releases(self):
+        downloads = self.mod_downloads()
+        self.upload("12345", "a", title="Lab Mod", payload="same")
+        self.run_process()
+        self.upload("12345", "b", title="Lab Mod", payload="same", identifier="12345.LabMod")
+        _, err = self._run_stderr()
+        self.assertIn("nothing changed", err)
+        self.upload("67890", "c", title="Lab Mod", payload="same")
+        _, err = self._run_stderr()
+        self.assertIn("duplicate of the existing mod", err)
+        self.assertEqual(downloads, [])
+
+    def _run_stderr(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            summary = self.run_process()
+        return summary, err.getvalue()
+
+    def test_an_unlabelled_asset_is_unknown_and_never_matches(self):
+        self.upload("12345", "a", title="Lab Mod", payload="same")
+        self.run_process()
+        tag = build.mod_tag("12345.LabMod")
+        (self.root / "meta" / tag / "labels" / "Lab-Mod-1.0.0.zip").unlink()
+        out = io.StringIO()
+        self.upload("12345", "b", title="Lab Mod", payload="same", identifier="12345.LabMod")
+        with contextlib.redirect_stdout(out):
+            summary = self.run_process()
+        self.assertEqual(summary, {"ok": 1, "rejected": 0})
+        self.assertIn("no usable label", out.getvalue())
+        self.assertEqual(sorted(a.name for a in self.client.list_assets(tag) if a.name.endswith(".zip")),
+                         ["Lab-Mod-1.0.0-2.zip", "Lab-Mod-1.0.0.zip"])
+
+    def test_gh_client_upload_uses_the_path_hash_label_syntax(self):
+        calls: list[list[str]] = []
+        gh = build.GhClient("o", "r")
+        gh._run = lambda args, cwd=None: calls.append(args) or ""
+        src = pathlib.Path("x") / "p.zip"
+        gh.upload_asset("t", src, "p.zip", "lab:el")
+        gh.upload_asset("t", src, "p.zip")
+        self.assertEqual(calls[0], ["release", "upload", "t", f"{src}#lab:el"])
+        self.assertEqual(calls[1], ["release", "upload", "t", str(src)])
+
+    def test_gh_client_reads_labels_and_notes(self):
+        gh = build.GhClient("o", "r")
+        release = {"body": "hello\r\ndiscord-thread: 5", "assets": [
+            {"name": "a.zip", "size": 1, "created_at": "2026-01-01T00:00:00Z", "label": "L"},
+            {"name": "b.zip", "size": 1, "created_at": "2026-01-01T00:00:00Z", "label": None}]}
+        gh._api = lambda path: release
+        self.assertEqual([a.label for a in gh.get_release("t").assets], ["L", ""])
+        self.assertEqual(gh.release_notes("t"), "hello\ndiscord-thread: 5")
+        calls: list[list[str]] = []
+        gh._run = lambda args, cwd=None: calls.append(args) or ""
+        gh.set_release_notes("t", "new notes")
+        self.assertEqual(calls, [["release", "edit", "t", "--notes", "new notes"]])
+
+    def test_local_client_release_notes_round_trip(self):
+        self.client.create_release("mod-x", "X")
+        self.assertEqual(self.client.release_notes("mod-x"), "")
+        self.client.set_release_notes("mod-x", "a\nb")
+        self.assertEqual(self.client.release_notes("mod-x"), "a\nb")
+        self.assertEqual(self.client.list_assets("mod-x"), [])
 
 
 class TestDownloads(unittest.TestCase):

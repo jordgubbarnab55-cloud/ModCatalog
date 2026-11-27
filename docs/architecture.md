@@ -7,9 +7,8 @@
 | GitHub Releases | Storage. One release per mod (`mod-<slug>-<hex>`), plus one fixed `inbox` release for incoming uploads |
 | GitHub Actions | Processing. Drains the inbox, validates, re-homes packages, regenerates `site/catalog.json`, deploys Pages |
 | GitHub Pages | Serves `site/` (the page, `config.json`, `catalog.json`) and nothing else; `downloads.json` (per-mod download counts, generated at deploy time) and `tags.json` ride along on each deploy |
-| Cloudflare Worker (`worker/`) | Discord interactions, token and login-code auth, streaming upload pass-through, runner event mirror |
-| D1 (`DB`) | Tokens, login codes, forum thread mapping, seen event ids |
-| KV (`TOKENS`) | Upload quota counters, inbox release-id cache |
+| Cloudflare Worker (`worker/`) | Discord interactions, token and login-code auth, streaming upload pass-through |
+| D1 (`DB`) | Tokens, login codes, daily upload quota |
 | ModManager's Browse tab | Reads `catalog.json`, downloads release assets |
 
 ## Data flow
@@ -23,7 +22,7 @@ browser / ModManager --upload--> Worker --stream--> release "inbox"
                                                          |
               release mod-<slug>-<hex> (zip + cover) + site/catalog.json
                                                          |
-                       Pages deploy  -->  notify --> Worker /catalog/events --> Discord
+                       Pages deploy  -->  announce  -->  Discord
 ```
 
 The Worker never parses a package: free-plan CPU is 10 ms and client-supplied
@@ -60,10 +59,7 @@ runner (`docs/inbox-pipeline.md`).
 | Discord interaction ACK | 3 s | `/discord` handlers make no GitHub calls |
 | GitHub release asset | 2 GiB | Built package zip and reassembled sets are capped here |
 | Daily upload quota per user | 2 GiB by default | Worker answers 429 |
-| Worker subrequests (free) | 50 | Event mirror uses at most 3 per event, 10 events per request |
 | GitHub `GITHUB_TOKEN` (fine-grained) | expires, 1 year max | Expired token makes the Worker answer 502 |
-
-KV is eventually consistent; a slightly late quota count is acceptable.
 
 ## Where things live
 

@@ -1,10 +1,8 @@
 name: Deploy site
 
-# Deploys the site whenever site/** changes (a human editing index.html,
-# upload.html or config.json). Pushes made by the bot with GITHUB_TOKEN do
-# not trigger it, so there is no loop with the catalog workflows. Pages
-# deploys via a custom Actions workflow are not subject to the 10-builds/hour
-# soft limit.
+# Deploys whenever site/** or the tag vocabulary changes on main. Pushes made
+# by the bot with GITHUB_TOKEN do not trigger it, so there is no loop with
+# the catalog workflows.
 
 on:
   push:
@@ -18,43 +16,18 @@ permissions:
   pages: write
   id-token: write
 
+concurrency:
+  group: catalog
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Add the tag vocabulary to the site
-        run: cp mod-contract/tags.json site/tags.json
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      # Regenerate the inline icon sprite from site/icons/*.svg (idempotent;
-      # the deployed sprite is always fresh even if the committed one is stale).
-      - name: Sync the icon sprite
-        run: python scripts/sync-icons.py
-
-      # The deployed catalog.json carries config.json's title/description at
-      # once; the committed copy picks them up on the next catalog run.
-      - name: Apply the catalog title from config.json
-        run: python build.py retitle
-
-      # A fresh site/downloads.json on every deploy. continue-on-error: a
-      # transient GitHub API failure must not block the site deploy; the
-      # next refresh or deploy replaces the missing counts (the page then
-      # hides them).
-      - name: Refresh the download counts
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python build.py downloads
-        continue-on-error: true
-
-      - name: Upload site artifact
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: site
-
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
+      - uses: ./.github/actions/deploy-site

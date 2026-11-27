@@ -1,12 +1,12 @@
 // Offline tests for the pure helpers of the upload modals in site/upload-lib.js:
-// package selection, image rules, the forced-field resolution, metadata.json,
+// package selection, image rules, the forced-field resolution, the metadata object,
 // the manifest/request plan and the published-mod matcher.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
   classifySelection, imageVerdict, scaledSize, sniffImageMime, imageInfoText, bytesToBase64,
-  deriveIdentifier, resolveForm, buildMetadataJson, confirmText, doneText, titleFromBase,
+  deriveIdentifier, resolveForm, buildMetadata, confirmText, doneText, titleFromBase,
   PART_SIZE, partCount, partRange, buildManifest, planRequests, sha256Hex, findPublishedMod,
   MAX_PACKAGE_BYTES, IMAGE_HARD_LIMIT, IMAGE_WARN_BYTES,
 } from "../../site/upload-lib.js";
@@ -106,21 +106,21 @@ test("resolveForm: forced author and a static or title-following identifier", ()
   assert.equal(resolveForm({ author: "x", title: "Z" }, live).identifier, "123.Z");
 });
 
-test("buildMetadataJson: fields, trimming, no guid, the target identifier and the three image states", () => {
+test("buildMetadata: fields, trimming, no guid, the target identifier and the three image states", () => {
   const form = { title: " T ", author: " A ", description: "d\nd", version: " 1.0 ", gameVersion: "5.6", tags: ["Skin"] };
-  const base = JSON.parse(buildMetadataJson(form));
+  const base = buildMetadata(form);
   assert.deepEqual(base, { title: "T", author: "A", description: "d\nd", version: "1.0", game_version: "5.6", tags: ["Skin"] });
   assert.ok(!("image" in base) && !("guid" in base) && !("identifier" in base)); // a new mod
 
-  assert.equal(JSON.parse(buildMetadataJson({ ...form, image: null })).image, null);
-  const withImg = JSON.parse(buildMetadataJson({ ...form, guid: "g", image: { mime: "image/png", data: Uint8Array.from([1, 2, 3]) } }));
+  assert.equal(buildMetadata({ ...form, image: null }).image, null);
+  const withImg = buildMetadata({ ...form, guid: "g", image: { mime: "image/png", data: Uint8Array.from([1, 2, 3]) } });
   assert.deepEqual(withImg.image, { mime: "image/png", data: "AQID" });
   assert.ok(!("guid" in withImg)); // never sent: the server writes a fresh revision GUID
 
   // an update names its mod; the forced (display) identifier is never sent as a target
-  const update = JSON.parse(buildMetadataJson({ ...form, identifier: "42.T", targetIdentifier: " 42.Old " }));
+  const update = buildMetadata({ ...form, identifier: "42.T", targetIdentifier: " 42.Old " });
   assert.equal(update.identifier, "42.Old");
-  assert.ok(!("identifier" in JSON.parse(buildMetadataJson({ ...form, identifier: "42.T", targetIdentifier: " " }))));
+  assert.ok(!("identifier" in buildMetadata({ ...form, identifier: "42.T", targetIdentifier: " " })));
 });
 
 test("confirmText and titleFromBase", () => {
@@ -142,27 +142,26 @@ test("part ranges cover a file exactly", () => {
     [[0, PART_SIZE], [PART_SIZE, PART_SIZE * 2], [PART_SIZE * 2, size]]);
 });
 
-test("buildManifest: files in order, part counts, optional metadata hash", () => {
+test("buildManifest: files in order, part counts, optional metadata object", () => {
   const files = [{ name: "a.utoc", sha256: "aa", size: 10 }, { name: "a.pak", sha256: "bb", size: PART_SIZE + 1 }];
-  assert.deepEqual(buildManifest(files, "cc"), {
+  const metadata = { title: "T", author: "A", tags: [] };
+  assert.deepEqual(buildManifest(files, metadata), {
     files: [{ name: "a.utoc", sha256: "aa", parts: 1 }, { name: "a.pak", sha256: "bb", parts: 2 }],
-    metadata: { sha256: "cc" },
+    metadata,
   });
-  assert.ok(!("metadata" in buildManifest(files, null)));
+  assert.ok(!("metadata" in buildManifest(files)));
 });
 
-test("planRequests: manifest, metadata, then each part in file order", () => {
+test("planRequests: every part in file order, then the manifest last", () => {
   const files = [{ name: "a.utoc", size: 10 }, { name: "a.pak", size: PART_SIZE + 1 }];
-  const plan = planRequests(files, true);
+  const plan = planRequests(files);
   assert.deepEqual(plan.map((r) => [r.kind, r.filename, r.fileIdx, r.partIdx, r.partCount]), [
-    ["manifest", "manifest.json", -1, 0, 1],
-    ["metadata", "metadata.json", -2, 0, 1],
     ["part", "a.utoc", 0, 0, 1],
     ["part", "a.pak", 1, 0, 2],
     ["part", "a.pak", 1, 1, 2],
+    ["manifest", "manifest.json", -1, 0, 1],
   ]);
-  assert.deepEqual(plan[4].range, [PART_SIZE, PART_SIZE + 1]);
-  assert.equal(planRequests(files, false).length, 4);
+  assert.deepEqual(plan[2].range, [PART_SIZE, PART_SIZE + 1]);
 });
 
 test("sha256Hex", async () => {

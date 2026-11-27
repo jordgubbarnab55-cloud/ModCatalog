@@ -1,8 +1,9 @@
 // The upload flow on index.html: a chain of modals — token (only when none is
 // stored), Upload-or-Update choice, (Update: the mod picker), package, metadata
 // editor, confirm — then the upload itself through
-// the Worker's set mode (mod-contract/upload.md): the package is sent
-// unchanged plus a metadata.json, and the catalog's runner writes the trailer.
+// the Worker's set mode (mod-contract/upload.md): the package parts are sent
+// unchanged, then a manifest carrying the metadata; the catalog's runner writes
+// the trailer.
 // The token is checked with the Worker's /whoami: the catalog publishes the
 // mod under that Discord username (the editor shows author and identifier
 // greyed). Nothing but that check leaves the browser before the confirm step.
@@ -10,10 +11,10 @@
 import { el, openModal, focusFirst } from "./modal.js";
 import { createEditor } from "./upload-editor.js";
 import {
-  classifySelection, buildManifest, buildMetadataJson, planRequests, sha256Hex, statusMessage,
+  classifySelection, buildManifest, buildMetadata, planRequests, sha256Hex, statusMessage,
   confirmText, titleFromBase, forcedFields, authorMismatchNote, whoamiUrl,
   checkToken, selectionLabel, ownMods, filterPickerMods, updatePrefill, NO_OWN_MODS_TEXT,
-  authUrl, peekCode, redeemCode, logoutToken,
+  authUrl, redeemCode, logoutToken,
 } from "./upload-lib.js";
 import { readUtocFromZip, shapeProblem, ZipError, MAX_UTOC_BYTES } from "./zip-lib.js";
 import { readTrailer, parseTocHeader, TrailerError, TOC_SUPPORTED_VERSION } from "./trailer.js";
@@ -165,8 +166,7 @@ export function createUploadFlow(ctx) {
       this.editor = null;
       this.editorModal = null;
       this.identity = null;
-      this.loginCode = null;  // the Discord link's code, until peeked
-      this.pendingCode = null;  // a peeked code, redeemed on the explicit click
+      this.loginCode = null;  // the Discord link's code, until redeemed
       this.linkNote = null;   // the choice step's one-line note (a dead link fell back to the stored token)
       this.lastForm = null;
       this.pkg = null;
@@ -203,21 +203,22 @@ export function createUploadFlow(ctx) {
       // refetched so a mod uploaded minutes ago can be updated
       this.mods = ctx.loadMods().catch(() => []);
       // a Discord link wins: the stored token (if any) is ignored in this session
-      if (this.loginCode) this.stepLoginPeek();
+      if (this.loginCode) this.stepLogin();
       else if (tokenStore.get()) this.stepCheck();
       else this.stepToken();
     }
 
-    /** The Discord link's first check (a non-burning peek). */
-    async stepLoginPeek() {
-      const m = this.open("Checking your link", "small");
-      m.panel.append(el("h2", "", "Checking your link…"));
+    /** Redeems the Discord link's code (the single-use burn): the web token
+     *  replaces the stored one and the flow continues signed in. */
+    async stepLogin() {
+      const m = this.open("Signing you in", "small");
+      m.panel.append(el("h2", "", "Signing you in…"));
       this.show(m);
-      const result = await peekCode(authUrl(ctx.uploadUrl(), "peek"), this.loginCode);
+      const result = await redeemCode(authUrl(ctx.uploadUrl(), "redeem"), this.loginCode);
       if (this.ended) return;
       if (result.ok) {
+        tokenStore.set(result.token);
         this.identity = { discordId: result.discordId, username: result.username };
-        this.pendingCode = this.loginCode;
         this.loginCode = null;
         this.stepChoice();
         return;
@@ -226,6 +227,7 @@ export function createUploadFlow(ctx) {
         this.stepLinkFailed(result.message);
         return;
       }
+      this.loginCode = null;
       // the link is dead (unknown/expired/used): the stored token wins, if any
       if (tokenStore.get()) {
         this.linkNote = "Your Discord link is no longer valid, so this browser's saved sign-in is used instead.";
@@ -258,14 +260,15 @@ export function createUploadFlow(ctx) {
       close.focus({ preventScroll: true });
     }
 
-    /** The link check could not be made (network / server): retry. `retry`
-     *  is what "Try again" does (the peek, or a re-deem of the pending code). */
-    stepLinkFailed(message, retry = () => this.stepLoginPeek()) {
-      const m = this.open("Link check failed", "small");
-      m.panel.append(el("h2", "", "Could not check your link"), el("p", "upload-status err", message));
+    /** The redeem could not be made (network / server): retry. The response
+     *  may have burned the code anyway, in which case the retry comes back
+     *  'used' and the dead-link path applies. */
+    stepLinkFailed(message) {
+      const m = this.open("Sign-in failed", "small");
+      m.panel.append(el("h2", "", "Could not sign you in"), el("p", "upload-status err", message));
       const retryBtn = el("button", "btn primary", "Try again");
       retryBtn.type = "button";
-      retryBtn.addEventListener("click", () => retry());
+      retryBtn.addEventListener("click", () => this.stepLogin());
       const actions = el("div", "actions");
       actions.append(this.differentToken(), retryBtn);
       m.panel.appendChild(actions);
@@ -337,7 +340,7 @@ export function createUploadFlow(ctx) {
         return b;
       };
       const upload = option("Upload a new mod", "Publish a mod that is not in the catalog yet.");
-      upload.addEventListener("click", () => this.choose("upload", null, upload));
+      upload.addEventListener("click", () => this.choose("upload"));
       const update = option("Update a mod", own.length > 0
         ? `Publish a new version of one of your ${own.length} mod${own.length === 1 ? "" : "s"}.`
         : "Publish a new version of a mod you uploaded.");
@@ -353,7 +356,7 @@ export function createUploadFlow(ctx) {
         update.setAttribute("aria-describedby", tip.id);
         cell.appendChild(tip);
       } else {
-        update.addEventListener("click", () => this.choose("update", own, update));
+        update.addEventListener("click", () => this.choose("update", own));
       }
       const row = el("div", "choice");
       row.append(upload, cell);
@@ -364,33 +367,7 @@ export function createUploadFlow(ctx) {
       upload.focus({ preventScroll: true });
     }
 
-    /** The one-time burn of the peeked link code happens on this explicit
-     *  click only (never on begin, never on a timer); it replaces the stored
-     *  token. A dead link falls back to the stored token, if any. */
-    async choose(mode, own = null, option = null) {
-      if (this.pendingCode) {
-        if (option) option.disabled = true;   // a short busy state on the clicked option
-        const result = await redeemCode(authUrl(ctx.uploadUrl(), "redeem"), this.pendingCode);
-        if (this.ended) return;
-        if (option) option.disabled = false;
-        if (result.ok) {
-          tokenStore.set(result.token);
-          this.identity = { discordId: result.discordId, username: result.username };
-          this.pendingCode = null;
-        } else if (result.reason === "network") {
-          // keep the code: the response may have burned it anyway, in which
-          // case the retry comes back 'used' and the dead-link path applies
-          this.stepLinkFailed(result.message, () => this.choose(mode, own, null));
-          return;
-        } else if (tokenStore.get()) {
-          this.linkNote = "Your Discord link is no longer valid, so this browser's saved sign-in is used instead.";
-          this.stepCheck();
-          return;
-        } else {
-          this.stepLinkDead(result.message);
-          return;
-        }
-      }
+    choose(mode, own = null) {
       if (this.mode !== mode) this.lastForm = null;
       this.mode = mode;
       this.target = null;
@@ -515,7 +492,6 @@ export function createUploadFlow(ctx) {
         if (token) await logoutToken(authUrl(ctx.uploadUrl(), "logout"), token);  // best-effort
         tokenStore.clear();
         this.identity = null;
-        this.pendingCode = null;
         this.stepToken();
       });
       return link;
@@ -813,8 +789,7 @@ export function createUploadFlow(ctx) {
           finish(button("Use a different account", () => {
             tokenStore.clear();
             this.identity = null;
-            this.pendingCode = null;
-            modal.close();
+                modal.close();
             this.confirm = null;
             this.stepToken();
           }), back);
@@ -834,26 +809,21 @@ export function createUploadFlow(ctx) {
     async send(form, onFraction, setStatus) {
       const url = ctx.uploadUrl();
       const files = this.pkg.selection.files.map((f) => ({ ...f, file: this.pkg.byName.get(f.name) }));
-      const metadataText = buildMetadataJson(form);
-
       const hashed = [];
       for (const f of files) {
         setStatus(`Checking ${f.name}…`, "wait");
         hashed.push({ name: f.name, size: f.size, sha256: await sha256Hex(new Uint8Array(await f.file.arrayBuffer())) });
       }
-      const metadataBlob = new Blob([metadataText]);
-      const manifestBlob = new Blob([JSON.stringify(buildManifest(hashed, await sha256Hex(new TextEncoder().encode(metadataText))))]);
+      const manifestBlob = new Blob([JSON.stringify(buildManifest(hashed, buildMetadata(form)))]);
       const fileByName = new Map(files.map((f) => [f.name, f.file]));
-      const plan = planRequests(hashed, true);
-      const sizeOf = (r) => (r.kind === "manifest" ? manifestBlob.size : r.kind === "metadata" ? metadataBlob.size : r.range[1] - r.range[0]);
+      const plan = planRequests(hashed);
+      const sizeOf = (r) => (r.kind === "manifest" ? manifestBlob.size : r.range[1] - r.range[0]);
       const total = plan.reduce((sum, r) => sum + sizeOf(r), 0);
 
       const uploadId = crypto.randomUUID();
       let sent = 0;
       for (const r of plan) {
-        const data = r.kind === "manifest" ? manifestBlob
-          : r.kind === "metadata" ? metadataBlob
-          : fileByName.get(r.file).slice(r.range[0], r.range[1]);
+        const data = r.kind === "manifest" ? manifestBlob : fileByName.get(r.file).slice(r.range[0], r.range[1]);
         setStatus(r.kind === "part"
           ? `Uploading ${r.filename}${r.partCount > 1 ? ` — part ${r.partIdx + 1}/${r.partCount}` : ""}…`
           : "Uploading the details…", "wait");

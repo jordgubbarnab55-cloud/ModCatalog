@@ -30,6 +30,13 @@ Every step below is a live action. Do them **in order**.
    - Settings → Secrets and variables → Actions → *Variables* → add
      `ADMIN_DISCORD_IDS` = your Discord user id (step 1; comma-separated
      for several admins).
+   - For the Discord announcements (`build.py announce`): the secret
+     `DISCORD_BOT_TOKEN` (the bot token from step 1) and the variables
+     `FORUM_CHANNEL_ID` (the forum the mod threads go to),
+     `NOTICES_CHANNEL_ID` (rejection notices; blank = none),
+     `FORUM_TAG_IDS` (JSON object, catalog tag → forum tag id; `{}` for
+     none) and `SITE_URL` (the Pages URL, ending in `/`). Without the token
+     or the forum id the step is a no-op.
 5. **Verify.**
    - Open `https://jordgubbarnab55-cloud.github.io/ModCatalog/` — the
      page loads (empty catalog at first).
@@ -53,9 +60,9 @@ Every step below is a live action. Do them **in order**.
 **Part 3 — Cloudflare Worker**
 
 7. In `worker/`:
-   - `npx wrangler kv namespace create TOKENS` (older wrangler:
-     `npx wrangler kv:namespace create TOKENS`). Paste the printed id into
-     `wrangler.toml` (`[[kv_namespaces]] id = "..."`).
+   - `npx wrangler d1 create modcatalog-forum`. Paste the printed
+     `database_id` into `wrangler.toml` (`[[d1_databases]]`), then
+     `npx wrangler d1 migrations apply modcatalog-forum --remote`.
    - Fill `GITHUB_OWNER` (= `jordgubbarnab55-cloud`), `GITHUB_REPO`
      (= `ModCatalog`) and `ALLOWED_ORIGIN`
      (= `https://jordgubbarnab55-cloud.github.io`) in `wrangler.toml`.

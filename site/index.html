@@ -1297,8 +1297,7 @@
     }
     // The Discord login link (#login=<code>): take the code, strip the hash
     // at once (the code never stays in the address bar or history), then
-    // start the flow with it (a non-burning peek; the redeem happens on
-    // the explicit Upload/Update click).
+    // start the flow with it (the flow redeems it at once).
     const loginCode = parseLoginHash(location.hash);
     if (loginCode) {
         history.replaceState(null, '', location.pathname + location.search);

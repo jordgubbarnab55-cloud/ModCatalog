@@ -8,11 +8,11 @@ mod releases.
 | Command | Does |
 |---|---|
 | `python build.py process --from-inbox` | Drain the `inbox` release (list, download, upload, delete through the client interface), validate, re-home, merge into `site/catalog.json` |
-| `python build.py process --from-dir DIR --as-uid ID --as-username NAME` | Treat the directory's zips as uploads by that Discord account (seeding); never notifies |
-| `python build.py rebuild` | Enumerate all `mod-*` releases and regenerate the whole catalog from scratch |
+| `python build.py process --from-dir DIR --as-uid ID --as-username NAME` | Treat the directory's zips as uploads by that Discord account (seeding); never announces |
+| `python build.py rebuild` | Enumerate all `mod-*` releases and regenerate the whole catalog from scratch, reading the newest package of each |
 | `python build.py retitle` | Re-apply only the catalog `name` and `description` from `site/config.json` |
 | `python build.py downloads` | Write `site/downloads.json`: per-mod download counts from the release assets' `download_count` (not committed; regenerated at deploy time) |
-| `python build.py notify --results PATH [--url URL] [--secret S]` | POST the run's events to the Worker |
+| `python build.py announce --results PATH` | Post the run's events to Discord |
 
 `--config` selects another config file. `--owner` and `--repo` default to
 `GITHUB_OWNER`, `GITHUB_REPO`, or `GITHUB_REPOSITORY`.
@@ -21,7 +21,7 @@ mod releases.
 
 Writes the run's outcome events as a JSON array, atomically, at the end. It
 writes `[]` when there were none, including on the empty-inbox early return.
-`--from-dir` may use it too but never notifies. Events:
+`--from-dir` may use it too but never announces. Events:
 
 - `published`: the catalog entry's fields reused as-is, plus
   `eventId` = `<identKeyLower>:<package sha256>`, `mode` = new/update,
@@ -37,12 +37,13 @@ writes `[]` when there were none, including on the empty-inbox early return.
 
 ### `rebuild`
 
-Reads each release's **newest** package (the entry, the `author` rename rule,
-the `content_hash`) plus the **oldest valid** one, probed oldest-first with
-fallback (the locked identifier; one download in practice). Cost is O(mods),
-not O(upload history). `--full` (the `rebuild.yml` input `full`) reads every
-package of every release. Every read goes through the release URL, so a
-rebuild adds one or two to each mod's download count (`docs` section above).
+Reads each release's **newest** package only: the entry, the locked
+identifier and owner (`apply_metadata` stamps both on every stored package),
+the `author` rename rule and the `content_hash`. The duplicate tie-break
+("earliest first package") uses `asset_order_key` of the release's oldest zip,
+from asset metadata, with no download. Cost is O(mods), not O(upload
+history). Each read goes through the release URL, so a rebuild adds one to
+each mod's download count.
 
 ### `downloads`
 
@@ -73,32 +74,69 @@ exits non-zero without writing; the callers decide whether that is fatal
 (`docs/workflows.md`). A catalog with zero mods writes an empty `mods`.
 The counts are GitHub's raw asset counters: every request to the release URL
 counts (browser, ModManager, bots, retries) and so do the pipeline's own
-reads — a `rebuild` downloads the newest and oldest package of every release
-(every package with `--full`), so it adds one or two to each mod, and
-deleting an asset removes its count, so a total can go down.
+reads — a `rebuild` downloads the newest package of every release, so it adds
+one to each mod, and deleting an asset removes its count, so a total can go
+down.
 
-### `notify`
+### `announce`
 
-- POSTs to `CATALOG_CALLBACK_URL/catalog/events`; `--url` and `--secret`
-  default from the environment variables `CATALOG_CALLBACK_URL` and
-  `CATALOG_CALLBACK_SECRET`. Missing values produce a one-line note and exit 0.
-- 10 events per request. `X-Catalog-Signature` is the hex HMAC-SHA256 of the
-  raw body keyed with the secret.
-- Sends an explicit `User-Agent`: Cloudflare returns 403 for the default
-  `Python-urllib` one.
-- One retry 2 s later on a network error or 5xx; 4xx is final.
-- Never raises and always exits 0; failures are logged. The secret is never
-  printed. A missing results file is a no-op.
+Posts the results file's events to the Discord REST API (`urllib`, explicit
+`User-Agent`, `Authorization: Bot <token>`). It reads, from the environment:
+
+| Variable | Meaning |
+|---|---|
+| `DISCORD_BOT_TOKEN` | Bot token (never printed) |
+| `FORUM_CHANNEL_ID` | The forum channel mods get threads in |
+| `NOTICES_CHANNEL_ID` | Channel for rejection notices; blank = log only |
+| `FORUM_TAG_IDS` | JSON object, catalog tag -> forum tag id (default `{}`; unknown tags ignored, at most 5 applied) |
+| `SITE_URL` | Link appended to the first message of a thread |
+
+`--client`, `--root`, `--owner` and `--repo` behave as for the other commands
+(owner and repo are needed to reach the mod releases).
+
+- A missing token or forum channel prints one line and exits 0. A missing or
+  unreadable results file is a no-op. The command never raises and always
+  exits 0; one failing event is logged and never stops the others. There is
+  no batching and no event-id dedup: each run announces its own events once.
+- `published`: `<@uploaderId> published **title** vVERSION` plus the cleaned
+  description and the site link, as a new forum thread (named after the
+  title) with the cover embed (footer `mod-id: <identifier>`) and the mapped
+  forum tags. When the mod already has a thread, `<@uploaderId> uploaded
+  **vVERSION**` plus the description is posted into it instead.
+- The thread id lives in the mod release's notes as a line
+  `discord-thread: <id>` (`PackageClient.release_notes` /
+  `set_release_notes`; the rest of the notes is preserved). A 404 or 403 on
+  the post means the thread is gone: a new thread is created and the line
+  rewritten.
+- `rejected`: `<@uploaderId> your upload of **title** was not accepted:
+  reason` in the notices channel (a log line when none is configured).
+- Text from events is cleaned: backticks and `@` removed, then truncated
+  (title 200, forum thread name 100, version 50, description 500, reason 300,
+  message 2000). Every payload sets `allowed_mentions` to `parse: []` plus the
+  uploader only, so user text can never ping `@everyone` or a role.
+- A 429 is retried once after the `retry_after` wait (capped at 5 s); a second
+  429 fails that event.
+- The HTTP call is injectable (`announce_events(..., http=...)`), so the tests
+  run offline.
 
 ## Clients
 
-Both implement `PackageClient`. `release_assets(prefix)` returns `tag ->
+Both implement `PackageClient`. `release_notes(tag)` and
+`set_release_notes(tag, text)` read and replace a release's body (`GhClient`
+through the releases API and `gh release edit`; `LocalClient` through a notes
+file under `<root>/meta/<tag>/`). `release_assets(prefix)` returns `tag ->
 assets` for every release whose tag starts with `prefix`; `GhClient` makes
 one paginated `repos/{owner}/{repo}/releases` call (the same endpoint
 `list_tags` uses), `LocalClient` iterates its release folders and fills
 `Asset.downloads` from its `downloads` dict keyed `(tag, asset name)` (a
 test seam; default 0). `GhClient` reads `download_count` into
 `Asset.downloads` (a non-negative int; anything else is 0).
+
+`Asset.label` is the GitHub asset label (`""` when none). `upload_asset(tag,
+src, name, label=None)` sets it: `GhClient` uploads with gh's `path#label`
+syntax, `LocalClient` stores a sidecar file under `<root>/meta/<tag>/labels/`
+that listings never show. Every package zip uploaded to a `mod-*` release is
+labelled `<content_hash>:<package_fingerprint>` (full hex of both).
 
 - `GhClient` (default): shells out to the preinstalled `gh` CLI, auth via
   `GH_TOKEN`. Releases are GitHub release tags, assets are release assets.
@@ -117,7 +155,7 @@ package.
    installer): no unsafe member paths, exactly one complete
    `.utoc/.ucas/.pak` (+ `.sig`) set grouped by base name
    (`classify_members` / `classify_raw`).
-3. That set's `.utoc` has a valid trailer, or a `metadata.json` is present.
+3. That set's `.utoc` has a valid trailer, or the manifest carries `metadata`.
 4. New-mod/update resolution with ownership, not a duplicate of another mod's
    current entry, not an unchanged re-upload (`docs/inbox-pipeline.md`).
 

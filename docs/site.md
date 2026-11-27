@@ -11,7 +11,7 @@ HTML**. The upload flow is in `docs/upload-flow.md`.
 | `index.html` | Page, styles, icon sprite, boot code |
 | `catalog-lib.js` | Pure helpers for cards and filters |
 | `modal.js` | Modal helper and motion |
-| `upload-*.js`, `zip-lib.js`, `trailer.js` | Upload flow (`docs/upload-flow.md`) |
+| `upload-*.js`, `zip-lib.js`, `trailer.js` (read-only) | Upload flow (`docs/upload-flow.md`) |
 | `config.json` | `{"title", "uploadUrl", ...}`, the deployer's settings |
 | `catalog.json` | Generated; never edit |
 | `tags.json` | Copied from `mod-contract/tags.json` at deploy time |

@@ -2,38 +2,42 @@
 // API. Plain JS ES module, zero dependencies.
 //
 // Everything that talks to a service is injectable: the handler takes `env`
-// (KV + D1 bindings + secrets + vars) and a `fetch` function, so tests can supply
+// (D1 binding + secrets + vars) and a `fetch` function, so tests can supply
 // fakes. The Worker never stores file bytes: the upload body is streamed
 // straight through to GitHub releases (no buffering, no cold storage).
 //
+// Every inbox asset name starts with the uploader stamp (uploaderStamp).
 // Two upload shapes:
 //   * zip packages: X-Filename <name>.zip, one upload per package, no upload id
-//
-// Every inbox asset name starts with the uploader stamp (uploaderStamp).
 //   * upload sets: either the loose .utoc/.ucas/.pak(/.sig) files or exactly
-//     one .zip (part-split when over 100 MB), plus a manifest.json upload and
-//     an optional metadata.json upload, all tagged with the same X-Upload-Id;
-//     the workflow reassembles, applies the metadata and zips on the runner
-//     (this Worker cannot — 10 ms CPU, stateless).
+//     one .zip (part-split when over 100 MB), then a manifest.json upload
+//     last, all tagged with the same X-Upload-Id; the workflow reassembles,
+//     applies the manifest's metadata and zips on the runner (this Worker
+//     cannot: 10 ms CPU, stateless).
 import {
-  authenticateToken, mintManualToken, peekLoginCode,
+  authenticateToken, mintManualToken,
   redeemLoginCode, deleteWebToken, mintLoginCode, revokeAllTokens,
 } from "./auth.js";
-import { handleCatalogEvents } from "./mirror.js";
+import { chargeQuota, refundQuota } from "./quota.js";
 
 const MAX_BODY_BYTES = 100 * 1024 * 1024; // Cloudflare free-plan request-body limit
 const DEFAULT_DAILY_BYTES = 2147483648; // 2 GiB of uploads per user per UTC day
 const RAW_EXTENSIONS = [".pak", ".ucas", ".utoc", ".sig", ".zip"];
-// Fixed X-File-Idx values of the two non-file parts of an upload set.
+// The X-File-Idx of an upload set's manifest (every other index is a file).
 const MANIFEST_IDX = "-1";
-const METADATA_IDX = "-2";
-const INBOX_CACHE_KEY = "cache:inbox_release_id";
-const INBOX_CACHE_MS = 3600 * 1000;
 const INBOX_TAG = "inbox";
 const INBOX_WAKE_WORKFLOW = "process-inbox.yml";
 // GitHub's API rejects requests without a User-Agent (403 "administrative
 // rules"); the Worker's fetch sends none by default.
 const GITHUB_UA = "ModCatalog-Worker";
+
+// The inbox release id per `owner/repo`, held in isolate memory; a miss
+// is looked up from GitHub.
+const inboxReleaseIds = new Map();
+
+export function clearInboxCache() {
+  inboxReleaseIds.clear();
+}
 
 // ---------------------------------------------------------------- helpers
 
@@ -119,29 +123,28 @@ export default {
 /**
  * Testable handler.
  * @param {Request} request
- * @param {object} env  { TOKENS: kv-like, DB: D1, DISCORD_PUBLIC_KEY, GITHUB_TOKEN,
- *                       GITHUB_OWNER, GITHUB_REPO, ALLOWED_ORIGIN,
- *                       UPLOAD_DAILY_LIMIT? }
+ * @param {object} env  { DB: D1, DISCORD_PUBLIC_KEY, GITHUB_TOKEN, GITHUB_OWNER,
+ *                       GITHUB_REPO, ALLOWED_ORIGIN, SITE_URL,
+ *                       UPLOAD_DAILY_BYTES? }
  * @param {(url:string, init?:object)=>Promise<Response>} fetchImpl
  */
 export async function handle(request, env, fetchImpl) {
   const url = new URL(request.url);
-  if (url.pathname === "/discord") return handleDiscord(request, env, fetchImpl);
+  if (url.pathname === "/discord") return handleDiscord(request, env);
   if (url.pathname === "/upload") return handleUpload(request, env, fetchImpl);
   if (url.pathname === "/whoami") return handleWhoami(request, env);
-  if (url.pathname === "/auth/peek") return handleAuthPeek(request, env);
   if (url.pathname === "/auth/redeem") return handleAuthRedeem(request, env);
   if (url.pathname === "/auth/logout") return handleAuthLogout(request, env);
-  if (url.pathname === "/catalog/events") return handleCatalogEvents(request, env, fetchImpl);
   return json({ error: "not found" }, 404);
 }
 
 // ------------------------------------------------------- POST /discord
 // Interactions endpoint only (slash commands over HTTPS; no gateway).
 // Discord requires the Ed25519 signature check and a reply within 3 s, so
-// this handler makes NO GitHub calls.
+// this handler makes NO GitHub calls. Every reply is the interaction
+// response itself: 200 with a JSON body.
 
-async function handleDiscord(request, env, fetchImpl) {
+async function handleDiscord(request, env) {
   if (request.method !== "POST") return json({ error: "POST only" }, 405);
   const rawBody = await request.text();
   const ok = await verifyDiscordSignature(
@@ -156,17 +159,14 @@ async function handleDiscord(request, env, fetchImpl) {
 
   if (body.type === 3) {
     const customId = body.data && body.data.custom_id;
-    if (customId === "mods_upload") return handleModsUpload(body, env, fetchImpl);
-    if (customId === "mods_signout") return handleModsSignout(body, env, fetchImpl);
+    if (customId === "mods_upload") return handleModsUpload(body, env);
+    if (customId === "mods_signout") return handleModsSignout(body, env);
     return json({ error: "unknown component" }, 400);
   }
 
   if (body.type !== 2) {
-    // PING is ACKed through the callback endpoint too (type 1 = PONG).
     if (body.type !== 1) return json({ error: "unexpected interaction type" }, 400);
-    const pong = await sendCallback(body, env, { type: 1 }, fetchImpl);
-    if (!pong) return json({ error: "discord callback failed" }, 502);
-    return new Response(null, { status: 202 }); // ACK: no body
+    return json({ type: 1 }); // PONG
   }
 
   const { discordId, username } = interactionUser(body);
@@ -176,96 +176,56 @@ async function handleDiscord(request, env, fetchImpl) {
   const command = (body.data && body.data.name) || "";
 
   if (command === "token") {
-    if (!username) return json({ error: "missing username" }, 400);
     // One `manual` token per user: minting replaces the previous one
     // (re-minting is also the revoke path); web tokens are left alone.
     const token = await mintManualToken(env.DB, { discordId, username, now: new Date() });
-    const ack = await sendCallback(body, env, {
-      type: 4,
-      data: {
-        content:
-          `## 🔑 Your upload token:\n` + `\`\`\`\n${token}\n\`\`\`\n` +
-          `**This token is only shown once. Copy it before you dismiss this message.**\n` + 
-          `If you need a new token, or want to revoke your existing one, just regenerate a new one. The old one becomes invalid.`,
-        flags: 64, // ephemeral: only this user sees it
-      },
-    }, fetchImpl);
-    if (!ack) return json({ error: "discord callback failed" }, 502);
-    return new Response(null, { status: 202 }); // ACK: no body
+    return ephemeral(
+      "## 🔑 Your upload token:\n" + "```\n" + token + "\n```\n" +
+      "**This token is only shown once. Copy it before you dismiss this message.**\n" +
+      "If you need a new token, or want to revoke your existing one, just regenerate a new one. The old one becomes invalid.");
   }
 
   return json({ error: `unknown command ${command}` }, 400);
 }
 
+// An ephemeral reply (type 4 + flags 64): only the invoking user sees it.
+// Component replies are never type 7, which would edit the public #mods
+// post in place.
+function ephemeral(content, components) {
+  const data = { content, flags: 64 };
+  if (components) data.components = components;
+  return json({ type: 4, data });
+}
+
 // The #mods channel's "Upload or update a mod" button: mints a one-time
 // login code and replies (ephemeral) with a link button to the site
-// carrying it (URL fragment, never a query string). Same canonical flow
-// as /token: 202 ACK, then sendCallback {type: 4, flags: 64}. The code
-// is never logged; the callback call log only shows its hash-free shape.
-async function handleModsUpload(body, env, fetchImpl) {
+// carrying it (URL fragment, never a query string). The code is never
+// logged.
+async function handleModsUpload(body, env) {
   const { discordId, username } = interactionUser(body);
   if (!discordId) return json({ error: "missing user id" }, 400);
-  if (!username) {
-    // type 4 + flags 64: an ephemeral REPLY. (A type-7 callback on a
-    // message-component interaction is applied to the ORIGINAL message —
-    // it would edit the public #mods post in place.)
-    const ack = await sendCallback(body, env, { type: 4, data: { content: "I couldn't find your Discord account name, so I can't sign you in.", flags: 64 } }, fetchImpl);
-    if (!ack) return json({ error: "discord callback failed" }, 502);
-    return new Response(null, { status: 202 }); // ACK: no body
-  }
+  if (!username) return ephemeral("I couldn't find your Discord account name, so I can't sign you in.");
   const res = await mintLoginCode(env.DB, { discordId, username, now: new Date() });
-  if (res.limited) {
-    const ack = await sendCallback(body, env, { type: 4, data: { content: "You're clicking too fast, try again in a minute.", flags: 64 } }, fetchImpl);
-    if (!ack) return json({ error: "discord callback failed" }, 502);
-    return new Response(null, { status: 202 }); // ACK: no body
-  }
-  const ack = await sendCallback(body, env, {
-    type: 4,
-    data: {
-      content:
-        "This link signs you in to the catalog uploader. " +
-        "It works once and expires in 5 minutes. Don't share it.",
-      flags: 64, // ephemeral: only this user sees it
+  if (res.limited) return ephemeral("You're clicking too fast, try again in a minute.");
+  return ephemeral(
+    "This link signs you in to the catalog uploader. " +
+    "It works once and expires in 5 minutes. Don't share it.",
+    [{
+      type: 1,
       components: [{
-        type: 1,
-        components: [{
-          type: 2, style: 5, label: "Open the uploader",
-          url: loginLinkUrl(env.SITE_URL, res.code),
-        }],
+        type: 2, style: 5, label: "Open the uploader",
+        url: loginLinkUrl(env.SITE_URL, res.code),
       }],
-    },
-  }, fetchImpl);
-  if (!ack) return json({ error: "discord callback failed" }, 502);
-  return new Response(null, { status: 202 }); // ACK: no body
+    }]);
 }
 
 // The #mods channel's "Sign out everywhere" button: deletes all the
-// clicker's tokens (manual + web) and invalidates unused codes. The
-// confirmation is an ephemeral reply (type 4 + flags 64) — never an edit
-// of the public #mods post.
-async function handleModsSignout(body, env, fetchImpl) {
+// clicker's tokens (manual + web) and invalidates unused codes.
+async function handleModsSignout(body, env) {
   const { discordId } = interactionUser(body);
   if (!discordId) return json({ error: "missing user id" }, 400);
   await revokeAllTokens(env.DB, discordId);
-  const ack = await sendCallback(body, env, { type: 4, data: { content: "Signed out everywhere. Your /token token and all browser sessions are revoked.", flags: 64 } }, fetchImpl);
-  if (!ack) return json({ error: "discord callback failed" }, 502);
-  return new Response(null, { status: 202 }); // ACK: no body
-}
-
-// The canonical response flow: ACK the original request with a 202 (no
-// body), then POST the actual response to the interaction callback
-// endpoint (valid for 15 minutes; the 3 s budget covers the ACK only).
-// Returns true when Discord accepted the callback.
-async function sendCallback(body, env, responseObj, fetchImpl) {
-  const res = await fetchImpl(
-    `https://discord.com/api/v10/interactions/${body.id}/${body.token}/callback`,
-    { method: "POST", headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-      }, body: JSON.stringify(responseObj) });
-  if (res.ok || res.status === 204) return true;
-  console.error(`discord callback failed: HTTP ${res.status} ${await res.text().catch(() => "")}`);
-  return false;
+  return ephemeral("Signed out everywhere. Your /token token and all browser sessions are revoked.");
 }
 
 // -------------------------------------------------------- POST /upload
@@ -310,9 +270,10 @@ async function handleUpload(request, env, fetchImpl) {
   const raw = uploadId.length > 0;
   const filename = request.headers.get("X-Filename") || "";
   let assetName;
+  // The workflow runs after a zip package or a set's manifest (the last
+  // upload of a set); a set's parts only wait in the inbox.
+  let completes = true;
   if (raw) {
-    // raw file sets: the set's files plus a small manifest, all tagged with
-    // X-Upload-Id. The workflow reassembles parts and zips on the runner.
     const fileIdx = request.headers.get("X-File-Idx");
     const partIdx = request.headers.get("X-Part-Idx");
     const partCount = request.headers.get("X-Part-Count");
@@ -320,8 +281,7 @@ async function handleUpload(request, env, fetchImpl) {
       return json({ error: "raw uploads need X-File-Idx, X-Part-Idx, X-Part-Count" }, 400, cors);
     }
     const isManifest = fileIdx === MANIFEST_IDX;
-    const isMetadata = fileIdx === METADATA_IDX;
-    if (!isManifest && !isMetadata && (!/^\d+$/.test(fileIdx) || !/^\d+$/.test(partIdx) || !/^\d+$/.test(partCount) || Number(partIdx) >= Number(partCount))) {
+    if (!isManifest && (!/^\d+$/.test(fileIdx) || !/^\d+$/.test(partIdx) || !/^\d+$/.test(partCount) || Number(partIdx) >= Number(partCount))) {
       return json({ error: "bad part headers" }, 400, cors);
     }
     if (isManifest) {
@@ -329,18 +289,14 @@ async function handleUpload(request, env, fetchImpl) {
         return json({ error: "bad manifest headers" }, 400, cors);
       }
       assetName = `${stamp}__${uploadId}__manifest.json`;
-    } else if (isMetadata) {
-      if (filename !== "metadata.json" || partIdx !== "0" || partCount !== "1") {
-        return json({ error: "bad metadata headers" }, 400, cors);
-      }
-      assetName = `${stamp}__${uploadId}__metadata.json`;
     } else {
       const lower = filename.toLowerCase();
       if (!RAW_EXTENSIONS.some((e) => lower.endsWith(e))) {
         return json({ error: "set files must be .pak/.ucas/.utoc/.sig or one .zip " +
-          "(plus the manifest.json and metadata.json uploads)" }, 400, cors);
+          "(plus the manifest.json upload)" }, 400, cors);
       }
       assetName = `${stamp}__${uploadId}__f${fileIdx}__p${partIdx}of${partCount}__${sanitizeFilename(filename)}`;
+      completes = false;
     }
   } else {
     if (!filename.toLowerCase().endsWith(".zip")) {
@@ -349,24 +305,24 @@ async function handleUpload(request, env, fetchImpl) {
     assetName = `${stamp}__${Math.floor(Date.now() / 1000)}__${sanitizeFilename(filename)}`;
   }
 
-  // 4. daily quota, by BYTES (a raw set costs N part uploads; KV is
-  // eventually consistent, a slightly late count is fine)
+  // 4. daily quota, by BYTES (a set costs one charge per upload): charged
+  // before streaming, refunded when the GitHub upload fails
   const limit = Number(env.UPLOAD_DAILY_BYTES) > 0 ? Number(env.UPLOAD_DAILY_BYTES) : DEFAULT_DAILY_BYTES;
-  const today = new Date().toISOString().slice(0, 10);
-  const qKey = `quota:${discordId}`;
-  let used = 0;
-  const qRaw = await env.TOKENS.get(qKey);
-  if (qRaw) {
-    const q = JSON.parse(qRaw);
-    if (q.date === today) used = q.bytes || 0;
-  }
-  if (used + contentLength > limit) {
+  const charge = { discordId, day: new Date().toISOString().slice(0, 10), bytes: contentLength };
+  if (!(await chargeQuota(env.DB, { ...charge, limit }))) {
     return json({ error: `daily upload limit reached (${Math.round(limit / 1073741824)} GiB/day UTC); try again tomorrow` }, 429, cors);
   }
 
-  // 5. the fixed "inbox" release (id cached in KV)
-  const inboxId = await getInboxReleaseId(env, fetchImpl);
+  // 5. the fixed "inbox" release
+  let inboxId;
+  try {
+    inboxId = await getInboxReleaseId(env, fetchImpl);
+  } catch (ex) {
+    await refundQuota(env.DB, charge);
+    return json({ error: `github lookup failed: ${ex.message}` }, 502, cors);
+  }
   if (inboxId == null) {
+    await refundQuota(env.DB, charge);
     return json({ error: "uploads aren't set up yet; the catalog maintainer needs " +
       "to run the setup workflow once" }, 503, cors);
   }
@@ -388,15 +344,18 @@ async function handleUpload(request, env, fetchImpl) {
         },
       });
   } catch (ex) {
+    await refundQuota(env.DB, charge);
     return json({ error: `github upload failed: ${ex.message}` }, 502, cors);
   }
   if (!upload.ok) {
+    if (upload.status === 404) inboxReleaseIds.delete(inboxKey(env));
+    await refundQuota(env.DB, charge);
     return json({ error: `github upload failed: HTTP ${upload.status}` }, 502, cors);
   }
+  if (!completes) return json({ status: "stored" }, 202, cors);
 
-  // 7. charge the bytes, then wake the workflow (wake-up only; it drains
-  // the inbox and skips incomplete raw groups)
-  await env.TOKENS.put(qKey, JSON.stringify({ date: today, bytes: used + contentLength }));
+  // 7. wake the workflow (wake-up only; it drains the inbox and skips
+  // incomplete raw groups)
   let dispatch;
   try {
     dispatch = await fetchImpl(
@@ -443,8 +402,8 @@ async function handleWhoami(request, env) {
 
 // ------------------------------------------------------- POST /auth/*
 // The one-time login-code flow (the site link `#login=<code>` redeems it
-// for a long-lived web token): peek = read-only check (page load / link
-// prefetch must never burn the code), redeem = the atomic single-use burn,
+// for a long-lived web token): redeem = the atomic single-use burn (only
+// the page's own script can call it; the code lives in the URL fragment),
 // logout = delete the web token (a manual token is left alone). Same CORS
 // pattern as /whoami. Codes and tokens are never logged.
 
@@ -485,15 +444,6 @@ function codeError(res, cors) {
   return json({ error: `code ${res.reason}`, reason: res.reason }, 410, cors);
 }
 
-async function handleAuthPeek(request, env) {
-  const read = await readCodeBody(request, env);
-  if (read.response) return read.response;
-  const res = await peekLoginCode(env.DB, read.code, new Date());
-  if (res.ok)
-    return json({ discordId: res.discordId, username: res.username, expiresAt: res.expiresAt }, 200, authCors(env));
-  return codeError(res, authCors(env));
-}
-
 async function handleAuthRedeem(request, env) {
   const read = await readCodeBody(request, env);
   if (read.response) return read.response;
@@ -515,18 +465,20 @@ async function handleAuthLogout(request, env) {
   return new Response(null, { status: 204, headers: cors });
 }
 
+function inboxKey(env) {
+  return `${env.GITHUB_OWNER}/${env.GITHUB_REPO}`;
+}
+
+// The inbox release id (null when the release does not exist yet).
 async function getInboxReleaseId(env, fetchImpl) {
-  const cached = await env.TOKENS.get(INBOX_CACHE_KEY);
-  if (cached) {
-    const c = JSON.parse(cached);
-    if (Date.now() - c.at < INBOX_CACHE_MS) return c.id;
-  }
+  const cached = inboxReleaseIds.get(inboxKey(env));
+  if (cached != null) return cached;
   const res = await fetchImpl(
     `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/releases/tags/${INBOX_TAG}`,
     { headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}`, "User-Agent": GITHUB_UA } });
   if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`github release lookup failed: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
-  await env.TOKENS.put(INBOX_CACHE_KEY, JSON.stringify({ id: data.id, at: Date.now() }));
+  inboxReleaseIds.set(inboxKey(env), data.id);
   return data.id;
 }

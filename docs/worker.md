@@ -3,12 +3,12 @@
 Plain JS ES modules with **zero runtime dependencies** (`wrangler` is a
 devDependency run by the owner). Everything service-facing is injected:
 `handle(request, env, fetch)`, so tests supply fakes. The wire-level upload
-and events contract is in `worker/README.md` and `mod-contract/upload.md`;
+contract is in `worker/README.md` and `mod-contract/upload.md`;
 this doc covers behavior and invariants.
 
 Source: `src/index.js` (routing, `/discord`, `/upload`, `/whoami`),
-`src/auth.js` (D1 tokens and login codes), `src/mirror.js`
-(`/catalog/events`), `src/discord.js` (Discord REST helpers).
+`src/auth.js` (D1 tokens and login codes), `src/quota.js` (the D1 daily
+upload quota).
 
 ## `POST /discord`
 
@@ -17,13 +17,13 @@ WebSocket bot).
 
 - The Ed25519 signature check is required; without it the answer is 401.
   PING gets PONG.
-- Response flow: **202 ACK (no body)**, then
-  `POST /interactions/{id}/{token}/callback` with
-  `{type: 4, data: {content, flags: 64}}` (PING ACKs with a PONG callback).
-  A flat inline 200 body is rejected by Discord.
+- Every reply is the interaction response itself: `200` with
+  `Content-Type: application/json` and a body of `{type: 1}` (PONG) or
+  `{type: 4, data: {content, flags: 64}}`. The Worker makes no outbound call
+  and uses no bot token.
 - The invoking user id is `member.user.id`; current member objects have no
   top-level `id`. DMs use `user`.
-- **No GitHub calls on this path.** The 3 s budget covers the 202 ACK only.
+- **No GitHub calls on this path.** Discord requires the reply within 3 s.
 - `/token` mints a `manual` token: `mm_` + base64url(32 random bytes). Only
   `sha256(token)` is stored, as a D1 `tokens` row (`discordId`, `username`,
   `kind`, `createdAt`, `expiresAt`). `username` is the account name
@@ -45,24 +45,33 @@ edited by `worker/scripts/post-mods-message.mjs`. Type-3 dispatch is on
   and invalidates unused codes.
 - Any other custom id answers 400.
 
-A type-7 callback on a component interaction would edit the original message,
-so replies use type 4 with flags 64.
+A type-7 response to a component interaction would edit the original
+message, so replies use type 4 with flags 64.
 
 ## `POST /upload`
 
 - `Bearer` token required, else 401. `Content-Length` required, else 411.
-  Over 100 MB per part answers 413 **before any GitHub call**. A per-user daily
-  **byte** quota (default 2 GiB) answers 429. A missing `inbox` release
-  answers 503.
+  Over 100 MB per upload answers 413 **before any GitHub call**.
+- The per-user daily **byte** quota (default 2 GiB, UTC day) lives in the D1
+  table `upload_quota` (`src/quota.js`): one upsert checks and charges
+  atomically, and an upload that does not fit answers 429 before any GitHub
+  call. The charge is refunded when the GitHub upload fails or the `inbox`
+  release is missing (503).
+- The `inbox` release id is looked up from GitHub on first use and then held
+  in a module-level variable (isolate memory).
 - Two shapes:
   - zip mode: `X-Filename` must end in `.zip`;
-  - set mode: the same `X-Upload-Id` on every upload, plus `manifest.json`
-    (`X-File-Idx: -1`) and the optional `metadata.json` (`X-File-Idx: -2`,
-    single part); file names `.pak/.ucas/.utoc/.sig` or one `.zip`.
+  - set mode: the same `X-Upload-Id` on every upload; the files (`.pak`,
+    `.ucas`, `.utoc`, `.sig` or one `.zip`, part-split when large) first, then
+    `manifest.json` (`X-File-Idx: -1`) last. The manifest carries the optional
+    `metadata` object.
 - Both **stream `request.body` straight through** to `uploads.github.com`:
-  no buffering, no storage on the Worker. Then it dispatches
-  `process-inbox.yml` (`ref: main`) and answers `202 {"status":"queued"}`.
-- A GitHub failure answers 502 without dispatching.
+  no buffering, no storage on the Worker.
+- The Worker dispatches `process-inbox.yml` (`ref: main`) only after a zip
+  upload or a set's manifest, and answers `202 {"status":"queued"}`. A set's
+  part answers `202 {"status":"stored"}` without a dispatch.
+- A GitHub failure answers 502 without dispatching; a missing `inbox` release
+  answers 503.
 - Every inbox asset name is stamped `<discordId>-<hex username>`
   (`docs/inbox-pipeline.md`).
 - GitHub's API rejects requests without a `User-Agent`; the Worker sets one.
@@ -94,44 +103,21 @@ Login codes (`lc_…`):
 Endpoints (same CORS pattern as `/whoami`, with `Content-Type, Authorization`
 in the preflight; non-JSON or over-1 KB bodies are 400):
 
-- `POST /auth/peek`: read-only. `200 {discordId, username, expiresAt}`, 404
-  unknown, 410 expired or used. Its `expiresAt` is the code's 5-minute expiry.
-- `POST /auth/redeem`: the atomic burn. `200 {token, …}` with an `ms_…` web
-  token whose `expiresAt` is 90 days.
+- `POST /auth/redeem`: the atomic burn. `200 {token, discordId, username,
+  expiresAt}` with an `ms_…` web token whose `expiresAt` is 90 days; 404
+  unknown code, 410 expired or used. The code lives in the page's URL
+  fragment, so only the page's own script redeems it, as soon as the link
+  opens the flow.
 - `POST /auth/logout`: 204. Deletes the token only when it is a `web` one.
 
-KV (`TOKENS`) holds only the upload quota and the inbox release-id cache.
 
-## `POST /catalog/events` (`src/mirror.js`)
+## Discord forum channel
 
-The runner's signed outcome events (the `notify` step).
-
-- `X-Catalog-Signature` = hex HMAC-SHA256(`CATALOG_CALLBACK_SECRET`,
-  rawBody). A fresh `ts` is in the signed payload; `|now - ts| > 300 s` is
-  401. At most 10 events (`{ts, events: […]}`); a bad shape or an over-size
-  body is 400.
-- `published` mirrors into one forum thread per mod (D1 `mod_threads` keyed on
-  the lowercased identifier):
-  - first sight creates a thread: name = title; first message
-    `<@uploader> published **title** vVERSION` + description + site link;
-    cover embed with a `mod-id:` footer; catalog tags through the var
-    `FORUM_TAG_IDS` (catalog tag to forum tag id, unknowns ignored, max 5);
-  - an update posts a follow-up message in the existing thread;
-  - a thread deleted on Discord (404/403) is re-created and the mapping
-    replaced.
-- `rejected` posts a notice in `NOTICES_CHANNEL_ID`; blank means a log line
-  only. No DMs.
-- Mirrored event ids go to `seen_events`; redeliveries are no-ops. Rows are
-  swept at 30 days.
-- Every payload sets `allowed_mentions` explicitly, and user text is truncated
-  with `@` and backticks stripped, so nothing can ping @everyone or roles.
-- One failing event is reported `ok: false` (unrecorded, retried by the
-  runner) without aborting the rest. Subrequests per event are at most 3.
-  429s are retried once (wait capped at 5 s).
-- The forum is locked so only the bot creates posts: an `@everyone` deny of
-  `SEND_MESSAGES` ("Create Posts" in a forum channel) while allowing
-  `SEND_MESSAGES_IN_THREADS`. The bot keeps an explicit allow overwrite: View,
-  `SEND_MESSAGES`, `SEND_MESSAGES_IN_THREADS`, `EMBED_LINKS`.
+The runner (not the Worker) creates the mod threads. The forum is locked so
+only the bot creates posts: an `@everyone` deny of `SEND_MESSAGES` ("Create
+Posts" in a forum channel) while allowing `SEND_MESSAGES_IN_THREADS`. The bot
+keeps an explicit allow overwrite: View, `SEND_MESSAGES`,
+`SEND_MESSAGES_IN_THREADS`, `EMBED_LINKS`.
 
 ## Secrets and tokens
 
@@ -149,7 +135,6 @@ steps are in `SETUP.md`.
 ## Tests
 
 `cd worker && node --test`. All offline: signature verification, auth and
-login codes, buttons, the upload path, the events mirror, command
-registration, and the shared contract fixtures against `site/` libraries.
+login codes, buttons, the upload path and quota, command registration, and the shared contract fixtures against `site/` libraries.
 Live behavior (deploy, real Discord, real GitHub, the free-plan CPU limit on
 streaming) is verified by the owner.

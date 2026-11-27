@@ -26,8 +26,8 @@ Usage:
                                                     # seed a dir's zips as that Discord user
   python build.py rebuild                           # regenerate from all mod-* releases
   python build.py retitle                           # only re-apply the name/description
-  python build.py notify --results PATH             # POST the run's events to the Worker
-                                                    # (CATALOG_CALLBACK_URL / _SECRET)
+  python build.py announce --results PATH           # post the run's events to Discord
+                                                    # (DISCORD_BOT_TOKEN, FORUM_CHANNEL_ID, ...)
   python build.py downloads [--catalog PATH] [--out PATH]
                                                     # write downloads.json (per-mod download counts)
 
@@ -41,7 +41,8 @@ Two upload shapes are accepted in the inbox (both end in a release-asset zip):
   * a ready-made .zip package (zip mode), or
   * an upload SET announced by a small JSON manifest: either the loose
     .utoc/.ucas/.pak/+.sig files or exactly one .zip, each streamed to the
-    inbox (part-split when over 100 MB), plus an optional metadata.json.
+    inbox (part-split when over 100 MB), plus the manifest, uploaded last,
+    which also carries the optional `metadata` object.
     This pipeline reassembles the parts, verifies the per-file sha256 from
     the manifest, applies the metadata and zips the set HERE on the runner
     (the Worker is a stateless pass-through and cannot do it).
@@ -63,7 +64,6 @@ import argparse
 import base64
 import binascii
 import hashlib
-import hmac
 import io
 import json
 import os
@@ -74,7 +74,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -94,7 +96,6 @@ MOD_TAG_PREFIX = "mod-"
 MAX_RELEASE_ASSET_BYTES = 2 * 1024 * 1024 * 1024  # GitHub release asset cap
 STALE_AFTER = 7 * 24 * 3600  # seconds; incomplete/stalled inbox items are swept
 MANIFEST_PART = "manifest.json"
-METADATA_PART = "metadata.json"
 
 # Top-level catalog identity when site/config.json sets none (`title`, `description`).
 DEFAULT_CATALOG_NAME = "Mod Catalog"
@@ -141,11 +142,13 @@ class AssetExists(Exception):
 
 
 class Asset:
-    def __init__(self, name: str, size: int, created: datetime, downloads: int = 0):
+    def __init__(self, name: str, size: int, created: datetime, downloads: int = 0,
+                 label: str = ""):
         self.name = name
         self.size = size
         self.created = created  # naive-UTC datetime
         self.downloads = downloads
+        self.label = label  # GitHub asset label ("" when none)
 
 
 class Release:
@@ -178,10 +181,16 @@ class PackageClient:
     def asset_bytes(self, tag: str, name: str) -> bytes:
         raise NotImplementedError
 
-    def upload_asset(self, tag: str, src: pathlib.Path, name: str) -> None:
+    def upload_asset(self, tag: str, src: pathlib.Path, name: str, label: str | None = None) -> None:
         raise NotImplementedError
 
     def delete_asset(self, tag: str, name: str) -> None:
+        raise NotImplementedError
+
+    def release_notes(self, tag: str) -> str:
+        raise NotImplementedError
+
+    def set_release_notes(self, tag: str, text: str) -> None:
         raise NotImplementedError
 
 
@@ -193,7 +202,8 @@ class LocalClient(PackageClient):
 
     Asset "created at" is the file mtime. Uploads replace nothing: a
     duplicate asset name raises AssetExists, mirroring the real rule that
-    versions are immutable.
+    versions are immutable. Asset labels and release notes live beside the
+    releases, in <root>/meta/<tag>/ (never listed as assets).
     """
 
     def __init__(self, root: pathlib.Path, downloads: dict | None = None):
@@ -202,6 +212,12 @@ class LocalClient(PackageClient):
 
     def _release_dir(self, tag: str) -> pathlib.Path:
         return self.root / "releases" / tag
+
+    def _label_path(self, tag: str, name: str) -> pathlib.Path:
+        return self.root / "meta" / tag / "labels" / name
+
+    def _notes_path(self, tag: str) -> pathlib.Path:
+        return self.root / "meta" / tag / "notes.txt"
 
     def list_tags(self, prefix: str) -> list[str]:
         d = self.root / "releases"
@@ -230,8 +246,13 @@ class LocalClient(PackageClient):
             if p.is_file():
                 out.append(Asset(p.name, p.stat().st_size,
                                 datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc),
-                                self.downloads.get((tag, p.name), 0)))
+                                self.downloads.get((tag, p.name), 0),
+                                self._read_label(tag, p.name)))
         return out
+
+    def _read_label(self, tag: str, name: str) -> str:
+        path = self._label_path(tag, name)
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
 
     def download_asset(self, tag: str, name: str, dest: pathlib.Path) -> None:
         src = self._release_dir(tag) / name
@@ -245,18 +266,32 @@ class LocalClient(PackageClient):
             self.download_asset(tag, name, dest)
             return dest.read_bytes()
 
-    def upload_asset(self, tag: str, src: pathlib.Path, name: str) -> None:
+    def upload_asset(self, tag: str, src: pathlib.Path, name: str, label: str | None = None) -> None:
         d = self._release_dir(tag)
         d.mkdir(parents=True, exist_ok=True)
         target = d / name
         if target.exists():
             raise AssetExists(f"release {tag} already has asset {name}")
         shutil.copyfile(src, target)
+        if label:
+            path = self._label_path(tag, name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(label, encoding="utf-8")
 
     def delete_asset(self, tag: str, name: str) -> None:
         p = self._release_dir(tag) / name
         if p.is_file():
             p.unlink()
+        self._label_path(tag, name).unlink(missing_ok=True)
+
+    def release_notes(self, tag: str) -> str:
+        path = self._notes_path(tag)
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+    def set_release_notes(self, tag: str, text: str) -> None:
+        path = self._notes_path(tag)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
 
 
 class GhClient(PackageClient):
@@ -316,7 +351,9 @@ class GhClient(PackageClient):
             created = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
             count = a.get("download_count", 0)
             count = int(count) if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0
-            out.append(Asset(a["name"], a.get("size", 0), created, count))
+            label = a.get("label")
+            out.append(Asset(a["name"], a.get("size", 0), created, count,
+                             label if isinstance(label, str) else ""))
         return out
 
     def create_release(self, tag: str, title: str) -> None:
@@ -345,10 +382,10 @@ class GhClient(PackageClient):
             self.download_asset(tag, name, pathlib.Path(td) / name)
             return (pathlib.Path(td) / name).read_bytes()
 
-    def upload_asset(self, tag: str, src: pathlib.Path, name: str) -> None:
+    def upload_asset(self, tag: str, src: pathlib.Path, name: str, label: str | None = None) -> None:
         try:
             # no --clobber: a duplicate name must fail (versions are immutable)
-            self._run(["release", "upload", tag, str(src)])
+            self._run(["release", "upload", tag, f"{src}#{label}" if label else str(src)])
         except RuntimeError as ex:
             if "already exists" in str(ex) or "cannot be overwritten" in str(ex):
                 raise AssetExists(f"release {tag} already has asset {name}") from ex
@@ -356,6 +393,14 @@ class GhClient(PackageClient):
 
     def delete_asset(self, tag: str, name: str) -> None:
         self._run(["release", "delete-asset", tag, name, "-y"])
+
+    def release_notes(self, tag: str) -> str:
+        data = self._api(f"repos/{self.owner}/{self.repo}/releases/tags/{tag}")
+        body = data.get("body") if isinstance(data, dict) else None
+        return body.replace("\r\n", "\n") if isinstance(body, str) else ""
+
+    def set_release_notes(self, tag: str, text: str) -> None:
+        self._run(["release", "edit", tag, "--notes", text])
 
 
 # ------------------------------------------------------------ validation
@@ -452,35 +497,32 @@ def validate_package(zip_path: pathlib.Path) -> dict:
         raise PackageError(f"invalid or missing trailer ({ex.kind}): {ex}") from ex
 
 
-def parse_upload_metadata(raw: bytes) -> dict:
-    """Parses the untrusted metadata.json of an upload set into the dict
-    `apply_metadata` takes. `image` is present only when the upload says
-    something about the cover: None removes it, {"mime", "data"} replaces it."""
-    try:
-        obj = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        raise PackageError("metadata.json is not valid JSON")
+def parse_upload_metadata(obj) -> dict:
+    """Validates the untrusted `metadata` object of an upload set's manifest
+    into the dict `apply_metadata` takes. `image` is present only when the
+    upload says something about the cover: None removes it, {"mime", "data"}
+    replaces it."""
     if not isinstance(obj, dict):
-        raise PackageError("metadata.json is not a JSON object")
+        raise PackageError("metadata is not a JSON object")
     meta: dict = {}
     for key in ("title", "author", "description", "version", "game_version"):
         value = obj.get(key)
         if value is None:
             value = ""
         if not isinstance(value, str):
-            raise PackageError(f'metadata.json: "{key}" must be a string')
+            raise PackageError(f'metadata: "{key}" must be a string')
         meta[key] = value
     # "guid" is ignored (a revision id the runner writes fresh); "identifier"
     # names the mod an UPDATE targets (absent / null / "" = a new mod)
     target = obj.get("identifier")
     if target is not None and not isinstance(target, str):
-        raise PackageError('metadata.json: "identifier" must be a string')
+        raise PackageError('metadata: "identifier" must be a string')
     meta["target"] = target.strip() if target and target.strip() else None
     tags = obj.get("tags")
     if tags is None:
         tags = []
     if not isinstance(tags, list) or any(not isinstance(t, str) for t in tags):
-        raise PackageError('metadata.json: "tags" must be an array of strings')
+        raise PackageError('metadata: "tags" must be an array of strings')
     meta["tags"] = tags
     if "image" in obj:
         image = obj["image"]
@@ -490,14 +532,14 @@ def parse_upload_metadata(raw: bytes) -> dict:
             try:
                 data = base64.b64decode(image["data"], validate=True)
             except (binascii.Error, ValueError):
-                raise PackageError("metadata.json: image data is not valid base64")
+                raise PackageError("metadata: image data is not valid base64")
             meta["image"] = {"mime": image["mime"], "data": data}
         else:
-            raise PackageError('metadata.json: "image" must be null or {"mime", "data"}')
+            raise PackageError('metadata: "image" must be null or {"mime", "data"}')
     try:
         trailer.validate_metadata({**meta, "image": meta.get("image")})
     except trailer.TrailerError as ex:
-        raise PackageError(f"metadata.json is invalid ({ex.kind}): {ex}") from ex
+        raise PackageError(f"metadata is invalid ({ex.kind}): {ex}") from ex
     return meta
 
 
@@ -556,7 +598,7 @@ def existing_trailer(utoc: bytes) -> dict | None:
 
 
 def package_fields(metadata: dict | None, existing: dict | None) -> dict:
-    """The fields an upload declares: its metadata.json, else the package's
+    """The fields an upload declares: its manifest metadata, else the package's
     own trailer (which must then exist)."""
     if metadata is not None:
         return metadata
@@ -574,10 +616,10 @@ def apply_metadata(utoc: bytes, metadata: dict | None, existing: dict | None, *,
     trailer fields (`package_fields`). Whatever the source, `author` (the
     verified name), `identifier` (the mod's minted or locked one) and a FRESH
     guid (a revision id) are forced. The cover: metadata `image` None removes
-    it, an object replaces it. Absent: for an explicit update (metadata.json
+    it, an object replaces it. Absent: for an explicit update (manifest metadata
     with an `identifier`, parsed as `target`) the mod's current cover
     (`fallback_cover()`) comes first and the package's own cover is used only
-    when the mod has none; otherwise (a new mod, or no metadata.json, where the
+    when the mod has none; otherwise (a new mod, or no manifest metadata, where the
     package's trailer is the uploader's intent) the package's own cover is kept
     and `fallback_cover()` supplies one only when the package has none."""
     fields = package_fields(metadata, existing)
@@ -694,9 +736,16 @@ def zip_content_hash(path: pathlib.Path) -> str:
     return content_hash(zip_members(path.read_bytes()))
 
 
-def zip_fingerprint(path: pathlib.Path) -> str:
-    """`package_fingerprint` of a package zip's set members."""
-    return package_fingerprint(zip_members(path.read_bytes()))
+def asset_label(content: str, fingerprint: str) -> str:
+    """The release-asset label of a stored package: `<content_hash>:<package_fingerprint>`."""
+    return f"{content}:{fingerprint}"
+
+
+def parse_asset_label(label: str) -> tuple[str, str] | None:
+    """(content_hash, package_fingerprint) of an asset label; None when it is
+    missing or not of the `asset_label` form."""
+    m = re.fullmatch(r"([0-9a-f]{64}):([0-9a-f]{64})", label or "")
+    return (m.group(1), m.group(2)) if m else None
 
 
 def norm_title(title: str | None) -> str:
@@ -891,7 +940,7 @@ def write_json_atomic(path: pathlib.Path, obj) -> None:
 class Staged(NamedTuple):
     """An upload as received, before its trailer is written: the set's
     members (name -> bytes: .utoc/.ucas/.pak(+.sig) of one set) and its
-    parsed metadata.json (None = zip mode / a set without one)."""
+    parsed manifest metadata (None = zip mode / a set without one)."""
     members: dict
     metadata: dict | None
 
@@ -939,9 +988,9 @@ def inbox_items_from_release(client: PackageClient,
     Two upload shapes coexist; <uploader> is the Worker's stamp
     `<discordId>-<hex of the UTF-8 username>`:
       zip packages   <uploader>__<ts>__<safe-name>.zip
-      upload sets    <uploader>__<uploadId>__manifest.json   (the manifest)
-                     <uploader>__<uploadId>__metadata.json   (optional)
-                     <uploader>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>
+      upload sets    <uploader>__<uploadId>__f<i>__p<j>of<n>__<safe-filename>
+                     <uploader>__<uploadId>__manifest.json   (uploaded last; carries
+                                                              the optional metadata)
     A set is reassembled (parts concatenated, per-file sha256 checked
     against the manifest) HERE on the runner — the Worker is a stateless
     pass-through and cannot do it; the Processor then writes its trailer
@@ -1012,8 +1061,6 @@ def parse_inbox_name(name: str) -> dict | None:
         return None
     if len(parts) == 3 and parts[2].lower() == MANIFEST_PART:
         return {"kind": "manifest", "uploader": uploader, "upload_id": parts[1]}
-    if len(parts) == 3 and parts[2].lower() == METADATA_PART:
-        return {"kind": "metadata", "uploader": uploader, "upload_id": parts[1]}
     if len(parts) == 3 and parts[2].lower().endswith(".zip"):
         return {"kind": "zip", "uploader": uploader, "name": name}
     if (len(parts) == 5 and re.fullmatch(r"f\d+", parts[2])
@@ -1106,7 +1153,6 @@ def raw_group_source(client: PackageClient, uploader: Uploader, uid: str,
     if manifest_asset is None:
         print(f"  {label}: manifest missing, waiting")
         return None
-    metadata_asset = next((a for i, a in items if i["kind"] == "metadata"), None)
 
     parts_by_file: dict[int, list] = {}
     for i, a in items:
@@ -1126,9 +1172,6 @@ def raw_group_source(client: PackageClient, uploader: Uploader, uid: str,
     files = manifest.get("files", [])
     if not files:
         print(f"  {label}: manifest has no files, waiting")
-        return None
-    if declared is not None and metadata_asset is None:
-        print(f"  {label}: metadata.json missing, waiting")
         return None
     if set(parts_by_file) - set(range(len(files))):
         print(f"  {label}: parts for unknown file indices, waiting")
@@ -1159,13 +1202,7 @@ def raw_group_source(client: PackageClient, uploader: Uploader, uid: str,
             data[f["name"]] = bytes(blob)
         if len(files) != len(data):
             raise PackageError("duplicate file names in the upload")
-        metadata = None
-        if declared is not None:
-            raw = client.asset_bytes(INBOX_TAG, metadata_asset.name)
-            want = declared.get("sha256")
-            if want and hashlib.sha256(raw).hexdigest() != want:
-                raise PackageError("metadata.json: sha256 mismatch")
-            metadata = parse_upload_metadata(raw)
+        metadata = parse_upload_metadata(declared) if declared is not None else None
         return Staged(set_members(data), metadata)
 
     def delete() -> None:
@@ -1195,7 +1232,7 @@ class Processor:
         self.admins = admins
         self.catalog_path = catalog_path
         self.config_path = config_path
-        self._content: dict[str, str | None] = {}  # entry file URL -> content_hash
+        self._content: dict[str, str | None] = {}  # entry file URL -> content_hash (None = unknown)
         self.results: list[dict] = []  # this run's outcome events (--results-file)
 
     def _is_admin(self, uid: str) -> bool:
@@ -1206,10 +1243,10 @@ class Processor:
                 uid: str, entries: dict) -> Target:
         """Resolves new mod vs update (mod-contract/upload.md):
 
-          * metadata.json `identifier` -> an update of that mod: it must exist
+          * manifest metadata `identifier` -> an update of that mod: it must exist
             (case-insensitive) and be the uploader's (admins bypass);
-          * metadata.json without it -> a new mod, identifier minted;
-          * no metadata.json -> an update when the package's trailer
+          * manifest metadata without it -> a new mod, identifier minted;
+          * no manifest metadata -> an update when the package's trailer
             identifier starts with `{uid}.` and that mod exists, else new.
 
         A new mod whose minted identifier already exists is rejected. Raises
@@ -1312,20 +1349,17 @@ class Processor:
 
             tag = mod_tag(target.identifier)
             existing_rel = self.client.get_release(tag)
-            taken = {a.name for a in existing_rel.assets} if existing_rel else set()
+            by_name = {a.name: a for a in existing_rel.assets} if existing_rel else {}
+            taken = set(by_name)
             base_name = mod_asset_name(meta)
+            fingerprint = package_fingerprint(members)
             if base_name in taken:
                 # a re-upload of this version: accepted unless nothing changed
-                stored = package_fingerprint(members)
                 for other in same_version_names(base_name, taken):
-                    other_path = pathlib.Path(td) / f"existing-{other}"
-                    self.client.download_asset(tag, other, other_path)
-                    try:
-                        same = zip_fingerprint(other_path) == stored
-                    except PackageError:
-                        same = False
-                    other_path.unlink()
-                    if same:
+                    parsed = parse_asset_label(by_name[other].label)
+                    if parsed is None:
+                        print(f"  note: {tag}/{other} has no usable label; cannot compare it")
+                    elif parsed[1] == fingerprint:
                         src.delete()
                         return False, None, rejected_event(
                             uploader, src.gid, f"already uploaded as {other}, nothing changed",
@@ -1339,7 +1373,7 @@ class Processor:
             staged_zip = pathlib.Path(td) / zip_name
             shutil.copyfile(tmp, staged_zip)
             try:
-                self.client.upload_asset(tag, staged_zip, zip_name)
+                self.client.upload_asset(tag, staged_zip, zip_name, asset_label(content, fingerprint))
             except AssetExists:
                 src.delete()
                 return False, None, rejected_event(
@@ -1375,26 +1409,29 @@ class Processor:
 
     # -- duplicates under another identifier ---------------------------
     def _entry_content(self, entry: dict) -> str | None:
-        """`content_hash` of a catalog entry's current zip (downloaded through
-        the client at most once per run; None when it cannot be read)."""
+        """`content_hash` of a catalog entry's current zip, from its asset
+        label (one release listing per entry and run; None when the label is
+        missing or malformed)."""
         url = entry.get("file") or ""
         if url not in self._content:
             name = url.rsplit("/", 1)[-1]
+            parsed = None
             try:
-                with tempfile.TemporaryDirectory() as td:
-                    path = pathlib.Path(td) / "existing.zip"
-                    self.client.download_asset(mod_tag(entry["id"]), name, path)
-                    self._content[url] = zip_content_hash(path)
+                rel = self.client.get_release(mod_tag(entry["id"]))
+                asset = next((a for a in rel.assets if a.name == name), None) if rel else None
+                parsed = parse_asset_label(asset.label) if asset else None
             except Exception as ex:
-                print(f"  note: cannot read {entry['id']}'s {name} for the duplicate check ({ex})")
-                self._content[url] = None
+                print(f"  note: cannot list {entry['id']}'s release for the duplicate check ({ex})")
+            if parsed is None:
+                print(f"  note: {entry['id']}'s {name} has no usable label; cannot compare it")
+            self._content[url] = parsed[0] if parsed else None
         return self._content[url]
 
     def _duplicate_of(self, meta: dict, content: str, entries: dict) -> dict | None:
         """The catalog entry under another identifier whose current package
         has the same title (trimmed, case-insensitive), version (trimmed) and
         content (`content_hash`, trailer ignored) as `meta`'s package, else
-        None. Only entries matching title + version are downloaded. `entries`
+        None. Only entries matching title + version are looked up. `entries`
         is live, so an earlier upload of this same run counts too."""
         title, version = norm_title(meta["title"]), meta["version"].strip()
         mine = ident_key(meta["identifier"])
@@ -1472,30 +1509,27 @@ def _read_package(client: PackageClient, tag: str, asset: Asset):
 
 
 def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.Path,
-            config_path: pathlib.Path = CONFIG_DEFAULT, full: bool = False) -> dict:
+            config_path: pathlib.Path = CONFIG_DEFAULT) -> dict:
     """Regenerates the whole catalog from the mod-* releases alone.
 
     One release per mod identifier (`mod_tag`). Only the runner writes into
-    `mod-*` releases, so every package's trailer carries its mod's locked
-    `identifier` (`{ownerId}.…`) and its `author` is the verified name it was
-    stored with. Per release, two packages are read: the newest (required —
-    the entry, its `content_hash`, the `author` rename rule) and the oldest
-    valid one, probed oldest-first with fallback (the locked `identifier`; in
-    practice one download), so the cost is O(mods), not O(upload history).
-    `full=True` (the `--full` audit mode) validates EVERY package of every
-    release instead. Per release:
+    `mod-*` releases, and `apply_metadata` stamps the locked `identifier`
+    (`{ownerId}.…`) and the verified `author` on every stored package, so the
+    newest package of a release is the only one read: the entry, the locked
+    identifier, the owner (the identifier's id prefix), the `author` rename
+    rule and the `content_hash`. The cost is O(mods), not O(upload history).
+    Per release:
 
-      * the packages whose identifier maps to the release's tag count
-        (others are skipped with a log line), ordered by `asset_order_key`;
-      * identifier = the earliest package's (locked), owner (`uploader`) =
-        the uploader of that earliest package = its identifier's id prefix;
-      * the entry points at the newest package (skipped when that is invalid);
+      * packages are ordered by `asset_order_key`;
+      * the entry points at the newest package (the release is skipped when
+        that is invalid, carries no uploader id, or names another release);
       * `author` = the author of the most recent package, in any release,
         under the owner's id (a rename follows the owner's uploads; an
         admin's update of the mod carries the owner's name);
       * duplicates: mods whose newest packages share title + version +
         `content_hash` keep only the one whose first package was uploaded
-        earliest -- `process`'s duplicate rule.
+        earliest (`asset_order_key` of the oldest zip) -- `process`'s
+        duplicate rule.
     """
     candidates = []  # (meta, asset, sha256, cover_url, owner uid, tag, content_hash, first-upload key)
     latest_by_uid: dict[str, tuple] = {}  # uid -> ((created, name), author)
@@ -1508,34 +1542,14 @@ def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.
         if not zips:
             print(f"  {tag}: no zip assets, skipped")
             continue
-        if full:
-            # the exhaustive audit: every package of every release
-            packages = [p for p in (_read_package(client, tag, a) for a in zips) if p is not None]
-            if not packages or packages[-1][0] is not zips[-1]:
-                print(f"  {tag}: the newest package is invalid, skipped", file=sys.stderr)
-                continue
-            first, newest_pkg, considered = packages[0], packages[-1], packages
-        else:
-            # the selective scan: the newest package (required), then the
-            # oldest valid one probed oldest-first (one download in practice)
-            newest_pkg = _read_package(client, tag, zips[-1])
-            if newest_pkg is None:
-                print(f"  {tag}: the newest package is invalid, skipped", file=sys.stderr)
-                continue
-            first = None
-            for a in zips[:-1]:
-                first = _read_package(client, tag, a)
-                if first is not None:
-                    break
-            if first is None:
-                first = newest_pkg
-            considered = [newest_pkg]  # the newest per release dominates `latest_by_uid`
-        for asset, meta, uid, *_ in considered:
-            stamp = (asset.created, asset.name)
-            if uid not in latest_by_uid or stamp > latest_by_uid[uid][0]:
-                latest_by_uid[uid] = (stamp, meta["author"])
-        identifier = first[1]["identifier"]
-        asset, meta, _, sha, content = newest_pkg
+        newest_pkg = _read_package(client, tag, zips[-1])
+        if newest_pkg is None:
+            print(f"  {tag}: the newest package is invalid, skipped", file=sys.stderr)
+            continue
+        asset, meta, uid, sha, content = newest_pkg
+        stamp = (asset.created, asset.name)
+        if uid not in latest_by_uid or stamp > latest_by_uid[uid][0]:
+            latest_by_uid[uid] = (stamp, meta["author"])
         cover_url = None
         image = meta.get("image")
         if image is not None:
@@ -1544,8 +1558,8 @@ def rebuild(client: PackageClient, owner: str, repo: str, catalog_path: pathlib.
                 cover_url = asset_url(owner, repo, tag, cname)
             else:
                 print(f"  {tag}: cover {cname} missing from the release, omitted")
-        candidates.append(({**meta, "identifier": identifier}, asset, sha, cover_url, first[2], tag,
-                           content, asset_order_key(first[0]) + (tag,)))
+        candidates.append((meta, asset, sha, cover_url, uid, tag,
+                           content, asset_order_key(zips[0]) + (tag,)))
 
     # the same content + title + version under several identifiers: the mod
     # whose first package is the earliest wins, the later ones are skipped
@@ -1579,93 +1593,277 @@ def retitle(catalog_path: pathlib.Path, config_path: pathlib.Path = CONFIG_DEFAU
     print(f"{catalog_path.name}: catalog name set to {name!r}")
 
 
-# --------------------------------------------------------------- notify
+# ------------------------------------------------------------- announce
 
-# `notify` POSTs a results file's events to the Worker's /catalog/events:
-# 10 events per request, X-Catalog-Signature = the hex HMAC-SHA256 of the
-# raw body keyed with the shared secret, and an explicit User-Agent
-# (Cloudflare 403s the default Python-urllib one). One retry, 2 s later,
-# on a network error or 5xx; 4xx is final. The secret is never printed.
-# `build.py notify` never raises and always exits 0 (failures are logged).
+# `announce` posts a results file's events to Discord through the REST API:
+# a published mod gets one forum thread (the first publish creates it, later
+# versions post a message in it) and a rejection becomes a notice in the
+# notices channel. The thread id lives in the mod release's notes as a
+# `discord-thread: <id>` line. The bot token is never printed.
 
-def sign_body(secret: str, body: bytes) -> str:
-    """X-Catalog-Signature: the hex HMAC-SHA256 of the raw body."""
-    return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-
-
-def chunk_events(events: list[dict], size: int = 10) -> list[list[dict]]:
-    """The events in chunks of at most `size` (10 per request)."""
-    if size < 1:
-        raise ValueError("size must be >= 1")
-    return [events[i:i + size] for i in range(0, len(events), size)]
+DISCORD_API = "https://discord.com/api/v10"
+DISCORD_USER_AGENT = "ModCatalog-Announce (https://github.com/jordgubbarnab55-cloud/ModCatalog, 1)"
+DISCORD_RETRY_CAP = 5.0   # seconds a 429 `retry_after` wait is capped at
+MAX_FORUM_TAGS = 5        # Discord's applied_tags cap
+THREAD_LINE = re.compile(r"^discord-thread:[ \t]*(\d+)[ \t\r]*$", re.MULTILINE)
 
 
-def post_event(url: str, secret: str, payload: bytes, *, delay: float = 2.0,
-               sleep=time.sleep, timeout: int = 60) -> bool:
-    """POSTs one signed chunk (a retry once, `delay` seconds later, on a
-    network error or 5xx). Never raises. True when the server accepted it."""
-    import urllib.error
-    import urllib.request
-    last = ""
-    for attempt in (1, 2):
+class DiscordError(Exception):
+    """A Discord call failed; `status` is the HTTP status (0 = rate limited twice)."""
+
+    def __init__(self, message: str, status: int = 0):
+        super().__init__(message)
+        self.status = status
+
+
+def _http_request(method: str, url: str, headers: dict, body: bytes | None) -> tuple[int, bytes]:
+    """(status, body) of one HTTP call; a non-2xx status is returned, not raised."""
+    req = urllib.request.Request(url, data=body, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as ex:
+        return ex.code, ex.read()
+
+
+class DiscordApi:
+    """The two bot calls announcements need. `http(method, url, headers, body)
+    -> (status, bytes)` and `sleep` are injectable. Every payload carries an
+    explicit `allowed_mentions`, so user-supplied text can never ping
+    @everyone or a role."""
+
+    def __init__(self, token: str, forum_channel: str, http=_http_request, sleep=time.sleep):
+        self.token = token
+        self.forum_channel = forum_channel
+        self.http = http
+        self.sleep = sleep
+
+    def call(self, method: str, path: str, body: dict) -> dict | None:
+        """JSON in/out. A 429 is retried once after `retry_after` (capped at
+        5 s); a second 429 raises. A 404 returns None; any other non-2xx
+        raises with its status."""
+        headers = {"Authorization": f"Bot {self.token}", "Content-Type": "application/json",
+                   "User-Agent": DISCORD_USER_AGENT}
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        status, raw = self.http(method, DISCORD_API + path, headers, data)
+        if status == 429:
+            self.sleep(min(self._retry_after(raw), DISCORD_RETRY_CAP))
+            status, raw = self.http(method, DISCORD_API + path, headers, data)
+            if status == 429:
+                raise DiscordError("discord 429")
+        if status == 404:
+            return None
+        if not 200 <= status < 300:
+            raise DiscordError(f"discord HTTP {status}", status)
+        if status == 204 or not raw:
+            return None
+        return json.loads(raw.decode("utf-8"))
+
+    @staticmethod
+    def _retry_after(raw: bytes) -> float:
         try:
-            req = urllib.request.Request(url + "/catalog/events", data=payload, method="POST",
-                                        headers={"Content-Type": "application/json",
-                                                 "X-Catalog-Signature": sign_body(secret, payload),
-                                                 "User-Agent": "ModCatalog-Notify"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                code = r.status
-            if 200 <= code < 300:
-                return True
-            last = f"HTTP {code}"
-        except urllib.error.HTTPError as ex:
-            last = f"HTTP {ex.code}"
-            if ex.code < 500:  # 4xx: final (a 5xx is retried below)
-                print(f"  notify: {url} failed: {last}", file=sys.stderr)
-                return False
+            data = json.loads(raw.decode("utf-8"))
+            ms = float(data.get("retry_after_ms") or 0)
+            if ms > 0:
+                return ms / 1000
+            return max(float(data.get("retry_after") or 0), 0.0)
+        except (ValueError, TypeError, AttributeError):
+            return 0.0
+
+    def create_thread(self, name: str, content: str, embeds: list, tag_ids: list, user_ids: list):
+        """A new public forum post in the forum channel -> the thread object."""
+        return self.call("POST", f"/channels/{self.forum_channel}/threads", {
+            "name": name,
+            "message": {"content": content, "embeds": embeds,
+                        "allowed_mentions": {"parse": [], "users": user_ids}},
+            "applied_tags": tag_ids,
+        })
+
+    def post_message(self, channel_id: str, payload: dict):
+        """A message in a channel or thread -> the message object (None on 404)."""
+        return self.call("POST", f"/channels/{channel_id}/messages", payload)
+
+
+def discord_clean(text, limit: int) -> str:
+    """User-supplied text: backticks and `@` stripped (no code-block injection,
+    nothing that looks like a mention), then truncated."""
+    return re.sub(r"[`@]", "", "" if text is None else str(text))[:limit]
+
+
+def forum_tag_ids(tag_map: dict, tags) -> list[str]:
+    """The forum tag ids for a mod's catalog tags (unknown tags ignored, at
+    most 5)."""
+    out: list[str] = []
+    for t in tags if isinstance(tags, list) else []:
+        tid = tag_map.get(t) if isinstance(t, str) else None
+        if tid is not None and str(tid) not in out:
+            out.append(str(tid))
+        if len(out) >= MAX_FORUM_TAGS:
+            break
+    return out
+
+
+def cover_embed(cover_url, identifier) -> dict:
+    """The embed that makes a thread identifiable (`mod-id: <identifier>` footer)
+    and shows the cover when there is one."""
+    embed: dict = {"footer": {"text": f"mod-id: {discord_clean(identifier, 2040)}"}}
+    if cover_url:
+        embed["image"] = {"url": cover_url}
+    return embed
+
+
+def publish_content(ev: dict, site_url: str) -> str:
+    """The thread-creating message: who published what, the description and the site link."""
+    lines = [f"<@{ev['uploaderId']}> published **{discord_clean(ev['title'], 200)}** "
+             f"v{discord_clean(ev.get('version'), 50)}"]
+    if ev.get("description"):
+        lines.append(discord_clean(ev["description"], 500))
+    lines.append(site_url or "")
+    return "\n".join(line for line in lines if line)[:2000]
+
+
+def update_content(ev: dict) -> str:
+    """The follow-up message in a mod's existing thread."""
+    lines = [f"<@{ev['uploaderId']}> uploaded **v{discord_clean(ev.get('version'), 50)}**"]
+    if ev.get("description"):
+        lines.append(discord_clean(ev["description"], 500))
+    return "\n".join(lines)[:2000]
+
+
+def thread_id_from_notes(notes: str) -> str | None:
+    """The Discord thread id recorded in a release's notes, if any."""
+    m = THREAD_LINE.search(notes or "")
+    return m.group(1) if m else None
+
+
+def notes_with_thread(notes: str, thread_id: str) -> str:
+    """`notes` with its `discord-thread:` line set to `thread_id` (added when
+    absent; the rest of the text is kept)."""
+    line = f"discord-thread: {thread_id}"
+    if THREAD_LINE.search(notes or ""):
+        return THREAD_LINE.sub(lambda _m: line, notes, count=1)
+    if (notes or "").strip():
+        return notes.rstrip("\n") + "\n\n" + line
+    return line
+
+
+def bad_event(ev) -> str | None:
+    """Why an outcome event cannot be announced; None when it can."""
+    if not isinstance(ev, dict):
+        return "event is not an object"
+    if not isinstance(ev.get("uploaderId"), str) or not ev["uploaderId"]:
+        return "event needs an uploaderId"
+    if ev.get("status") == "published":
+        if not isinstance(ev.get("title"), str) or not ev["title"].strip():
+            return "published event needs a title"
+        if not isinstance(ev.get("identifier"), str) or not ev["identifier"]:
+            return "published event needs an identifier"
+        return None
+    if ev.get("status") == "rejected":
+        return None
+    return "event status is bad"
+
+
+def announce_published(api: DiscordApi, client: PackageClient, ev: dict, env: dict) -> str:
+    """Posts into the mod's thread, or creates it (first publish, or the thread
+    is gone: a 404/403 on the post) and records its id in the release notes.
+    Returns "posted" or "created"."""
+    tag = mod_tag(ev["identifier"])
+    notes = client.release_notes(tag)
+    embeds = [cover_embed(ev.get("coverUrl"), ev["identifier"])]
+    thread = thread_id_from_notes(notes)
+    if thread is not None:
+        try:
+            posted = api.post_message(thread, {
+                "content": update_content(ev), "embeds": embeds,
+                "allowed_mentions": {"parse": [], "users": [ev["uploaderId"]]}})
+            if posted is not None:
+                return "posted"
+        except DiscordError as ex:
+            if ex.status != 403:
+                raise
+    try:
+        tag_map = json.loads(env.get("FORUM_TAG_IDS") or "{}")
+    except ValueError:
+        tag_map = {}
+    created = api.create_thread(
+        discord_clean(ev["title"], 100) or "Untitled mod",
+        publish_content(ev, env.get("SITE_URL", "")), embeds,
+        forum_tag_ids(tag_map if isinstance(tag_map, dict) else {}, ev.get("tags")),
+        [ev["uploaderId"]])
+    thread_id = str(created["id"]) if isinstance(created, dict) and created.get("id") else None
+    if thread_id is None:
+        raise DiscordError("discord thread create returned no id")
+    print(f"  announce: created forum thread {thread_id} for {ev['identifier']}")
+    client.set_release_notes(tag, notes_with_thread(notes, thread_id))
+    return "created"
+
+
+def announce_rejected(api: DiscordApi, ev: dict, env: dict) -> str:
+    """The rejection notice in the notices channel (a log line when none is
+    configured). Returns "posted" or "logged"."""
+    channel = (env.get("NOTICES_CHANNEL_ID") or "").strip()
+    if not channel:
+        print(f"  announce: rejected {ev.get('eventId')} ({ev.get('uploaderName') or ev['uploaderId']}): "
+              f"{ev.get('reason') or 'no reason'}")
+        return "logged"
+    title = discord_clean(ev["title"], 200) if ev.get("title") else "unknown"
+    reason = discord_clean(ev.get("reason") or "no reason", 300)
+    posted = api.post_message(channel, {
+        "content": f"<@{ev['uploaderId']}> your upload of **{title}** was not accepted: {reason}"[:2000],
+        "allowed_mentions": {"parse": [], "users": [ev["uploaderId"]]}})
+    if posted is None:
+        raise DiscordError("notices channel not found (404)")
+    return "posted"
+
+
+def announce_events(client: PackageClient, events: list, env: dict, *,
+                    http=_http_request, sleep=time.sleep) -> tuple[int, int]:
+    """Announces each event; one failing event never stops the others.
+    Returns (announced, total); never raises."""
+    api = DiscordApi((env.get("DISCORD_BOT_TOKEN") or "").strip(),
+                     (env.get("FORUM_CHANNEL_ID") or "").strip(), http, sleep)
+    done = 0
+    for ev in events:
+        try:
+            bad = bad_event(ev)
+            if bad:
+                print(f"  announce: skipped an event: {bad}", file=sys.stderr)
+                continue
+            if ev["status"] == "published":
+                announce_published(api, client, ev, env)
+            else:
+                announce_rejected(api, ev, env)
+            done += 1
         except Exception as ex:
-            last = ex.__class__.__name__  # the secret never appears in a message
-        if attempt == 1:
-            sleep(delay)
-    print(f"  notify: {url} failed after retry: {last}", file=sys.stderr)
-    return False
+            name = ev.get("eventId") if isinstance(ev, dict) else "?"
+            print(f"  announce: event {name} failed: {str(ex)[:200]}", file=sys.stderr)
+    return done, len(events)
 
 
-def notify_events(url: str, secret: str, events: list[dict], *,
-                  delay: float = 2.0, sleep=time.sleep, timeout: int = 60) -> tuple[int, int]:
-    """Sends `events` (chunked, signed) to `url` + /catalog/events.
-    Returns (sent chunks, total chunks); never raises (failures are logged)."""
-    chunks = chunk_events(events)
-    sent = 0
-    for chunk in chunks:
-        payload = json.dumps({"ts": int(time.time()), "events": chunk},
-                            ensure_ascii=False).encode("utf-8")
-        if post_event(url, secret, payload, delay=delay, sleep=sleep, timeout=timeout):
-            sent += 1
-    return sent, len(chunks)
-
-
-def notify_cli(args) -> int:
-    """The `notify` subcommand: exit 0 even on failure (logged)."""
-    url = (args.url or os.environ.get("CATALOG_CALLBACK_URL", "")).strip().rstrip("/")
-    secret = (args.secret or os.environ.get("CATALOG_CALLBACK_SECRET", "")).strip()
-    if not url or not secret:
-        print("notify: CATALOG_CALLBACK_URL / CATALOG_CALLBACK_SECRET not set; nothing to do")
+def announce_cli(args, env=None, http=_http_request, sleep=time.sleep) -> int:
+    """The `announce` subcommand: exit 0 always (problems are logged)."""
+    env = os.environ if env is None else env
+    if not (env.get("DISCORD_BOT_TOKEN") or "").strip() or not (env.get("FORUM_CHANNEL_ID") or "").strip():
+        print("announce: DISCORD_BOT_TOKEN / FORUM_CHANNEL_ID not set; nothing to do")
         return 0
     path = pathlib.Path(args.results)
-    if path.is_file():
-        try:
-            events = json.loads(path.read_text(encoding="utf-8"))
-        except ValueError as ex:
-            print(f"notify: {path} is not valid JSON ({ex}); nothing to do", file=sys.stderr)
-            return 0
-    else:
-        events = []  # a missing results file is a no-op, not a failure
-    if not isinstance(events, list):
-        print(f"notify: {path} is not a JSON array; nothing to do", file=sys.stderr)
+    if not path.is_file():
+        return 0  # a missing results file is a no-op, not a failure
+    try:
+        events = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as ex:
+        print(f"announce: {path} is not valid JSON ({ex}); nothing to do", file=sys.stderr)
         return 0
-    sent, total = notify_events(url, secret, events)
-    print(f"notify: sent {sent}/{total} chunk(s)")
+    if not isinstance(events, list):
+        print(f"announce: {path} is not a JSON array; nothing to do", file=sys.stderr)
+        return 0
+    if not events:
+        return 0
+    owner, repo = resolve_repo(args.owner, args.repo)
+    client = make_client(args, owner, repo)
+    done, total = announce_events(client, events, env, http=http, sleep=sleep)
+    print(f"announce: {done}/{total} event(s) announced")
     return 0
 
 
@@ -1706,6 +1904,17 @@ def downloads_cli(args) -> int:
 # ------------------------------------------------------------------ cli
 
 
+def resolve_repo(owner: str | None, repo: str | None) -> tuple[str, str]:
+    """`owner`, `repo` as given, else from GITHUB_REPOSITORY; exits when unknown."""
+    if not owner or not repo:
+        gr = os.environ.get("GITHUB_REPOSITORY")
+        if gr and "/" in gr:
+            owner, repo = gr.split("/", 1)
+    if not owner or not repo:
+        raise SystemExit("error: owner/repo unknown (set GITHUB_REPOSITORY or pass --owner/--repo)")
+    return owner, repo
+
+
 def make_client(args, owner: str | None, repo: str | None) -> PackageClient:
     if args.client == "local":
         if not args.root:
@@ -1739,14 +1948,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--as-uid", metavar="ID", help="Discord user id the seeded packages belong to")
     p.add_argument("--as-username", metavar="NAME", help="Discord username published as their author")
     p.add_argument("--results-file", metavar="PATH",
-                   help="write the run's outcome events (published/rejected) as a JSON array here, for `notify`")
+                   help="write the run's outcome events (published/rejected) as a JSON array here, for `announce`")
     common(p)
 
     p = sub.add_parser("rebuild", help="regenerate the whole catalog from mod-* releases")
     common(p)
-    p.add_argument("--full", action="store_true",
-                  help="audit mode: validate every package of every release instead of "
-                       "reading only the newest + oldest valid one per release")
 
     p = sub.add_parser("retitle", help="rewrite only the catalog's name/description from the site config")
     p.add_argument("--catalog", default=str(CATALOG_DEFAULT))
@@ -1760,12 +1966,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--catalog", default=str(CATALOG_DEFAULT))
     p.add_argument("--out", default=str(SITE / "downloads.json"))
 
-    p = sub.add_parser("notify", help="POST a results file's events to the Worker (never fails the run)")
+    p = sub.add_parser("announce", help="post a results file's events to Discord (never fails the run)")
     p.add_argument("--results", required=True, help="the results file (a JSON array of events)")
-    p.add_argument("--url", default=None,
-                   help="the Worker origin (default: CATALOG_CALLBACK_URL)")
-    p.add_argument("--secret", default=None,
-                   help="the shared HMAC secret (default: CATALOG_CALLBACK_SECRET)")
+    p.add_argument("--client", choices=("local", "gh"), default="gh")
+    p.add_argument("--root", help="root dir for the local client")
+    p.add_argument("--owner", default=os.environ.get("GITHUB_OWNER"))
+    p.add_argument("--repo", default=os.environ.get("GITHUB_REPO"))
 
     args = ap.parse_args(argv)
     config = pathlib.Path(args.config) if hasattr(args, "config") else None
@@ -1774,25 +1980,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "downloads":
         return downloads_cli(args)
-    if args.cmd == "notify":  # no owner/repo: the callback goes to the Worker
+    if args.cmd == "announce":
         try:
-            return notify_cli(args)
-        except Exception as ex:  # never raise (always exit 0; log the failure)
-            print(f"notify: {ex.__class__.__name__}", file=sys.stderr)
+            return announce_cli(args)
+        except BaseException as ex:  # never raise (always exit 0; log the failure)
+            print(f"announce: {ex.__class__.__name__}: {ex}", file=sys.stderr)
             return 0
-    owner, repo = args.owner, args.repo
-    if not owner or not repo:
-        gr = os.environ.get("GITHUB_REPOSITORY")
-        if gr and "/" in gr:
-            owner, repo = gr.split("/", 1)
-    if not owner or not repo:
-        raise SystemExit("error: owner/repo unknown (set GITHUB_REPOSITORY or pass --owner/--repo)")
+    owner, repo = resolve_repo(args.owner, args.repo)
     admins = {s.strip() for s in os.environ.get("ADMIN_DISCORD_IDS", "").split(",") if s.strip()}
 
     client = make_client(args, owner, repo)
     catalog = pathlib.Path(args.catalog) if hasattr(args, "catalog") else None
     if args.cmd == "rebuild":
-        rebuild(client, owner, repo, catalog, config, full=args.full)
+        rebuild(client, owner, repo, catalog, config)
         return 0
 
     swept: list[dict] = []

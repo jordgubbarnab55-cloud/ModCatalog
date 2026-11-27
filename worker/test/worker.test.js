@@ -1,27 +1,21 @@
 // Offline tests for the ModCatalog Worker (node --test, Node 20+).
 //
-// Fake KV (a Map), injected fetch (records calls), and a generated Ed25519
+// A fake D1, injected fetch (records calls), and a generated Ed25519
 // keypair stand in for Cloudflare/Discord/Github. Nothing touches the
 // network.
 
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { handle, loginLinkUrl } from "../src/index.js";
+import { handle, loginLinkUrl, clearInboxCache } from "../src/index.js";
 import {
-  sha256Hex, peekLoginCode, mintManualToken, mintLoginCode,
+  sha256Hex, mintManualToken, mintLoginCode,
   redeemLoginCode, ASQL,
 } from "../src/auth.js";
 import { FakeD1 } from "./helpers/fake-d1.js";
 
 // ------------------------------------------------------------- fakes
 
-class FakeKV {
-  constructor() { this.map = new Map(); }
-  async get(k) { return this.map.has(k) ? this.map.get(k) : null; }
-  async put(k, v) { this.map.set(k, v); }
-  async delete(k) { this.map.delete(k); }
-  all() { return [...this.map.entries()]; }
-}
+beforeEach(() => clearInboxCache());
 
 function makeFetch(handler) {
   const calls = [];
@@ -76,21 +70,18 @@ async function mintToken(env, kv, fetchImpl, id = "42") {
     data: { name: "token" },
     member: { id, user: { id, username: "alice" } },
   }), env, fetchImpl);
-  assert.equal(res.status, 202, "ACK with no body");
-  const cb = fetchImpl.calls.filter((c) => c.url.includes("/interactions/") && c.url.includes("/callback")).at(-1);
-  assert.ok(cb, "reply sent via the callback endpoint");
-  const content = JSON.parse(cb.init.body).data.content;
+  assert.equal(res.status, 200, "the reply is the response itself");
+  const content = (await res.json()).data.content;
   const m = content.match(/(mm_[A-Za-z0-9_-]+)/);
   assert.ok(m, "token in reply");
   return m[1];
 }
 
+// `kv` is a per-test holder whose `DB` is the shared fake D1.
 function makeEnv(kv, pub, overrides = {}) {
   return {
-    TOKENS: kv,
     DB: overrides.DB || (kv.DB ||= new FakeD1()),
     DISCORD_PUBLIC_KEY: pub,
-    DISCORD_BOT_TOKEN: "bot_test_token",
     GITHUB_TOKEN: "gh_test_token",
     GITHUB_OWNER: "octo",
     GITHUB_REPO: "repo",
@@ -103,27 +94,24 @@ function makeEnv(kv, pub, overrides = {}) {
 
 // ----------------------------------------------------- discord endpoint
 
-test("PING with a valid signature gets PONG via the callback endpoint", async () => {
-  const kv = new FakeKV();
+test("PING with a valid signature gets PONG as the response body", async () => {
   const f = makeFetch();
-  const res = await handle(await discordRequest({ type: 1 }), makeEnv(kv, await publicKeyB64()), f);
-  assert.equal(res.status, 202);
-  assert.equal(await res.text(), "", "ACK has no body");
-  const cb = f.calls.find((c) => c.url.includes("/interactions/") && c.url.includes("/callback"));
-  assert.ok(cb, "PONG sent via the callback endpoint");
-  assert.deepEqual(JSON.parse(cb.init.body), { type: 1 });
-  assert.equal(cb.init.headers.Authorization, "Bot bot_test_token", "the callback is authenticated with the bot token");
+  const res = await handle(await discordRequest({ type: 1 }), makeEnv({}, await publicKeyB64()), f);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("Content-Type"), "application/json");
+  assert.deepEqual(await res.json(), { type: 1 });
+  assert.equal(f.calls.length, 0, "no outbound calls");
 });
 
 test("invalid signature is rejected 401", async () => {
   const res = await handle(await discordRequest({ type: 1 }, { badSig: true }),
-    makeEnv(new FakeKV(), await publicKeyB64()), makeFetch());
+    makeEnv({}, await publicKeyB64()), makeFetch());
   assert.equal(res.status, 401);
 });
 
 test("missing signature headers are rejected 401", async () => {
   const res = await handle(await discordRequest({ type: 1 }, { noSig: true }),
-    makeEnv(new FakeKV(), await publicKeyB64()), makeFetch());
+    makeEnv({}, await publicKeyB64()), makeFetch());
   assert.equal(res.status, 401);
 });
 
@@ -131,23 +119,21 @@ test("wrong public key is rejected 401", async () => {
   const other = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
   const otherPub = Buffer.from(await crypto.subtle.exportKey("raw", other.publicKey)).toString("base64");
   const res = await handle(await discordRequest({ type: 1 }),
-    makeEnv(new FakeKV(), otherPub), makeFetch());
+    makeEnv({}, otherPub), makeFetch());
   assert.equal(res.status, 401);
 });
 
 test("/token mints a token; only the hash is stored; reply is ephemeral", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const db = new FakeD1();
   const fetchImpl = makeFetch();
   const res = await handle(await discordRequest({ type: 2, data: { name: "token" }, member: { id: "42", user: { id: "42", username: "alice" } } }),
     makeEnv(kv, await publicKeyB64(), { DB: db }), fetchImpl);
-  assert.equal(res.status, 202);
-  assert.equal(await res.text(), "", "ACK has no body");
-  const cb = fetchImpl.calls.find((c) => c.url.includes("/interactions/") && c.url.includes("/callback"));
-  const resp = JSON.parse(cb.init.body);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("Content-Type"), "application/json");
+  const resp = await res.json();
   assert.equal(resp.type, 4, "CHANNEL_MESSAGE_WITH_SOURCE");
   assert.equal(resp.data.flags, 64);
-  assert.equal(cb.init.headers.Authorization, "Bot bot_test_token", "the callback is authenticated with the bot token");
   const token = resp.data.content.match(/(mm_[A-Za-z0-9_-]+)/)[1];
   assert.ok(token.startsWith("mm_"));
 
@@ -159,11 +145,11 @@ test("/token mints a token; only the hash is stored; reply is ephemeral", async 
   assert.equal(rows[0].expires_at, null, "a manual token never expires");
   for (const k of Object.keys(rows[0]))
     assert.ok(!String(rows[0][k]).includes(token), "plaintext token never stored");
-  assert.equal(fetchImpl.calls.length, 1, "only the Discord callback call (no GitHub)");
+  assert.equal(fetchImpl.calls.length, 0, "no outbound calls");
 });
 
 test("a second /token invalidates the first", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const db = new FakeD1();
   const env = makeEnv(kv, await publicKeyB64(), { DB: db });
   const fetchImpl = makeFetch();
@@ -180,14 +166,14 @@ test("a second /token invalidates the first", async () => {
 });
 
 test("guild identity: a member object without a top-level id (nested user.id) is accepted", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const db = new FakeD1();
   const res = await handle(await discordRequest({
     type: 2,
     data: { name: "token" },
     member: { user: { id: "77", username: "bob" }, nick: null, roles: [] }, // no top-level `id`
   }), makeEnv(kv, await publicKeyB64(), { DB: db }), makeFetch());
-  assert.equal(res.status, 202);
+  assert.equal(res.status, 200);
   assert.ok(db.tokenRows().some((r) => r.discord_id === "77"), "keyed by the nested user id");
 });
 
@@ -195,13 +181,13 @@ test("guild identity: a member object without a top-level id (nested user.id) is
 
 test("missing token is 401 before any fetch", async () => {
   const f = makeFetch();
-  const res = await handle(uploadRequest(), makeEnv(new FakeKV(), await publicKeyB64()), f);
+  const res = await handle(uploadRequest(), makeEnv({}, await publicKeyB64()), f);
   assert.equal(res.status, 401);
   assert.equal(f.calls.length, 0);
 });
 
 test("wrong token is 401", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const f = makeFetch();
   const res = await handle(uploadRequest({ token: "mm_nope" }), makeEnv(kv, await publicKeyB64()), f);
   assert.equal(res.status, 401);
@@ -209,7 +195,7 @@ test("wrong token is 401", async () => {
 });
 
 test("a minted token is accepted (not 401)", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   const f = makeFetch((url) =>
@@ -223,7 +209,7 @@ test("a minted token is accepted (not 401)", async () => {
 });
 
 test("missing Content-Length is 411", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   const f = makeFetch();
@@ -233,7 +219,7 @@ test("missing Content-Length is 411", async () => {
 });
 
 test("over 100 MB is 413 before any GitHub call", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   const f = makeFetch();
@@ -245,7 +231,7 @@ test("over 100 MB is 413 before any GitHub call", async () => {
 });
 
 test("bad extension is 400", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   const f = makeFetch();
@@ -255,23 +241,144 @@ test("bad extension is 400", async () => {
   assert.equal(f.calls.length, 0);
 });
 
+const TODAY = () => new Date().toISOString().slice(0, 10);
+
 test("daily byte quota is 429 before any fetch", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
-  const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
-  await kv.put("quota:42", JSON.stringify({ date: new Date().toISOString().slice(0, 10), bytes: 1950 }));
+  const env = makeEnv(kv, pub);
+  const token = await mintToken(env, kv, makeFetch());
+  env.DB.quota.set("42", { discord_id: "42", day: TODAY(), bytes: 1950 });
   const f = makeFetch();
-  const res = await handle(uploadRequest({ token, contentLength: 100, filename: "a.zip" }),
-    makeEnv(kv, pub), f);
+  const res = await handle(uploadRequest({ token, contentLength: 100, filename: "a.zip" }), env, f);
   assert.equal(res.status, 429);
   assert.match(await res.text(), /GiB\/day/i);
   assert.equal(f.calls.length, 0);
+  assert.equal(env.DB.quotaRow("42").bytes, 1950, "a refused upload charges nothing");
+});
+
+test("quota: a row from an earlier day restarts at zero", async () => {
+  const kv = {};
+  const pub = await publicKeyB64();
+  const env = makeEnv(kv, pub);
+  const token = await mintToken(env, kv, makeFetch());
+  env.DB.quota.set("42", { discord_id: "42", day: "2000-01-01", bytes: 1999 });
+  const f = makeFetch((url) =>
+    url.includes("releases/tags/inbox") ? Response.json({ id: 7 }) : new Response(null, { status: 201 }));
+  const res = await handle(uploadRequest({
+    token, contentLength: 10, filename: "a.zip",
+    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(10)); c.close(); } }),
+  }), env, f);
+  assert.equal(res.status, 202);
+  assert.deepEqual(env.DB.quotaRow("42"), { discord_id: "42", day: TODAY(), bytes: 10 });
+});
+
+test("quota: a single upload larger than the whole allowance is 429", async () => {
+  const kv = {};
+  const pub = await publicKeyB64();
+  const env = makeEnv(kv, pub);
+  const token = await mintToken(env, kv, makeFetch());
+  const f = makeFetch();
+  const res = await handle(uploadRequest({ token, contentLength: 2001, filename: "a.zip" }), env, f);
+  assert.equal(res.status, 429);
+  assert.equal(env.DB.quotaRow("42"), null);
+  assert.equal(f.calls.length, 0);
+});
+
+test("quota: uploads add up and the one that would overflow is refused", async () => {
+  const kv = {};
+  const pub = await publicKeyB64();
+  const env = makeEnv(kv, pub);
+  const token = await mintToken(env, kv, makeFetch());
+  const f = makeFetch((url) =>
+    url.includes("releases/tags/inbox") ? Response.json({ id: 7 }) : new Response(null, { status: 201 }));
+  const send = (n) => handle(uploadRequest({
+    token, contentLength: n, filename: "a.zip",
+    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(n)); c.close(); } }),
+  }), env, f);
+  assert.equal((await send(1200)).status, 202);
+  assert.equal((await send(800)).status, 202, "exactly at the limit still fits");
+  assert.equal(env.DB.quotaRow("42").bytes, 2000);
+  assert.equal((await send(1)).status, 429);
+});
+
+test("quota: the charge is refunded when GitHub refuses the upload", async () => {
+  const kv = {};
+  const pub = await publicKeyB64();
+  const env = makeEnv(kv, pub);
+  const token = await mintToken(env, kv, makeFetch());
+  const f = makeFetch((url) =>
+    url.includes("releases/tags/inbox") ? Response.json({ id: 7 }) : new Response(null, { status: 500 }));
+  const res = await handle(uploadRequest({
+    token, contentLength: 300, filename: "a.zip",
+    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(300)); c.close(); } }),
+  }), env, f);
+  assert.equal(res.status, 502);
+  assert.equal(env.DB.quotaRow("42").bytes, 0, "refunded");
+});
+
+test("quota: the charge is refunded when the fetch itself throws", async () => {
+  const kv = {};
+  const pub = await publicKeyB64();
+  const env = makeEnv(kv, pub);
+  const token = await mintToken(env, kv, makeFetch());
+  const f = makeFetch((url) => {
+    if (url.includes("releases/tags/inbox")) return Response.json({ id: 7 });
+    throw new Error("network down");
+  });
+  const res = await handle(uploadRequest({
+    token, contentLength: 300, filename: "a.zip",
+    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(300)); c.close(); } }),
+  }), env, f);
+  assert.equal(res.status, 502);
+  assert.equal(env.DB.quotaRow("42").bytes, 0, "refunded");
+});
+
+test("quota: the charge is refunded when the inbox release is missing", async () => {
+  const kv = {};
+  const pub = await publicKeyB64();
+  const env = makeEnv(kv, pub);
+  const token = await mintToken(env, kv, makeFetch());
+  const f = makeFetch(() => new Response(null, { status: 404 }));
+  const res = await handle(uploadRequest({ token, contentLength: 300, filename: "a.zip" }), env, f);
+  assert.equal(res.status, 503);
+  assert.equal(env.DB.quotaRow("42").bytes, 0, "refunded");
+});
+
+test("the inbox release id is looked up once and then held in memory", async () => {
+  const kv = {};
+  const pub = await publicKeyB64();
+  const env = makeEnv(kv, pub);
+  const token = await mintToken(env, kv, makeFetch());
+  const f = makeFetch((url) =>
+    url.includes("releases/tags/inbox") ? Response.json({ id: 7 }) : new Response(null, { status: 201 }));
+  for (let i = 0; i < 3; i++) {
+    const res = await handle(uploadRequest({
+      token, contentLength: 10, filename: "a.zip",
+      body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(10)); c.close(); } }),
+    }), env, f);
+    assert.equal(res.status, 202);
+  }
+  assert.equal(f.calls.filter((c) => c.url.includes("releases/tags/inbox")).length, 1);
+});
+
+test("/auth/peek is not a route", async () => {
+  const res = await handle(new Request("https://worker.local/auth/peek", {
+    method: "POST", body: JSON.stringify({ code: "lc_x" }),
+  }), makeEnv({}, await publicKeyB64()), makeFetch());
+  assert.equal(res.status, 404);
+});
+
+test("/catalog/events is not a route", async () => {
+  const res = await handle(new Request("https://worker.local/catalog/events", { method: "POST", body: "{}" }),
+    makeEnv({}, await publicKeyB64()), makeFetch());
+  assert.equal(res.status, 404);
 });
 
 // --------------------------------------------------- raw file set mode
 
 test("raw file part: name encodes upload id, file idx and part count", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   const f = makeFetch((url) =>
@@ -292,7 +399,7 @@ test("raw file part: name encodes upload id, file idx and part count", async () 
 });
 
 test("raw manifest upload: fixed name, strict headers", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   const f = makeFetch((url) =>
@@ -308,8 +415,10 @@ test("raw manifest upload: fixed name, strict headers", async () => {
   req.headers.set("X-Part-Count", "1");
   const res = await handle(req, makeEnv(kv, pub), f);
   assert.equal(res.status, 202);
+  assert.deepEqual(await res.json(), { status: "queued" });
   const up = f.calls.find((c) => c.url.includes("uploads.github.com"));
   assert.match(up.url, /42-616c696365__abc-123__manifest\.json$/);
+  assert.ok(f.calls.some((c) => c.url.includes("/dispatches")), "the manifest wakes the workflow");
 
   // a manifest with the wrong part headers is rejected
   const bad = uploadRequest({
@@ -324,7 +433,7 @@ test("raw manifest upload: fixed name, strict headers", async () => {
 });
 
 test("raw mode: wrong extension, missing headers, bad part index -> 400 before GitHub", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   const mk = (h) => {
@@ -342,7 +451,7 @@ test("raw mode: wrong extension, missing headers, bad part index -> 400 before G
 });
 
 test("raw mode: a .sig file is part of a set (mod-contract/package-spec.md)", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   const f = makeFetch((url) =>
@@ -361,7 +470,7 @@ test("raw mode: a .sig file is part of a set (mod-contract/package-spec.md)", as
 });
 
 test("raw mode: zip mode still requires .zip and raw mode ignores it", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   const r1 = uploadRequest({ token, contentLength: 10, filename: "archive.txt" });
@@ -381,15 +490,17 @@ test("raw mode: zip mode still requires .zip and raw mode ignores it", async () 
   assert.equal((await handle(r2, makeEnv(kv, pub), f)).status, 202);
 });
 
-// ---------------------------------------- upload sets: .zip + metadata.json
+// ------------------------------------------------- upload sets: parts + manifest
 
 async function setPart({ filename, headers, bytes = 10 }) {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
-  const f = makeFetch((url) =>
-    url.includes("releases/tags/inbox") ? new Response(JSON.stringify({ id: 7 }), { status: 200 })
-    : new Response(null, { status: 201 }));
+  const f = makeFetch((url) => {
+    if (url.includes("releases/tags/inbox")) return new Response(JSON.stringify({ id: 7 }), { status: 200 });
+    if (url.includes("/dispatches")) return new Response(null, { status: 204 });
+    return new Response(null, { status: 201 });
+  });
   const req = uploadRequest({
     token, contentLength: bytes, filename,
     body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(bytes)); c.close(); } }),
@@ -407,24 +518,28 @@ test("upload set: a .zip is a set file (name encodes idx and parts)", async () =
   assert.match(up.url, /42-616c696365__abc-123__f0__p0of1__My-Pack\.zip$/);
 });
 
-test("upload set: metadata.json has a fixed name and strict headers", async () => {
-  const ok = { ...SET, "X-File-Idx": "-2" };
-  const { res, up } = await setPart({ filename: "metadata.json", headers: ok });
+test("upload set: a part answers stored and does not wake the workflow", async () => {
+  const { res, f } = await setPart({ filename: "a.pak", headers: SET });
   assert.equal(res.status, 202);
-  assert.match(up.url, /42-616c696365__abc-123__metadata\.json$/);
+  assert.deepEqual(await res.json(), { status: "stored" });
+  assert.ok(!f.calls.some((c) => c.url.includes("/dispatches")), "no dispatch for a part");
+});
 
-  for (const [filename, headers] of [
-    ["metadata.json", { ...ok, "X-Part-Idx": "1", "X-Part-Count": "2" }],   // not a single part
-    ["metadata.json", { ...ok, "X-Part-Count": "2" }],
-    ["other.json", ok],                                                      // wrong name for idx -2
-    ["mod.pak", ok],
-    ["metadata.json", SET],                                                  // a file index, .json is not a set file
-    ["metadata.json", { "X-Upload-Id": "abc-123", "X-File-Idx": "-2" }],     // missing part headers
-  ]) {
-    const r = await setPart({ filename, headers });
-    assert.equal(r.res.status, 400, `${filename} ${JSON.stringify(headers)}`);
-    assert.equal(r.up, undefined, "rejected before any GitHub call");
-  }
+test("upload set: the manifest answers queued and wakes the workflow once", async () => {
+  const { res, f } = await setPart({
+    filename: "manifest.json", headers: { ...SET, "X-File-Idx": "-1" },
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(await res.json(), { status: "queued" });
+  assert.equal(f.calls.filter((c) => c.url.includes("/dispatches")).length, 1);
+});
+
+test("upload set: there is no metadata upload (X-File-Idx -2 is 400)", async () => {
+  const { res, up } = await setPart({
+    filename: "metadata.json", headers: { ...SET, "X-File-Idx": "-2" },
+  });
+  assert.equal(res.status, 400);
+  assert.equal(up, undefined, "rejected before any GitHub call");
 });
 
 test("zip mode (no upload id) still needs a .zip name and is unaffected by set files", async () => {
@@ -438,7 +553,7 @@ test("file names never carry the __ field separator", async () => {
 });
 
 test("missing inbox release is 503 with a helpful message", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   const f = makeFetch((url) =>
@@ -453,7 +568,7 @@ test("missing inbox release is 503 with a helpful message", async () => {
 });
 
 test("happy path: streams the same body, right headers, dispatch after, 202", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   const body = new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1, 2, 3])); c.close(); } });
@@ -485,11 +600,11 @@ test("happy path: streams the same body, right headers, dispatch after, 202", as
   assert.match(disp.url, /api\.github\.com\/repos\/octo\/repo\/actions\/workflows\/process-inbox\.yml\/dispatches$/);
   assert.deepEqual(JSON.parse(disp.init.body), { ref: "main" });
 
-  assert.equal(JSON.parse(await kv.get("quota:42")).bytes, 3, "quota charged in bytes");
+  assert.equal(kv.DB.quotaRow("42").bytes, 3, "quota charged in bytes");
 });
 
 test("github upload failure is 502 with no dispatch", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   const f = makeFetch((url) => {
@@ -503,13 +618,13 @@ test("github upload failure is 502 with no dispatch", async () => {
   assert.equal(res.status, 502);
   assert.equal(f.calls.length, 2, "lookup + failed upload, no dispatch");
   assert.ok(!f.calls.some((c) => c.url.includes("/dispatches")), "no dispatch after a failed upload");
-  assert.equal(await kv.get("quota:42"), null, "quota not charged on failure");
+  assert.equal(kv.DB.quotaRow("42").bytes, 0, "quota refunded on failure");
 });
 
 test("CORS preflight answers with the allowed origin and headers", async () => {
   const res = await handle(
     new Request("https://worker.local/upload", { method: "OPTIONS" }),
-    makeEnv(new FakeKV(), await publicKeyB64()), makeFetch());
+    makeEnv({}, await publicKeyB64()), makeFetch());
   assert.equal(res.status, 204);
   assert.equal(res.headers.get("Access-Control-Allow-Origin"), "https://pages.example.com");
   assert.equal(res.headers.get("Access-Control-Allow-Methods"), "POST, OPTIONS");
@@ -520,31 +635,31 @@ test("CORS preflight answers with the allowed origin and headers", async () => {
 // ----------------------------------------------- verified author names
 
 test("/token stores the account username, not the display name or nickname", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const db = new FakeD1();
   const res = await handle(await discordRequest({
     type: 2,
     data: { name: "token" },
     member: { nick: "Server Nick", user: { id: "77", username: "carol", global_name: "Carol The Great" } },
   }), makeEnv(kv, await publicKeyB64(), { DB: db }), makeFetch());
-  assert.equal(res.status, 202);
+  assert.equal(res.status, 200);
   assert.deepEqual(
     (({ discord_id, username }) => ({ discordId: discord_id, username }))(db.tokenRows()[0]),
     { discordId: "77", username: "carol" });
 });
 
 test("/token in a DM: the username comes from the top-level user object", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const db = new FakeD1();
   const res = await handle(await discordRequest({
     type: 2, data: { name: "token" }, user: { id: "88", username: "dave" },
   }), makeEnv(kv, await publicKeyB64(), { DB: db }), makeFetch());
-  assert.equal(res.status, 202);
+  assert.equal(res.status, 200);
   assert.equal(db.tokenRows()[0].username, "dave");
 });
 
 test("/token without a username is refused and mints nothing", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const db = new FakeD1();
   const res = await handle(await discordRequest({
     type: 2, data: { name: "token" }, member: { user: { id: "99" } },
@@ -563,7 +678,7 @@ test("loginLinkUrl: the code is a URL fragment; the trailing slash is normalized
 });
 
 async function clickComponent(customId, memberId, username = "alice") {
-  const kv = new FakeKV();
+  const kv = {};
   const db = new FakeD1();
   const fetchImpl = makeFetch();
   const res = await handle(await discordRequest({
@@ -573,16 +688,13 @@ async function clickComponent(customId, memberId, username = "alice") {
   return { res, db, fetchImpl };
 }
 
-test("mods_upload: 202, one callback with an ephemeral link button; the code is valid", async () => {
+test("mods_upload: 200 with an ephemeral link button; the code is valid", async () => {
   const { res, db, fetchImpl } = await clickComponent("mods_upload", "42");
-  assert.equal(res.status, 202);
-  assert.equal(fetchImpl.calls.length, 1, "only the Discord callback call");
-  const cb = fetchImpl.calls[0];
-  assert.ok(cb.url.includes("/interactions/") && cb.url.includes("/callback"));
-  const resp = JSON.parse(cb.init.body);
+  assert.equal(res.status, 200);
+  assert.equal(fetchImpl.calls.length, 0, "no outbound calls");
+  const resp = await res.json();
   assert.equal(resp.type, 4, "CHANNEL_MESSAGE_WITH_SOURCE");
   assert.equal(resp.data.flags, 64, "ephemeral");
-  assert.equal(cb.init.headers.Authorization, "Bot bot_test_token", "the callback is authenticated with the bot token");
   assert.ok(resp.data.content.includes("works once"), "the copy explains the one-time link");
   assert.equal(resp.data.components.length, 1, "one action row");
   const [button] = resp.data.components[0].components;
@@ -593,30 +705,29 @@ test("mods_upload: 202, one callback with an ephemeral link button; the code is 
   const code = button.url.slice("https://pages.example.com/#login=".length);
   assert.equal(db.codeRows().length, 1, "one code row");
   assert.ok(!String(db.codeRows()[0].hash).includes(code), "only the hash is stored");
-  const peek = await peekLoginCode(db, code, new Date());
-  assert.equal(peek.ok, true, "the minted code is valid via peekLoginCode");
-  assert.equal(peek.discordId, "42");
-  assert.equal(peek.username, "alice");
+  const red = await redeemLoginCode(db, code, new Date());
+  assert.equal(red.ok, true, "the minted code redeems");
+  assert.equal(red.discordId, "42");
+  assert.equal(red.username, "alice");
 });
 
 test("mods_upload: a missing username is an ephemeral error and mints nothing", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const db = new FakeD1();
   const fetchImpl = makeFetch();
   const res = await handle(await discordRequest({
     type: 3, data: { custom_id: "mods_upload" }, member: { user: { id: "99" } },
   }), makeEnv(kv, await publicKeyB64(), { DB: db }), fetchImpl);
-  assert.equal(res.status, 202);
-  const cb = fetchImpl.calls[0];
-  const resp = JSON.parse(cb.init.body);
-  assert.equal(resp.type, 4, "an ephemeral reply, not a defer (a type-7 callback would EDIT the public message)");
+  assert.equal(res.status, 200);
+  const resp = await res.json();
+  assert.equal(resp.type, 4, "an ephemeral reply, not a defer (a type-7 response would EDIT the public message)");
   assert.equal(resp.data.flags, 64, "ephemeral error");
   assert.ok(!resp.data.components, "no link button");
   assert.equal(db.codeRows().length, 0, "nothing minted");
 });
 
 test("six rapid clicks: the sixth gets the rate-limit message", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const db = new FakeD1();
   const env = makeEnv(kv, await publicKeyB64(), { DB: db });
   let last;
@@ -626,8 +737,8 @@ test("six rapid clicks: the sixth gets the rate-limit message", async () => {
       type: 3, data: { custom_id: "mods_upload" },
       member: { user: { id: "42", username: "alice" } },
     }), env, f);
-    assert.equal(res.status, 202, `click ${i} ACKs`);
-    last = JSON.parse(f.calls[0].init.body);
+    assert.equal(res.status, 200, `click ${i} answers`);
+    last = await res.json();
   }
   assert.equal(last.type, 4, "the rate-limit reply is an ephemeral reply (never a message edit)");
   assert.equal(last.data.content, "You're clicking too fast, try again in a minute.");
@@ -636,7 +747,7 @@ test("six rapid clicks: the sixth gets the rate-limit message", async () => {
 });
 
 test("mods_signout: deletes every token of the clicker and invalidates unused codes", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const db = new FakeD1();
   const env = makeEnv(kv, await publicKeyB64(), { DB: db });
   // seed state first: a manual + a web token and an unused code for 42,
@@ -655,7 +766,7 @@ test("mods_signout: deletes every token of the clicker and invalidates unused co
     type: 3, data: { custom_id: "mods_signout" },
     member: { user: { id: "42", username: "alice" } },
   }), env, fetchImpl);
-  assert.equal(res.status, 202);
+  assert.equal(res.status, 200);
   const mine = db.tokenRows().filter((r) => r.discord_id === "42");
   assert.equal(mine.length, 0, "all of 42's tokens are gone");
   assert.ok(db.tokenRows().some((r) => r.discord_id === "77" && r.kind === "manual"),
@@ -664,9 +775,8 @@ test("mods_signout: deletes every token of the clicker and invalidates unused co
   assert.ok(codeRows.length > 0 && codeRows.every((r) => r.used_at),
     "42's unused codes are invalidated");
   // the reply: an ephemeral confirmation, no components
-  const cb = fetchImpl.calls[0];
-  const resp = JSON.parse(cb.init.body);
-  assert.equal(resp.type, 4, "an ephemeral reply, not a defer (a type-7 callback would EDIT the public message)");
+  const resp = await res.json();
+  assert.equal(resp.type, 4, "an ephemeral reply, not a defer (a type-7 response would EDIT the public message)");
   assert.equal(resp.data.flags, 64);
   assert.ok(resp.data.content.includes("Signed out everywhere"));
 });
@@ -676,7 +786,7 @@ test("unknown custom ids 400", async () => {
     const r = await handle(await discordRequest({
       type: 3, data: customId == null ? {} : { custom_id: customId },
       member: { user: { id: "42", username: "alice" } },
-    }), makeEnv(new FakeKV(), await publicKeyB64(), { DB: new FakeD1() }), makeFetch());
+    }), makeEnv({}, await publicKeyB64(), { DB: new FakeD1() }), makeFetch());
     assert.equal(r.status, 400, `custom_id ${String(customId)} is 400`);
   }
 });
@@ -687,7 +797,7 @@ function whoamiRequest(token, method = "GET") {
 }
 
 test("GET /whoami: a live token answers its id and username, with CORS", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const f = makeFetch();
   const token = await mintToken(makeEnv(kv, pub), kv, f);
@@ -698,7 +808,7 @@ test("GET /whoami: a live token answers its id and username, with CORS", async (
 });
 
 test("GET /whoami: no, unknown or revoked token is 401", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const f = makeFetch();
   const env = makeEnv(kv, pub);
@@ -709,20 +819,20 @@ test("GET /whoami: no, unknown or revoked token is 401", async () => {
   const res = await handle(whoamiRequest(old), env, f);
   assert.equal(res.status, 401);
   assert.equal(res.headers.get("Access-Control-Allow-Origin"), "https://pages.example.com");
-  assert.equal(f.calls.filter((c) => !c.url.includes("/callback")).length, 0, "no GitHub calls");
+  assert.equal(f.calls.length, 0, "no GitHub calls");
 });
 
 test("CORS preflight for /whoami allows GET and the Authorization header", async () => {
-  const res = await handle(whoamiRequest(null, "OPTIONS"), makeEnv(new FakeKV(), await publicKeyB64()), makeFetch());
+  const res = await handle(whoamiRequest(null, "OPTIONS"), makeEnv({}, await publicKeyB64()), makeFetch());
   assert.equal(res.status, 204);
   assert.equal(res.headers.get("Access-Control-Allow-Origin"), "https://pages.example.com");
   assert.match(res.headers.get("Access-Control-Allow-Methods"), /GET/);
   assert.match(res.headers.get("Access-Control-Allow-Headers"), /Authorization/);
-  assert.equal((await handle(whoamiRequest("x", "POST"), makeEnv(new FakeKV(), await publicKeyB64()), makeFetch())).status, 405);
+  assert.equal((await handle(whoamiRequest("x", "POST"), makeEnv({}, await publicKeyB64()), makeFetch())).status, 405);
 });
 
 test("every inbox asset name is stamped with the hex of the UTF-8 username", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const f0 = makeFetch();
   // an account name with characters sanitizeFilename would mangle and a "__"
@@ -731,9 +841,8 @@ test("every inbox asset name is stamped with the hex of the UTF-8 username", asy
   const res0 = await handle(await discordRequest({
     type: 2, data: { name: "token" }, member: { user: { id: "55", username } },
   }), makeEnv(kv, pub), f0);
-  assert.equal(res0.status, 202);
-  const token = JSON.parse(f0.calls.find((c) => c.url.includes("/callback")).init.body)
-    .data.content.match(/(mm_[A-Za-z0-9_-]+)/)[1];
+  assert.equal(res0.status, 200);
+  const token = (await res0.json()).data.content.match(/(mm_[A-Za-z0-9_-]+)/)[1];
 
   const names = [];
   const f = makeFetch((url) => {
@@ -747,21 +856,19 @@ test("every inbox asset name is stamped with the hex of the UTF-8 username", asy
   }), makeEnv(kv, pub), f);
   assert.equal((await send({ "X-Filename": "pack.zip" })).status, 202);
   assert.equal((await send({ "X-Upload-Id": "u1", "X-Filename": "manifest.json", "X-File-Idx": "-1", "X-Part-Idx": "0", "X-Part-Count": "1" })).status, 202);
-  assert.equal((await send({ "X-Upload-Id": "u1", "X-Filename": "metadata.json", "X-File-Idx": "-2", "X-Part-Idx": "0", "X-Part-Count": "1" })).status, 202);
   assert.equal((await send({ "X-Upload-Id": "u1", "X-Filename": "a.pak", "X-File-Idx": "0", "X-Part-Idx": "0", "X-Part-Count": "1" })).status, 202);
-  assert.equal(names.length, 4);
+  assert.equal(names.length, 3);
   for (const n of names) {
     assert.ok(n.startsWith(`55-${hex}__`), n);
     assert.equal(n.split("__").length >= 3, true);
   }
   assert.match(names[0], /^55-[0-9a-f]+__\d+__pack\.zip$/);
   assert.match(names[1], /__u1__manifest\.json$/);
-  assert.match(names[2], /__u1__metadata\.json$/);
-  assert.match(names[3], /__u1__f0__p0of1__a\.pak$/);
+  assert.match(names[2], /__u1__f0__p0of1__a\.pak$/);
 });
 
 test("the client cannot choose the stamped name: no header is read for it", async () => {
-  const kv = new FakeKV();
+  const kv = {};
   const pub = await publicKeyB64();
   const token = await mintToken(makeEnv(kv, pub), kv, makeFetch());
   let name = null;

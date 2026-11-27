@@ -21,8 +21,9 @@ Conformance:
 - `tests/test_contract.py` fails when the two copies differ (checked only when
   both repos sit side by side) and runs the shared fixtures against
   `trailer.py`, `build.py` and the schema.
-- `worker/test/contract.test.js` runs them against `site/trailer.js` and
-  `site/upload-lib.js`.
+- `worker/test/contract.test.js` runs the read cases against `site/trailer.js`
+  and the raw-set rule against `site/upload-lib.js`. The write cases are covered
+  by `trailer.py` and the C# reference.
 
 ## Trailer format
 
@@ -40,13 +41,15 @@ In this catalog `author` and `identifier` are verified
 
 ## Twins of the C# reference
 
-`trailer.py` (stdlib only) and `site/trailer.js` port the C# reference
-(`QwenWorkspace\io-trailer\`, used by ModManager) exactly:
+`trailer.py` (stdlib only) ports the C# reference
+(`QwenWorkspace\io-trailer\`, used by ModManager) exactly, read and write;
+`site/trailer.js` ports its read path only:
 
 - TOC header parse and `TocEnd`;
 - strict parse at `TocEnd`, then a scan fallback;
-- writes at `TocEnd`: replacing an own trailer, refusing foreign data;
 - the full payload schema;
+- (`trailer.py` only) writes at `TocEnd`: replacing an own trailer, refusing
+  foreign data;
 - `TrailerError` kinds named like the C# `TrailerErrorKind`.
 
 Lockstep is enforced by the shared fixtures
@@ -66,7 +69,7 @@ every stored trailer through `apply_metadata`; the browser never does.
 
 | Contract | Implementations |
 |---|---|
-| Trailer read/write | C# `io-trailer/` (reference), `trailer.py`, `site/trailer.js` |
+| Trailer read/write | C# `io-trailer/` (reference), `trailer.py`; read only: `site/trailer.js` |
 | Catalog reading | C# `ModManager/Net/CatalogParser.cs`, `site/catalog-lib.js` `parseCatalog` |
 | Catalog writing | `build.py` (`entry_from_meta`) |
 | Package shape | C# `PackageRules.cs`, `build.py` (`classify_members`/`classify_raw`), `site/upload-lib.js` (loose sets), `site/zip-lib.js` (zips) |

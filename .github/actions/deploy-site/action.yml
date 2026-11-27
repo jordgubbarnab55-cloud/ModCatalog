@@ -1,0 +1,26 @@
+name: Deploy site to Pages
+
+# The one deploy path: every workflow that publishes the site ends here.
+# Expects a checkout with Python set up and GH_TOKEN in the environment.
+# The deployed catalog.json carries config.json's title and description
+# (`retitle`; nothing is committed), tags.json is the contract's vocabulary,
+# and downloads.json holds fresh counts. A failed count refresh never blocks
+# a deploy; the page then hides the counts until the next one.
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare generated site files
+      shell: bash
+      run: |
+        cp mod-contract/tags.json site/tags.json
+        python build.py retitle
+        python build.py downloads || echo "::warning::download counts not refreshed"
+
+    - name: Upload site artifact
+      uses: actions/upload-pages-artifact@v4
+      with:
+        path: site
+
+    - name: Deploy to GitHub Pages
+      uses: actions/deploy-pages@v4
